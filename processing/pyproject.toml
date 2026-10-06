@@ -1,0 +1,27 @@
+[project]
+name = "sbv-processing"
+version = "0.1.0"
+description = "SportsBallVideo processing pipeline: sync, stitch, track, render"
+license = "AGPL-3.0-only"
+requires-python = ">=3.11"
+dependencies = [
+    "av>=12",
+    "numpy>=1.26",
+    "opencv-python-headless>=4.10",
+    "scipy>=1.13",
+    "torch>=2.4",
+]
+
+[project.optional-dependencies]
+# Detector backends. Keep at least one Apache-2.0 backend working; see
+# docs/LICENSING.md rule 5.
+ultralytics = ["ultralytics>=8.3"]   # AGPL-3.0
+rfdetr = ["rfdetr>=1.2"]             # Apache-2.0
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
