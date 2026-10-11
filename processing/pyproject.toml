@@ -1,7 +1,7 @@
 [project]
-name = "sbv-processing"
+name = "osb-processing"
 version = "0.1.0"
-description = "SportsBallVideo processing pipeline: sync, stitch, track, render"
+description = "OpenSportsBall processing pipeline: sync, stitch, track, render"
 license = "AGPL-3.0-only"
 requires-python = ">=3.11"
 dependencies = [

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The SportsBallVideo Authors
+# SPDX-FileCopyrightText: 2026 The OpenSportsBall Authors
 # SPDX-License-Identifier: AGPL-3.0-only
 """Detector registry. Backends are imported lazily so an install only needs
 the optional dependency for the backend it actually uses."""

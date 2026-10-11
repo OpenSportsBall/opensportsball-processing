@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The SportsBallVideo Authors
+# SPDX-FileCopyrightText: 2026 The OpenSportsBall Authors
 # SPDX-License-Identifier: AGPL-3.0-only
 """Detector interface.
 
