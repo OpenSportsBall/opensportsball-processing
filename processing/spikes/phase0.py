@@ -15,6 +15,14 @@ Syncs each segment pair by audio, calibrates a stitch from segment 0, and
 writes report.json, a stitched still and a short stitched preview (from
 the given Main time in segment 0) to <recording>/phase0/. Prototype only;
 the pipeline proper goes in osb_processing once this works on real games.
+
+Stitching uses OpenCV's panorama stitcher, which estimates each camera's
+focal length and rotation from the matches. The phones' reported field of
+view isn't used: on the first field clip the Pixel 11 Pro's (108.8 deg)
+was ~5 deg wider than the frame it recorded.
+
+The cameras are estimated once and reused for every frame, which assumes
+the phones stay fixed relative to each other on the mount.
 """
 
 from __future__ import annotations
@@ -30,7 +38,7 @@ import numpy as np
 FS = 48_000          # audio sample rate used for sync
 PREVIEW_W = 960      # width of each phone's frame in the preview
 PREVIEW_SECONDS = 12
-CALIB_FRAMES = 12    # frame pairs sampled for the stitch
+CALIB_FRAMES = 8     # frame pairs tried for the stitch calibration
 
 
 # ---------------------------------------------------------------- media io
@@ -53,12 +61,13 @@ def load_audio(path: Path) -> np.ndarray:
 
 
 def frames_at(path: Path, start: float, count: int, fps: float,
-              width: int) -> list[np.ndarray]:
+              width: int, rotate180: bool = False) -> list[np.ndarray]:
     """`count` BGR frames resampled to constant `fps` from file time `start`."""
     height = round(width * 9 / 16 / 2) * 2
+    vf = ("hflip,vflip," if rotate180 else "") + f"fps={fps},scale={width}:{height}"
     raw = subprocess.run(
         ["ffmpeg", "-v", "error", "-ss", f"{start:.4f}", "-i", str(path),
-         "-vf", f"fps={fps},scale={width}:{height}", "-frames:v", str(count),
+         "-vf", vf, "-frames:v", str(count),
          "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
         check=True, capture_output=True).stdout
     n = len(raw) // (width * height * 3)
@@ -129,101 +138,38 @@ def sync(main_audio: np.ndarray, sec_audio: np.ndarray, guess_s: float) -> dict:
 
 # ------------------------------------------------------------------ stitch
 
-def to_cylinder(img: np.ndarray, fov_deg: float):
-    """Project onto a cylinder whose radius is the focal length in pixels."""
-    h, w = img.shape[:2]
-    f = (w / 2) / np.tan(np.radians(fov_deg) / 2)
-    cx, cy = w / 2, h / 2
-    theta_max = np.arctan(cx / f)
-    out_w = int(2 * f * theta_max)
-    xs = (np.arange(out_w) - out_w / 2) / f              # theta
-    ys = np.arange(h) - cy                                # height on cylinder
-    theta, hh = np.meshgrid(xs, ys)
-    map_x = (f * np.tan(theta) + cx).astype(np.float32)
-    map_y = (hh / np.cos(theta) + cy).astype(np.float32)
-    warped = cv2.remap(img, map_x, map_y, cv2.INTER_LINEAR,
-                       borderMode=cv2.BORDER_CONSTANT)
-    mask = cv2.remap(np.full((h, w), 255, np.uint8), map_x, map_y,
-                     cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT)
-    return warped, mask
+def upside_down(frame: np.ndarray) -> bool:
+    """True if the frame shows the field at the top: a phone mounted
+    rotated 180 degrees. The file carries no rotation, so look for turf."""
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    turf = (hsv[..., 0] > 30) & (hsv[..., 0] < 95) & (hsv[..., 1] > 50)
+    half = turf.shape[0] // 2
+    return bool(turf[:half].mean() > turf[half:].mean())
 
 
-def match(a: np.ndarray, b: np.ndarray, sift) -> tuple[np.ndarray, np.ndarray]:
-    ka, da = sift.detectAndCompute(cv2.cvtColor(a, cv2.COLOR_BGR2GRAY), None)
-    kb, db = sift.detectAndCompute(cv2.cvtColor(b, cv2.COLOR_BGR2GRAY), None)
-    if da is None or db is None:
-        return np.empty((0, 2)), np.empty((0, 2))
-    pairs = cv2.BFMatcher().knnMatch(db, da, k=2)
-    good = [m for m, n in (p for p in pairs if len(p) == 2)
-            if m.distance < 0.7 * n.distance]
-    pb = np.float32([kb[m.queryIdx].pt for m in good])
-    pa = np.float32([ka[m.trainIdx].pt for m in good])
-    return pb, pa
+def calibrate(pairs: list[tuple[np.ndarray, np.ndarray]]):
+    """A stitcher whose cameras are estimated from one frame pair.
 
-
-def calibrate(main_frames, sec_frames, main_fov, sec_fov) -> dict:
-    """Homography mapping Secondary's cylinder image into Main's.
-
-    Pools matches from every sampled pair so moving players don't dominate,
-    then one RANSAC fit.
+    Estimates on every pair, then keeps the pair whose focal lengths are
+    closest to the median, since a single pair can be thrown off by
+    players crowding the overlap.
     """
-    sift = cv2.SIFT_create(nfeatures=4000)
-    src, dst = [], []
-    for m, s in zip(main_frames, sec_frames):
-        cm, _ = to_cylinder(m, main_fov)
-        cs, _ = to_cylinder(s, sec_fov)
-        pb, pa = match(cm, cs, sift)
-        src.append(pb)
-        dst.append(pa)
-    src, dst = np.concatenate(src), np.concatenate(dst)
-    if len(src) < 8:
-        return {"ok": False, "matches": int(len(src)), "inliers": 0}
-    H, inl = cv2.findHomography(src, dst, cv2.RANSAC, 4.0)
-    inliers = int(inl.sum()) if inl is not None else 0
-    ok = H is not None and inliers >= 40
-    side = None
-    if ok:
-        # Where Secondary's centre lands relative to Main's centre.
-        w = main_frames[0].shape[1]
-        c = cv2.perspectiveTransform(np.float32([[[w / 2, w * 9 / 32]]]), H)[0, 0]
-        side = "right" if c[0] > w / 2 else "left"
-    return {"ok": bool(ok), "matches": int(len(src)), "inliers": inliers,
-            "H": H.tolist() if H is not None else None,
-            "secondarySide": side}
-
-
-def compose(m, s, H, main_fov, sec_fov, gain=None):
-    """Blend Main and the warped Secondary on a canvas covering both."""
-    cm, mm = to_cylinder(m, main_fov)
-    cs, ms = to_cylinder(s, sec_fov)
-    H = np.asarray(H)
-    h, w = cs.shape[:2]
-    corners = cv2.perspectiveTransform(
-        np.float32([[[0, 0]], [[w, 0]], [[w, h]], [[0, h]]]), H).reshape(-1, 2)
-    allpts = np.vstack([corners, [[0, 0], [cm.shape[1], cm.shape[0]]]])
-    x0, y0 = np.floor(allpts.min(0)).astype(int)
-    x1, y1 = np.ceil(allpts.max(0)).astype(int)
-    T = np.array([[1, 0, -x0], [0, 1, -y0], [0, 0, 1]], float)
-    size = (int(x1 - x0), int(y1 - y0))
-    if size[0] > 6 * cm.shape[1] or size[1] > 4 * cm.shape[0]:
-        raise ValueError(f"degenerate stitch, canvas {size}")
-    wm = cv2.warpPerspective(cm, T, size)
-    wmm = cv2.warpPerspective(mm, T, size)
-    ws = cv2.warpPerspective(cs, T @ H, size)
-    wms = cv2.warpPerspective(ms, T @ H, size)
-    overlap = (wmm > 0) & (wms > 0)
-    if gain is None:
-        # Match Secondary's brightness to Main's in the overlap, per channel.
-        gain = np.ones(3)
-        if overlap.sum() > 1000:
-            gain = (wm[overlap].mean(0) + 1) / (ws[overlap].mean(0) + 1)
-    ws = np.clip(ws * gain, 0, 255).astype(np.uint8)
-    # Feather: weight by distance to each image's edge.
-    dm = cv2.distanceTransform(wmm, cv2.DIST_L2, 5)
-    ds = cv2.distanceTransform(wms, cv2.DIST_L2, 5)
-    alpha = (dm / (dm + ds + 1e-6))[..., None]
-    out = (wm * alpha + ws * (1 - alpha)).astype(np.uint8)
-    return out, gain, float(overlap.mean())
+    fits = []
+    for m, s in pairs:
+        st = cv2.Stitcher_create(cv2.Stitcher_PANORAMA)
+        if st.estimateTransform([s, m]) == cv2.Stitcher_OK:
+            fits.append(([s, m], [c.focal for c in st.cameras()], st))
+    if not fits:
+        return None, {"ok": False, "pairsTried": len(pairs), "pairsOk": 0}
+    med = np.median([f for _, f, _ in fits], axis=0)
+    images, focals, st = min(fits, key=lambda x: np.abs(np.subtract(x[1], med)).sum())
+    yaw = [float(np.degrees(cv2.Rodrigues(c.R.astype(np.float64))[0][1, 0]))
+           for c in st.cameras()]
+    return st, {"ok": True, "pairsTried": len(pairs), "pairsOk": len(fits),
+                "focalPx": [round(f, 1) for f in focals],
+                "focalSpreadPx": [round(float(x), 1) for x in np.ptp([f for _, f, _ in fits], axis=0)],
+                "angleBetweenDeg": round(abs(yaw[1] - yaw[0]), 1),
+                "secondarySide": "left" if yaw[0] < yaw[1] else "right"}
 
 
 # -------------------------------------------------------------------- main
@@ -265,8 +211,6 @@ def main(rec: Path, preview_at: float | None) -> None:
     manifest = json.loads((rec / "manifest.json").read_text())
     devs = {d["role"]: d for d in manifest["devices"]}
     main_d, sec_d = devs["main"], devs["secondary"]
-    main_fov = main_d["video"]["horizontalFovDeg"]
-    sec_fov = sec_d["video"]["horizontalFovDeg"]
     out = rec / "phase0"
     out.mkdir(exist_ok=True)
     report: dict = {"recording": manifest["sessionId"], "segments": []}
@@ -292,41 +236,47 @@ def main(rec: Path, preview_at: float | None) -> None:
     dur = min(pairs[0][0]["durationMs"], pairs[0][1]["durationMs"]) / 1000 - abs(d) - 1
     t_main0 = max(0.0, -d) + 0.5
     times = np.linspace(t_main0, t_main0 + dur - 0.5, CALIB_FRAMES)
-    mf, sf = [], []
-    for t in times:
-        mf += frames_at(main_f, t, 1, 30, PREVIEW_W)
-        sf += frames_at(sec_f, t + d, 1, 30, PREVIEW_W)
-    cal = calibrate(mf, sf, main_fov, sec_fov)
-    report["calibration"] = {k: v for k, v in cal.items() if k != "H"}
-    print(f"stitch: {cal['inliers']} inliers of {cal['matches']} matches"
-          f" -> {'ok' if cal['ok'] else 'FAILED'}"
-          + (f", Secondary on the {cal['secondarySide']}" if cal["ok"] else ""))
+    # Each phone records which way up it was; older recordings don't, so
+    # guess from the picture. Only 0 and 180 occur with the app's fixed
+    # landscape orientation.
+    flip, source = [], []
+    for dev, f in ((main_d, main_f), (sec_d, sec_f)):
+        rot = (dev.get("orientation") or {}).get("uprightRotationDeg")
+        flip.append(rot == 180 if rot is not None else
+                    upside_down(frames_at(f, times[len(times) // 2], 1, 30, PREVIEW_W)[0]))
+        source.append("manifest" if rot is not None else "picture")
+    report["upsideDown"] = {"main": flip[0], "secondary": flip[1], "from": source}
+    cal_pairs = [(frames_at(main_f, t, 1, 30, PREVIEW_W, flip[0])[0],
+                  frames_at(sec_f, t + d, 1, 30, PREVIEW_W, flip[1])[0]) for t in times]
+    st, cal = calibrate(cal_pairs)
+    report["calibration"] = cal
+    print(f"upside down: main {flip[0]}, secondary {flip[1]} (from {'/'.join(source)})")
+    print("stitch: " + (f"ok on {cal['pairsOk']}/{cal['pairsTried']} pairs, focal {cal['focalPx']} px"
+                        f" (spread {cal['focalSpreadPx']}), {cal['angleBetweenDeg']} deg apart,"
+                        f" Secondary on the {cal['secondarySide']}" if cal["ok"] else "FAILED"))
 
-    mid = len(mf) // 2
-    cv2.imwrite(str(out / "side_by_side.jpg"), np.hstack([mf[mid], sf[mid]]))
-    if cal["ok"]:
-        try:
-            pano, gain, ov = compose(mf[mid], sf[mid], cal["H"], main_fov, sec_fov)
-            report["calibration"]["overlapFraction"] = round(ov, 3)
+    m0, s0 = cal_pairs[len(cal_pairs) // 2]
+    cv2.imwrite(str(out / "side_by_side.jpg"), np.hstack([m0, s0]))
+    if st is not None:
+        status, pano = st.composePanorama([s0, m0])
+        if status == cv2.Stitcher_OK:
             cv2.imwrite(str(out / "stitched.jpg"), pano)
-            n = int(min(PREVIEW_SECONDS, dur) * 30)
-            t_prev = t_main0 if preview_at is None else min(max(preview_at, t_main0),
-                                                            t_main0 + dur - n / 30)
-            report["previewStartS"] = round(t_prev, 2)
-            m_seq = frames_at(main_f, t_prev, n, 30, PREVIEW_W)
-            s_seq = frames_at(sec_f, t_prev + d, n, 30, PREVIEW_W)
-            enc = None
-            for a, b in zip(m_seq, s_seq):
-                p, _, _ = compose(a, b, cal["H"], main_fov, sec_fov, gain)
-                if enc is None:
-                    enc = Encoder(out / "stitched_preview.mp4", (p.shape[1], p.shape[0]))
-                enc.write(p)
-            if enc:
-                enc.close()
-        except ValueError as e:
-            report["calibration"]["ok"] = False
-            report["calibration"]["error"] = str(e)
-            print(f"stitch: {e}")
+        n = int(min(PREVIEW_SECONDS, dur) * 30)
+        t_prev = t_main0 if preview_at is None else min(max(preview_at, t_main0),
+                                                        t_main0 + dur - n / 30)
+        report["previewStartS"] = round(t_prev, 2)
+        m_seq = frames_at(main_f, t_prev, n, 30, PREVIEW_W, flip[0])
+        s_seq = frames_at(sec_f, t_prev + d, n, 30, PREVIEW_W, flip[1])
+        enc = None
+        for a, b in zip(m_seq, s_seq):
+            status, p = st.composePanorama([b, a])
+            if status != cv2.Stitcher_OK:
+                continue
+            if enc is None:
+                enc = Encoder(out / "stitched_preview.mp4", (p.shape[1], p.shape[0]))
+            enc.write(p)
+        if enc:
+            enc.close()
 
     (out / "report.json").write_text(json.dumps(report, indent=2))
     print(f"wrote {out}")
