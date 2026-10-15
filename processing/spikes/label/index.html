@@ -1,0 +1,446 @@
+<!doctype html>
+<!-- SPDX-FileCopyrightText: 2026 The OpenSportsBall Authors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ball labelling</title>
+<style>
+  :root {
+    --bg: #15171a; --panel: #1f2226; --text: #e8eaed; --muted: #9aa0a6; --line: #33373c;
+    --accent: #4fc3f7; --ball: #ff5252; --cand: #ffd54f; --ok: #81c784;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 -apple-system, system-ui, sans-serif; }
+  header { display: flex; gap: 16px; align-items: center; padding: 8px 16px; background: var(--panel);
+           border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  header b { font-size: 15px; }
+  .bar { flex: 1; min-width: 160px; height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
+  .bar > div { height: 100%; background: var(--ok); width: 0; }
+  .muted { color: var(--muted); }
+  #pano-wrap { padding: 12px 12px 4px; }
+  #pano { width: 100%; display: block; border-radius: 4px; cursor: crosshair; background: #000; }
+  #msg { min-height: 1.4em; color: var(--cand); font-size: 13px; padding: 4px 12px 0; }
+  main { display: flex; gap: 12px; padding: 8px 12px 12px; align-items: flex-start; flex-wrap: wrap; }
+  .views { display: flex; gap: 12px; flex-wrap: wrap; }
+  .view { display: flex; flex-direction: column; gap: 6px; width: 400px; }
+  .view canvas { width: 400px; height: 400px; image-rendering: pixelated; background: #000; border-radius: 4px; cursor: crosshair; }
+  .view .title { font-weight: 600; }
+  .status { font-weight: 600; }
+  .status.ball { color: var(--ball); } .status.none { color: var(--muted); } .status.unsure { color: var(--cand); }
+  aside { flex: 1; min-width: 300px; display: flex; flex-direction: column; gap: 10px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; }
+  kbd { background: var(--line); border-radius: 3px; padding: 0 5px; font: 12px ui-monospace, monospace; }
+  ul { margin: 4px 0 0; padding-left: 18px; } li { margin: 2px 0; }
+  .buttons { display: flex; gap: 6px; flex-wrap: wrap; }
+  button { background: var(--line); color: var(--text); border: 0; border-radius: 4px; padding: 6px 10px; cursor: pointer; font: inherit; }
+  button:hover { background: #454a50; }
+  @media (max-width: 900px) { .view, .view canvas { width: min(400px, calc(100vw - 24px)); height: auto; } .view canvas { aspect-ratio: 1; } }
+</style>
+</head>
+<body>
+<header>
+  <b>Ball labelling</b>
+  <span id="pos" class="muted"></span>
+  <div class="bar"><div id="progress"></div></div>
+  <span id="counts" class="muted"></span>
+</header>
+<div id="pano-wrap"><canvas id="pano"></canvas></div>
+<div id="msg"></div>
+<main>
+  <div class="views" id="views"></div>
+  <aside>
+    <div class="card">
+      <div id="info"></div>
+      <div id="cands" class="muted"></div>
+    </div>
+    <div class="card buttons">
+      <button data-act="none">No match ball <kbd>N</kbd></button>
+      <button data-act="unsure">Unsure <kbd>U</kbd></button>
+      <button data-act="clear">Clear <kbd>⌫</kbd></button>
+      <button data-act="prev">← Prev</button>
+      <button data-act="next">Next →</button>
+      <button data-act="skip">Next unlabelled <kbd>Space</kbd></button>
+    </div>
+    <div class="card muted">
+      <ul>
+        <li>The panorama shows both phones at this moment. Move over it and the magnifiers follow; click to pin them,
+            <kbd>Esc</kbd> to unpin. Single-phone frames are outlined in blue.</li>
+        <li>Mark <b>every</b> ball you can see. <b>Click</b> in a magnifier: the match ball in that phone (red).
+            <b>Shift-click</b>: another ball not in play (orange); again to remove it.</li>
+        <li>If the match ball is outside the other phone's view, that phone is set to "no match ball" for you.
+            In the overlap, mark it in both, or <kbd>N</kbd> where it's hidden.</li>
+        <li><kbd>1</kbd>–<kbd>9</kbd>: that suggestion (yellow) is the match ball (also in the other phone if it
+            suggested the same spot). <kbd>Shift</kbd>+number: it is another ball.</li>
+        <li>Suggestions at spots you passed over before are hidden: <kbd>H</kbd> shows them (grey). Dashed orange
+            rings are spare balls you marked elsewhere: <kbd>O</kbd> marks them here.</li>
+        <li><kbd>→</kbd> / <kbd>Enter</kbd> next. <kbd>N</kbd> no match ball (in phones not yet marked),
+            <kbd>U</kbd> can't tell.</li>
+      </ul>
+    </div>
+  </aside>
+</main>
+<script>
+const ZOOM_SRC = 200;     // full-resolution pixels across a magnifier
+const SPOT_R = 20;        // suggestions this close to a known spot are hidden
+const SAME_SPOT_PANO = 8; // panorama px: two phones' suggestions at one spot
+
+let items = [], labels = {}, idx = 0, maps = null, panoImg = new Image();
+let pinned = null, hover = null, showHidden = false;  // pinned/hover: panorama point {u, v}
+const pc = document.getElementById('pano'), pctx = pc.getContext('2d');
+const views = document.getElementById('views');
+let viewEls = [];  // per frame of the current item: {frame, canvas, ctx, img, title, status}
+
+// ---------------------------------------------------------------- geometry
+
+// Bilinear lookup in a coarse grid ([row][col], -1 = not visible).
+function lookup(gx, gy, step, u, v) {
+  const c = u / step, r = v / step, c0 = Math.floor(c), r0 = Math.floor(r);
+  if (r0 < 0 || c0 < 0 || r0 + 1 >= gx.length || c0 + 1 >= gx[0].length) return null;
+  const fc = c - c0, fr = r - r0, out = [0, 0];
+  for (const [g, k] of [[gx, 0], [gy, 1]]) {
+    const a = g[r0][c0], b = g[r0][c0 + 1], cc = g[r0 + 1][c0], d = g[r0 + 1][c0 + 1];
+    if (Math.min(a, b, cc, d) < 0) return null;
+    out[k] = (a * (1 - fc) + b * fc) * (1 - fr) + (cc * (1 - fc) + d * fc) * fr;
+  }
+  return { x: out[0], y: out[1] };
+}
+const toFrame = (phone, u, v) => lookup(maps[phone].toFrameX, maps[phone].toFrameY, maps.panoStep, u, v);
+function toPano(phone, x, y) {
+  const q = lookup(maps[phone].toPanoX, maps[phone].toPanoY, maps.frameStep, x, y);
+  return q && { u: q.x, v: q.y };
+}
+
+// ------------------------------------------------------------------ labels
+
+// Every ball in a label, old ({x, y}) or new ({balls}) form.
+function ballsOf(lab) {
+  if (!lab) return [];
+  if (lab.balls) return lab.balls;
+  return lab.status === 'ball' && lab.x != null ? [{ x: lab.x, y: lab.y, inPlay: true }] : [];
+}
+const matchOf = f => ballsOf(labels[f.id]).find(b => b.inPlay);
+const itemDone = it => it.frames.every(f => labels[f.id]);
+
+async function save(f, lab) {
+  if (lab) labels[f.id] = lab; else delete labels[f.id];
+  await fetch('/labels/' + encodeURIComponent(f.id), { method: 'POST', body: JSON.stringify(lab || {}) });
+}
+
+// ------------------------------------------------------------ known spots
+
+// The camera is fixed, so figments (paint marks, lights, spare balls) recur
+// at the same pixels: suggestions near a spot passed over in another frame of
+// the same phone are hidden; spots marked "other ball" elsewhere are hinted.
+function knownSpots(phone, exceptId) {
+  const rejected = [], spares = [];
+  for (const it of items) for (const f of it.frames) {
+    if (f.phone !== phone || f.id === exceptId || !labels[f.id]) continue;
+    const all = ballsOf(labels[f.id]), match = all.filter(b => b.inPlay);
+    for (const c of f.candidates)
+      if (!match.some(b => Math.hypot(b.x - c.x, b.y - c.y) < 15)) rejected.push(c);
+    for (const b of all)
+      if (!b.inPlay && !spares.some(s => Math.hypot(s.x - b.x, s.y - b.y) < SPOT_R)) spares.push(b);
+  }
+  return { rejected, spares };
+}
+
+// Suggestions of the current item: visible ones numbered across its frames.
+function suggestions() {
+  const out = { visible: [], hidden: [], spares: [] };
+  for (const f of items[idx].frames) {
+    const { rejected, spares } = knownSpots(f.phone, f.id);
+    const seen = c => rejected.concat(spares).some(r => Math.hypot(r.x - c.x, r.y - c.y) < SPOT_R);
+    for (const c of f.candidates) (seen(c) ? out.hidden : out.visible).push({ ...c, frame: f });
+    for (const s of spares) out.spares.push({ ...s, frame: f });
+  }
+  return out;
+}
+
+// --------------------------------------------------------------- actions
+
+// After the match ball is placed in frame `f` at pano point `p`: any other
+// unlabelled frame that can't see that point gets "no match ball".
+async function completeOthers(f, p) {
+  const msg = [];
+  for (const g of items[idx].frames) {
+    if (g === f || labels[g.id]) continue;
+    if (p && !toFrame(g.phone, p.u, p.v)) {
+      await save(g, { status: 'none', balls: ballsOf(labels[g.id]).filter(b => !b.inPlay) });
+    } else {
+      msg.push(`Also mark it in the ${g.phone} view, or N if it's hidden there.`);
+    }
+  }
+  setMsg(msg.join(' '));
+}
+
+async function setMatchBall(f, x, y) {
+  const balls = ballsOf(labels[f.id]).filter(b => !b.inPlay);
+  balls.push({ x, y, inPlay: true });
+  await save(f, { status: 'ball', balls });
+  await completeOthers(f, toPano(f.phone, x, y));
+  render();
+}
+
+async function toggleOtherBall(f, x, y) {
+  const lab = labels[f.id];
+  const balls = ballsOf(lab);
+  const near = balls.findIndex(b => !b.inPlay && Math.hypot(b.x - x, b.y - y) < 12);
+  if (near >= 0) balls.splice(near, 1); else balls.push({ x, y, inPlay: false });
+  const status = lab ? lab.status : 'none';
+  await save(f, { status: balls.some(b => b.inPlay) ? 'ball' : (status === 'ball' ? 'none' : status), balls });
+  render();
+}
+
+// A suggestion is the match ball; the same spot in the other phone too.
+async function acceptSuggestion(c) {
+  const p = toPano(c.frame.phone, c.x, c.y);
+  for (const g of items[idx].frames) {
+    if (g === c.frame || !p) continue;
+    const twin = g.candidates.find(d => { const q = toPano(g.phone, d.x, d.y);
+      return q && Math.hypot(q.u - p.u, q.v - p.v) < SAME_SPOT_PANO; });
+    if (twin && !matchOf(g)) {
+      const balls = ballsOf(labels[g.id]).filter(b => !b.inPlay);
+      balls.push({ x: twin.x, y: twin.y, inPlay: true });
+      await save(g, { status: 'ball', balls });
+    }
+  }
+  await setMatchBall(c.frame, c.x, c.y);
+  if (itemDone(items[idx])) show(idx + 1);
+}
+
+async function markSpares() {
+  for (const f of items[idx].frames) {
+    const lab = labels[f.id], balls = ballsOf(lab);
+    for (const s of knownSpots(f.phone, f.id).spares)
+      if (!balls.some(b => Math.hypot(b.x - s.x, b.y - s.y) < 12)) balls.push({ x: s.x, y: s.y, inPlay: false });
+    const status = lab ? lab.status : 'none';
+    await save(f, { status: balls.some(b => b.inPlay) ? 'ball' : status, balls });
+  }
+  render();
+}
+
+async function setStatusAll(status, onlyUnmarked) {
+  for (const f of items[idx].frames) {
+    if (onlyUnmarked && matchOf(f)) continue;
+    await save(f, { status, balls: ballsOf(labels[f.id]).filter(b => !b.inPlay) });
+  }
+  show(idx + 1);
+}
+
+async function clearAll() {
+  for (const f of items[idx].frames) await save(f, null);
+  render();
+}
+
+function nextUnlabelled() {
+  for (let k = 1; k <= items.length; k++) {
+    const j = (idx + k) % items.length;
+    if (!itemDone(items[j])) return show(j);
+  }
+}
+
+// --------------------------------------------------------------- drawing
+
+function cross(ctx, x, y, r, colour) {
+  ctx.strokeStyle = colour; ctx.lineWidth = 2 * devicePixelRatio;
+  ctx.beginPath(); ctx.moveTo(x - r, y); ctx.lineTo(x + r, y); ctx.moveTo(x, y - r); ctx.lineTo(x, y + r); ctx.stroke();
+  ctx.beginPath(); ctx.arc(x, y, r * 0.6, 0, 2 * Math.PI); ctx.stroke();
+}
+function ring(ctx, x, y, r, colour, dash, label) {
+  ctx.setLineDash(dash ? [4, 3] : []);
+  ctx.strokeStyle = colour; ctx.lineWidth = 1.5 * devicePixelRatio;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, 2 * Math.PI); ctx.stroke();
+  ctx.setLineDash([]);
+  if (label) { ctx.fillStyle = colour; ctx.font = `${12 * devicePixelRatio}px system-ui`; ctx.fillText(label, x + r + 2, y - r); }
+}
+
+function sizePano() {
+  const w = pc.clientWidth;
+  pc.width = w * devicePixelRatio;
+  pc.height = Math.round(w * maps.panoHeight / maps.panoWidth) * devicePixelRatio;
+  pc.style.height = Math.round(w * maps.panoHeight / maps.panoWidth) + 'px';
+}
+
+function drawPano(sg) {
+  const s = pc.width / maps.panoWidth, d = devicePixelRatio;
+  pctx.fillStyle = '#000'; pctx.fillRect(0, 0, pc.width, pc.height);
+  if (panoImg.complete && panoImg.width) pctx.drawImage(panoImg, 0, 0, pc.width, pc.height);
+  const at = (c) => toPano(c.frame.phone, c.x, c.y);
+  if (showHidden) sg.hidden.forEach(c => { const q = at(c); if (q) ring(pctx, q.u * s, q.v * s, 5 * d, 'rgba(200,200,200,0.7)'); });
+  sg.spares.forEach(c => { const q = at(c); if (q) ring(pctx, q.u * s, q.v * s, 7 * d, '#ff9800', true); });
+  sg.visible.forEach((c, k) => { const q = at(c); if (q) ring(pctx, q.u * s, q.v * s, 7 * d, '#ffd54f', false, `${k + 1}`); });
+  for (const f of items[idx].frames) for (const b of ballsOf(labels[f.id])) {
+    const q = toPano(f.phone, b.x, b.y);
+    if (q) cross(pctx, q.u * s, q.v * s, 8 * d, b.inPlay ? '#ff5252' : '#ff9800');
+  }
+  const c = pinned || hover;
+  if (c) { pctx.strokeStyle = '#4fc3f7'; pctx.lineWidth = 1.5 * d;
+    pctx.strokeRect(c.u * s - 10 * d, c.v * s - 10 * d, 20 * d, 20 * d); }
+}
+
+// Where a magnifier looks: the pinned/hovered panorama point if this phone
+// sees it, else its match ball, first suggestion, or the middle.
+function centreFor(v, sg) {
+  const c = pinned || hover;
+  if (c) { const p = toFrame(v.frame.phone, c.u, c.v); if (p) return { ...p, inView: true }; else if (pinned) return { inView: false }; }
+  const m = matchOf(v.frame); if (m) return { x: m.x, y: m.y, inView: true };
+  const s = sg.visible.find(c => c.frame === v.frame); if (s) return { x: s.x, y: s.y, inView: true };
+  return { x: v.frame.width / 2, y: v.frame.height * 0.45, inView: true };
+}
+
+function drawView(v, sg) {
+  const ctx = v.ctx, W = v.canvas.width, k = W / ZOOM_SRC;
+  const c = centreFor(v, sg);
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, W);
+  v.origin = null;
+  if (!c.inView) {
+    ctx.fillStyle = '#9aa0a6'; ctx.font = `${14 * devicePixelRatio}px system-ui`;
+    ctx.fillText("Not in this phone's view", 20, W / 2);
+  } else if (v.img.complete && v.img.width) {
+    const o = v.origin = { x: c.x - ZOOM_SRC / 2, y: c.y - ZOOM_SRC / 2 };
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(v.img, o.x, o.y, ZOOM_SRC, ZOOM_SRC, 0, 0, W, W);
+    const P = p => [(p.x - o.x) * k, (p.y - o.y) * k], d = devicePixelRatio;
+    if (showHidden) sg.hidden.filter(c => c.frame === v.frame).forEach(c => ring(ctx, ...P(c), 9 * d, 'rgba(200,200,200,0.7)'));
+    sg.spares.filter(c => c.frame === v.frame).forEach(c => ring(ctx, ...P(c), 14 * d, '#ff9800', true));
+    sg.visible.forEach((c, i) => { if (c.frame === v.frame) ring(ctx, ...P(c), 12 * d, '#ffd54f', false, `${i + 1}`); });
+    for (const b of ballsOf(labels[v.frame.id])) cross(ctx, ...P(b), (b.inPlay ? 16 : 12) * d, b.inPlay ? '#ff5252' : '#ff9800');
+  }
+  const lab = labels[v.frame.id], m = matchOf(v.frame), others = ballsOf(lab).filter(b => !b.inPlay).length;
+  v.status.className = 'status ' + (lab ? lab.status : '');
+  v.status.textContent = (!lab ? 'Not labelled' : m ? 'Match ball' : lab.status === 'none' ? 'No match ball'
+    : lab.status === 'unsure' ? 'Unsure' : 'Not labelled') + (others ? ` · ${others} other ball${others > 1 ? 's' : ''}` : '');
+}
+
+function render() {
+  if (!maps || !items.length) return;
+  const sg = suggestions();
+  drawPano(sg);
+  viewEls.forEach(v => drawView(v, sg));
+  updateText(sg);
+}
+
+function setMsg(t) { document.getElementById('msg').textContent = t || ''; }
+
+function updateText(sg) {
+  const it = items[idx];
+  const done = items.filter(itemDone).length;
+  const frames = items.flatMap(i => i.frames.map(f => labels[f.id])).filter(Boolean);
+  const by = s => frames.filter(l => l.status === s).length;
+  document.getElementById('pos').textContent = `${idx + 1} / ${items.length}`;
+  document.getElementById('progress').style.width = `${100 * done / items.length}%`;
+  document.getElementById('counts').textContent =
+    `${done} done · frames: ${by('ball')} ball · ${by('none')} none · ${by('unsure')} unsure`;
+  const mins = Math.floor(it.t / 60), secs = (it.t % 60).toFixed(1);
+  document.getElementById('info').textContent = `Segment ${it.segment}, ${mins}:${secs.padStart(4, '0')} in · `
+    + (it.frames.length > 1 ? 'both phones' : `${it.frames[0].phone} phone only`);
+  const parts = [sg.visible.length
+    ? 'Suggestions: ' + sg.visible.map((c, k) => `${k + 1} ${c.frame.phone} (${c.conf.toFixed(2)})`).join(', ')
+    : 'No new suggestions'];
+  if (sg.hidden.length) parts.push(`${sg.hidden.length} at spots seen before (H to ${showHidden ? 'hide' : 'show'})`);
+  if (sg.spares.length) parts.push(`known spare balls (O marks them)`);
+  document.getElementById('cands').textContent = parts.join(' · ');
+}
+
+// ------------------------------------------------------------- navigation
+
+function show(i) {
+  idx = Math.max(0, Math.min(items.length - 1, i));
+  pinned = null; hover = null; setMsg('');
+  const it = items[idx];
+  views.innerHTML = '';
+  viewEls = it.frames.map(f => {
+    const el = document.createElement('div'); el.className = 'view';
+    const title = document.createElement('div'); title.className = 'title';
+    title.textContent = f.phone === 'main' ? 'Main phone (right)' : 'Secondary phone (left)';
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 400 * devicePixelRatio;
+    const status = document.createElement('div'); status.className = 'status';
+    el.append(title, canvas, status); views.append(el);
+    const v = { frame: f, canvas, ctx: canvas.getContext('2d'), img: new Image(), status };
+    v.img.onload = render;
+    v.img.src = '/' + f.image;
+    canvas.addEventListener('click', e => {
+      if (!v.origin) return;
+      const r = canvas.getBoundingClientRect();
+      const x = v.origin.x + (e.clientX - r.left) / r.width * ZOOM_SRC;
+      const y = v.origin.y + (e.clientY - r.top) / r.height * ZOOM_SRC;
+      if (e.shiftKey) toggleOtherBall(f, x, y); else setMatchBall(f, x, y);
+    });
+    return v;
+  });
+  panoImg = new Image();
+  panoImg.onload = () => { sizePano(); render(); };
+  panoImg.onerror = render;
+  panoImg.src = '/pano/' + encodeURIComponent(it.id) + '.jpg';
+  render();
+}
+
+function panoPoint(e) {
+  const r = pc.getBoundingClientRect();
+  return { u: (e.clientX - r.left) / r.width * maps.panoWidth, v: (e.clientY - r.top) / r.height * maps.panoHeight };
+}
+pc.addEventListener('mousemove', e => { if (!pinned) { hover = panoPoint(e); render(); } });
+pc.addEventListener('mouseleave', () => { if (!pinned) { hover = null; render(); } });
+pc.addEventListener('click', e => {
+  pinned = panoPoint(e);
+  const seen = items[idx].frames.some(f => toFrame(f.phone, pinned.u, pinned.v));
+  setMsg(seen ? '' : "That spot is outside this moment's phones. If the match ball is there, press N.");
+  render();
+});
+window.addEventListener('resize', () => { sizePano(); render(); });
+
+document.querySelectorAll('button[data-act]').forEach(b => b.addEventListener('click', () => act(b.dataset.act)));
+function act(a) {
+  if (a === 'none') setStatusAll('none', true);
+  else if (a === 'unsure') setStatusAll('unsure', false);
+  else if (a === 'clear') clearAll();
+  else if (a === 'prev') show(idx - 1);
+  else if (a === 'next') show(idx + 1);
+  else if (a === 'skip') nextUnlabelled();
+}
+document.addEventListener('keydown', e => {
+  if (e.metaKey || e.ctrlKey) return;
+  const k = e.key;
+  const digit = /^Digit[1-9]$/.test(e.code) ? +e.code.slice(5) : 0;  // Shift changes e.key, not e.code
+  if (digit) {
+    const c = suggestions().visible[digit - 1];
+    if (c && e.shiftKey) toggleOtherBall(c.frame, c.x, c.y);
+    else if (c) acceptSuggestion(c);
+  } else if (k === 'n' || k === 'N') act('none');
+  else if (k === 'u' || k === 'U') act('unsure');
+  else if (k === 'Backspace') act('clear');
+  else if (k === 'ArrowLeft') act('prev');
+  else if (k === 'ArrowRight' || k === 'Enter') act('next');
+  else if (k === ' ') { e.preventDefault(); act('skip'); }
+  else if (k === 'Escape') { pinned = null; setMsg(''); render(); }
+  else if (k === 'h' || k === 'H') { showHidden = !showHidden; render(); }
+  else if (k === 'o' || k === 'O') markSpares();
+  else return;
+  e.preventDefault();
+});
+
+// Suggestions from overlapping tiles can repeat a spot a few pixels apart.
+function dedupe(cands) {
+  const out = [];
+  for (const c of cands) if (!out.some(o => Math.hypot(o.x - c.x, o.y - c.y) < 12)) out.push(c);
+  return out;
+}
+
+async function load() {
+  maps = await (await fetch('/pano_maps.json')).json();
+  // Single-phone items become one-frame items; pairs already list both.
+  items = (await (await fetch('/items')).json()).map(it => it.kind === 'pair' ? it
+    : { id: it.id, segment: it.segment, t: it.t, frames: [it] });
+  items.forEach(it => it.frames.forEach(f => f.candidates = dedupe(f.candidates)));
+  labels = await (await fetch('/labels')).json();
+  const first = items.findIndex(it => !itemDone(it));
+  sizePano();
+  show(first >= 0 ? first : 0);
+}
+load();
+</script>
+</body>
+</html>
