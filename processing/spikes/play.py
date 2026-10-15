@@ -53,9 +53,11 @@ CONV_PRIOR = 0.05     # pull of the convergence point towards the weighted centr
 
 # ----------------------------------------------------------------- tracking
 
-def track_players(frames, fps):
+def track_players(frames, fps, smooth_s: float = SMOOTH_S):
     """Hungarian matching of on-pitch people to constant-velocity
-    predictions. Returns {track id: (frame indices, positions)}."""
+    predictions. Returns {track id: (frame indices, positions)}. Positions
+    are smoothed with a Gaussian of `smooth_s` before taking velocity: far
+    away, position jitter otherwise reads as running."""
     tracks: dict[int, dict] = {}
     alive: list[int] = []
     nid = 0
@@ -93,7 +95,7 @@ def track_players(frames, fps):
         # Fill missed frames linearly, then smooth and differentiate.
         tt = np.arange(t[0], t[-1] + 1)
         xx = np.c_[np.interp(tt, t, x[:, 0]), np.interp(tt, t, x[:, 1])]
-        xs = gaussian_filter1d(xx, SMOOTH_S * fps, axis=0, mode="nearest")
+        xs = gaussian_filter1d(xx, smooth_s * fps, axis=0, mode="nearest")
         v = np.gradient(xs, axis=0) * fps
         out[k] = (tt, xs, v)
     return out

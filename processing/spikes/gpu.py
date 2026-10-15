@@ -60,8 +60,12 @@ class TorchCamera:
     def grid(self, px, py):
         """Pixel coordinates -> grid_sample's normalized coordinates. With
         align_corners=False the same grid addresses the half-size chroma
-        plane at the same place in the picture."""
-        return torch.stack([(px + 0.5) / self.w * 2 - 1, (py + 0.5) / self.h * 2 - 1], -1)[None].to(DT)
+        plane at the same place in the picture. Directions far outside the
+        frame give huge coordinates: clamp them first, or half precision
+        turns them into infinities and the samples into NaN (which a zero
+        blend weight doesn't remove)."""
+        g = torch.stack([(px + 0.5) / self.w * 2 - 1, (py + 0.5) / self.h * 2 - 1], -1)
+        return torch.nan_to_num(g, nan=2.0, posinf=2.0, neginf=-2.0).clamp(-2, 2)[None].to(DT)
 
 
 def upload_nv12(buf: np.ndarray, w: int, h: int, dev: torch.device):
