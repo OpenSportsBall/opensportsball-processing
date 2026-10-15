@@ -68,7 +68,9 @@ def frames_at(path: Path, start: float, count: int, fps: float,
     height = round(width * 9 / 16 / 2) * 2
     vf = ("hflip,vflip," if rotate180 else "") + f"fps={fps},scale={width}:{height}"
     raw = subprocess.run(
-        ["ffmpeg", "-v", "error", "-ss", f"{start:.4f}", "-i", str(path),
+        # -noautorotate: the files' display rotation is handled from the
+        # manifest's orientation, so don't let ffmpeg apply it as well.
+        ["ffmpeg", "-v", "error", "-noautorotate", "-ss", f"{start:.4f}", "-i", str(path),
          "-vf", vf, "-frames:v", str(count),
          "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
         check=True, capture_output=True).stdout
