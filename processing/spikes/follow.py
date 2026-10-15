@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # /// script
 # requires-python = ">=3.11,<3.14"
-# dependencies = ["numpy>=1.26", "scipy>=1.13", "opencv-python-headless>=4.10"]
+# dependencies = ["numpy>=1.26", "scipy>=1.13", "opencv-python-headless>=4.10", "torch>=2.4"]
 # ///
 """Phase 0 spike: a players-only follow cam rendered at 1080p.
 
@@ -31,6 +31,9 @@ The stitcher's cameras are refined at 1920 px on matches from frames
 across the game (focal lengths, two radial terms, Secondary's rotation),
 which roughly halves the alignment error at 4K.
 
+Both passes warp and blend on the GPU (gpu.py: Apple's GPU locally, CUDA
+in the cloud), in NV12 from the hardware decoder to the hardware encoder.
+
 Writes <recording>/follow/: follow.mp4, path.json, background.jpg and a
 detections overlay. Stays inside one segment for now.
 """
@@ -38,16 +41,22 @@ detections overlay. Stays inside one segment for now.
 from __future__ import annotations
 
 import json
+import queue
 import subprocess
 import sys
+import threading
+import time
+from collections import defaultdict
 from pathlib import Path
 
 import cv2
 import numpy as np
+import torch
 from scipy.ndimage import gaussian_filter1d, median_filter
 from scipy.optimize import least_squares
 
 sys.path.insert(0, str(Path(__file__).parent))
+import gpu  # noqa: E402
 import phase0  # noqa: E402
 
 FPS = 30
@@ -197,15 +206,6 @@ def view_directions(yaw, pitch, hfov, w, h):
     return u[..., None] * x + v[..., None] * y + z
 
 
-def blend(frames, maps, weights, gains):
-    acc = np.zeros(maps[0][0].shape + (3,), np.float32)
-    wsum = np.zeros(maps[0][0].shape, np.float32)
-    for img, (mx, my), w, g in zip(frames, maps, weights, gains):
-        acc += cv2.remap(img, mx, my, cv2.INTER_LINEAR).astype(np.float32) * (w * g)[..., None]
-        wsum += w
-    return np.clip(acc / np.maximum(wsum, 1e-6)[..., None], 0, 255).astype(np.uint8)
-
-
 def seam_dp(cost: np.ndarray, prev: np.ndarray | None, lam: float) -> np.ndarray:
     """Lowest-cost top-to-bottom path, one column per row, moving at most
     two columns per row; `lam` per column per row pulls it towards the
@@ -229,45 +229,88 @@ def seam_dp(cost: np.ndarray, prev: np.ndarray | None, lam: float) -> np.ndarray
     return path
 
 
-def blend_two_band(frames, maps, sharp, wide, gains):
-    """Fine detail switches at the seam (`sharp` weights); overall
-    brightness and colour blend over a wide band (`wide` weights), so an
-    exposure difference between the phones fades instead of stepping."""
-    h, w = maps[0][0].shape
-    small = (w // 8, h // 8)
-    out = np.zeros((h, w, 3), np.float32)
-    ssum = np.maximum(sharp[0] + sharp[1], 1e-6)[..., None]
-    wsum = np.maximum(wide[0] + wide[1], 1e-6)[..., None]
-    for img, (mx, my), ws_, ww, g in zip(frames, maps, sharp, wide, gains):
-        r = cv2.remap(img, mx, my, cv2.INTER_LINEAR).astype(np.float32) * g
-        low = cv2.resize(cv2.GaussianBlur(cv2.resize(r, small, interpolation=cv2.INTER_AREA), (0, 0), 2), (w, h))
-        out += (r - low) * (ws_[..., None] / ssum) + low * (ww[..., None] / wsum)
-    return np.clip(out, 0, 255).astype(np.uint8)
+class Stopwatch:
+    """Accumulates wall time per stage: each lap charges the time since the
+    previous lap to `name`."""
+
+    def __init__(self):
+        self.t = time.perf_counter()
+        self.total: dict[str, float] = defaultdict(float)
+
+    def lap(self, name: str) -> None:
+        now = time.perf_counter()
+        self.total[name] += now - self.t
+        self.t = now
+
+    def report(self, frames: dict[str, int]) -> str:
+        lines = []
+        for name, sec in self.total.items():
+            n = frames.get(name.split(":")[0], 0)
+            per = f"{1000 * sec / n:7.1f} ms/frame" if n and ":" in name else ""
+            lines.append(f"  {name:22s} {sec:7.1f} s {per}")
+        return "\n".join(lines)
 
 
 # --------------------------------------------------------------- media io
 
-def frame_stream(path: Path, start: float, seconds: float, width: int, rotate180: bool):
-    """Yields BGR frames at constant FPS, decoded in hardware where possible."""
+def frame_stream(path: Path, start: float, seconds: float, width: int):
+    """Yields raw NV12 frames (flat uint8) at constant FPS, decoded in
+    hardware, as the phone recorded them (no rotation applied)."""
     height = round(width * 9 / 16)
-    vf = ("hflip,vflip," if rotate180 else "") + f"fps={FPS},scale={width}:{height}"
     proc = subprocess.Popen(
         ["ffmpeg", "-v", "error", "-noautorotate", "-hwaccel", "videotoolbox", "-ss", f"{start:.4f}",
-         "-i", str(path), "-t", f"{seconds:.3f}", "-vf", vf,
-         "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
+         "-i", str(path), "-t", f"{seconds:.3f}", "-vf", f"fps={FPS},scale={width}:{height}",
+         "-f", "rawvideo", "-pix_fmt", "nv12", "-"],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    size = width * height * 3
+    size = width * height * 3 // 2
     while True:
-        buf = proc.stdout.read(size)
-        if len(buf) < size:
+        buf = bytearray(size)  # writable, so torch can share it without a copy
+        if proc.stdout.readinto(buf) < size:
             break
-        yield np.frombuffer(buf, np.uint8).reshape(height, width, 3)
+        yield np.frombuffer(buf, np.uint8)
     proc.wait()
+
+
+def prefetch(gen, depth: int = 6):
+    """Runs a frame generator on its own thread, `depth` frames ahead, so
+    reading the decoder's pipe overlaps with GPU work."""
+    q: queue.Queue = queue.Queue(maxsize=depth)
+    done = object()
+
+    def run():
+        for item in gen:
+            q.put(item)
+        q.put(done)
+
+    threading.Thread(target=run, daemon=True).start()
+    while (item := q.get()) is not done:
+        yield item
+
+
+class NV12Encoder:
+    """Hardware H.264 from NV12 frames."""
+
+    def __init__(self, path: Path, w: int, h: int, fps: int = FPS, bitrate: str = "16M"):
+        self.proc = subprocess.Popen(
+            ["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "nv12",
+             "-s", f"{w}x{h}", "-r", str(fps), "-i", "-",
+             "-c:v", "h264_videotoolbox", "-b:v", bitrate,
+             "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709",
+             "-color_trc", "bt709", str(path)],
+            stdin=subprocess.PIPE)
+
+    def write(self, frame: np.ndarray) -> None:
+        self.proc.stdin.write(frame.tobytes())
+
+    def close(self) -> None:
+        self.proc.stdin.close()
+        self.proc.wait()
 
 
 # ------------------------------------------------------------------- main
 
 def main(rec: Path, seg: int, start: float, seconds: float) -> None:
+    sw = Stopwatch()
     manifest = json.loads((rec / "manifest.json").read_text())
     report = json.loads((rec / "phase0" / "report.json").read_text())
     devs = {d["role"]: d for d in manifest["devices"]}
@@ -288,6 +331,7 @@ def main(rec: Path, seg: int, start: float, seconds: float) -> None:
               phase0.frames_at(rec / sec0["objectKey"], t + s0["offsetS"], 1, FPS, CAL_W, flip[1])[0])
              for t in np.linspace(t0, t0 + dur - 0.5, phase0.CALIB_FRAMES)]
     st, cal = phase0.calibrate(pairs)
+    sw.lap("setup stitcher")
     if st is None:
         sys.exit("calibration failed")
     cams = st.cameras()  # order [secondary, main]
@@ -352,29 +396,41 @@ def main(rec: Path, seg: int, start: float, seconds: float) -> None:
     gains = [np.float32(1.0), np.float32(gain_s.mean())]
     print(f"secondary gain {gains[1]:.3f}")
 
+    dev = gpu.device()
+    lo_h = round(CAL_W * 9 / 16)
+    warper = gpu.PanoWarper(pmaps, pweights, flip, CAL_W, lo_h, gains, c0, c1, dev)
+    print(f"GPU: {dev}")
+    sw.lap("setup refine+maps")
     # Pass A: detect moving blobs on the turf.
     warm = min(WARMUP_S, start)
     a_start = start - warm
     mog = cv2.createBackgroundSubtractorMOG2(history=300, varThreshold=24, detectShadows=True)
-    streams = [frame_stream(f, a_start + o, warm + seconds, CAL_W, fl)
-               for f, o, fl in zip(files, offsets, flip)]
+    streams = [prefetch(frame_stream(f, a_start + o, warm + seconds, CAL_W))
+               for f, o in zip(files, offsets)]
     dets: list[list[tuple[float, float, float]]] = []
     field = None
     n_warm = int(warm * FPS)
     kernel = np.ones((3, 3), np.uint8)
     sample = None
-    seams, seam = [], None
+    seams, seam_h = [], None
+    nA = 0
     for i, (fa, fb) in enumerate(zip(*streams)):
-        pano = blend([fa, fb], pmaps, pweights, gains)
+        nA += 1
+        sw.lap("A: decode")
+        pano, cost = warper.warp([gpu.upload_nv12(f, CAL_W, lo_h, dev) for f in (fa, fb)])
+        sw.lap("A: warp+blend")
         fg = mog.apply(pano, learningRate=-1)
+        sw.lap("A: background")
         # Seam: avoid players and places where the two phones disagree.
-        wa_ = cv2.remap(fa, *pmaps[0], cv2.INTER_LINEAR)[:, c0:c1].astype(np.float32)
-        wb_ = cv2.remap(fb, *pmaps[1], cv2.INTER_LINEAR)[:, c0:c1].astype(np.float32) * gains[1]
-        cost = cv2.blur(np.abs(wa_ - wb_).mean(2) / 255, (3, 3))
+        # Searched on row pairs; it moves slowly, so half the rows is plenty.
         players = cv2.dilate((fg[:, c0:c1] == 255).astype(np.uint8), np.ones((7, 7), np.uint8))
         cost += PLAYER_COST * players
         cost[~both[:, c0:c1]] = 50.0
-        seam = seam_dp(cost, seam, SEAM_LAMBDA)
+        half = cost[: PH // 2 * 2].reshape(PH // 2, 2, -1).mean(1)
+        seam_h = seam_dp(half, seam_h, 2 * SEAM_LAMBDA)
+        seam = np.repeat(seam_h, 2)
+        seam = np.r_[seam, seam[-1:]][:PH]
+        sw.lap("A: seam")
         if i == n_warm:
             bg = mog.getBackgroundImage()
             cv2.imwrite(str(out / "background.jpg"), bg)
@@ -396,6 +452,7 @@ def main(rec: Path, seg: int, start: float, seconds: float) -> None:
                 continue
             frame_dets.append((float(YY[0, int(cent[k][0])]), float(PP[int(cent[k][1]), 0]), float(area)))
         dets.append(frame_dets)
+        sw.lap("A: blobs")
         seams.append(y0 + (c0 + seam) * step)
         if len(dets) == int(seconds * FPS / 2):
             sample = pano.copy()
@@ -442,42 +499,30 @@ def main(rec: Path, seg: int, start: float, seconds: float) -> None:
     print(f"path: yaw {np.degrees(yaw.min()):.0f}..{np.degrees(yaw.max()):.0f} deg,"
           f" hfov {np.degrees(hfov.min()):.0f}..{np.degrees(hfov.max()):.0f} deg")
 
+    sw.lap("path")
     # Pass B: render the virtual camera from full-resolution frames. Each
     # pixel comes from one phone, switching at that frame's seam.
-    hi = [cm.at(SRC_W), cs.at(SRC_W)]
-    gw, gh = OUT_W // 4, OUT_H // 4  # projection grid, upsampled to full size
-    rows = p0 + np.arange(PH) * step
-    feather = np.radians(SEAM_FEATHER_DEG)
-    tone = np.radians(TONE_FEATHER_DEG)
-    streams = [frame_stream(f, start + o, seconds, SRC_W, fl)
-               for f, o, fl in zip(files, offsets, flip)]
-    enc = phase0.Encoder(out / "follow.mp4", (OUT_W, OUT_H), FPS)
+    renderer = gpu.ViewRenderer([cm, cs], flip, SRC_W, OUT_W, OUT_H, gains, main_right,
+                                p0, step, np.radians(SEAM_FEATHER_DEG),
+                                np.radians(TONE_FEATHER_DEG), dev)
+    seams_t = torch.tensor(np.array(seams), dtype=torch.float32, device=dev)
+    streams = [prefetch(frame_stream(f, start + o, seconds, SRC_W)) for f, o in zip(files, offsets)]
+    enc = NV12Encoder(out / "follow.mp4", OUT_W, OUT_H)
     for i, (fa, fb) in enumerate(zip(*streams)):
+        sw.lap("B: decode")
         if i >= T:
             break
-        d = view_directions(yaw[i], pitch[i], hfov[i], gw, gh)
-        vy = np.arctan2(d[..., 0], d[..., 2])
-        vp = np.arctan2(d[..., 1], np.hypot(d[..., 0], d[..., 2]))
-        off = vy - np.interp(vp, rows, seams[i])
-        if not main_right:
-            off = -off
-        maps, oks = [], []
-        for c in hi:
-            x, y, ok = c.project(d)
-            maps.append((cv2.resize(x, (OUT_W, OUT_H)), cv2.resize(y, (OUT_W, OUT_H))))
-            oks.append(ok)
-        both_ok = oks[0] & oks[1]
-
-        def weights(width):
-            wm = np.where(both_ok, np.clip(off / width + 0.5, 0, 1), oks[0]).astype(np.float32)
-            ws = np.where(oks[1], 1 - wm, 0).astype(np.float32)
-            return [cv2.resize(wm, (OUT_W, OUT_H)), cv2.resize(ws, (OUT_W, OUT_H))]
-
-        enc.write(blend_two_band([fa, fb], maps, weights(feather), weights(tone), gains))
+        frames = [gpu.upload_nv12(f, SRC_W, SRC_H, dev) for f in (fa, fb)]
+        frame = renderer.render(frames, yaw[i], pitch[i], hfov[i], seams_t[i])
+        sw.lap("B: render")
+        enc.write(frame)
+        sw.lap("B: encode")
         if i % 300 == 0:
             print(f"pass B: frame {i}/{T}", flush=True)
     enc.close()
+    sw.lap("B: encode")
     print(f"wrote {out / 'follow.mp4'}")
+    print("time by stage:\n" + sw.report({"A": nA, "B": T}))
 
 
 if __name__ == "__main__":
