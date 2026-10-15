@@ -253,13 +253,13 @@ class Stopwatch:
 
 # --------------------------------------------------------------- media io
 
-def frame_stream(path: Path, start: float, seconds: float, width: int):
-    """Yields raw NV12 frames (flat uint8) at constant FPS, decoded in
+def frame_stream(path: Path, start: float, seconds: float, width: int, fps: float = FPS):
+    """Yields raw NV12 frames (flat uint8) at constant `fps`, decoded in
     hardware, as the phone recorded them (no rotation applied)."""
     height = round(width * 9 / 16)
     proc = subprocess.Popen(
         ["ffmpeg", "-v", "error", "-noautorotate", "-hwaccel", "videotoolbox", "-ss", f"{start:.4f}",
-         "-i", str(path), "-t", f"{seconds:.3f}", "-vf", f"fps={FPS},scale={width}:{height}",
+         "-i", str(path), "-t", f"{seconds:.3f}", "-vf", f"fps={fps},scale={width}:{height}",
          "-f", "rawvideo", "-pix_fmt", "nv12", "-"],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     size = width * height * 3 // 2
@@ -307,6 +307,50 @@ class NV12Encoder:
         self.proc.wait()
 
 
+def setup_cameras(rec: Path, report: dict, devs: dict, flip: list[bool]) -> tuple[Camera, Camera]:
+    """Main's and Secondary's cameras, for upright frames: the panorama
+    stitcher on segment 0, refined at REF_W on matches from frames across
+    the game. Cached in phase0/cameras.json (delete it to recompute)."""
+    cache = rec / "phase0" / "cameras.json"
+    if cache.exists():
+        j = json.loads(cache.read_text())
+        return tuple(Camera(*c[:5], np.array(c[5])) for c in (j["main"], j["secondary"]))
+    s0 = report["segments"][0]
+    m0 = devs["main"]["segments"][0]
+    sec0 = devs["secondary"]["segments"][0]
+    dur = min(m0["durationMs"], sec0["durationMs"]) / 1000 - abs(s0["offsetS"]) - 1
+    t0 = max(0.0, -s0["offsetS"]) + 0.5
+    pairs = [(phase0.frames_at(rec / m0["objectKey"], t, 1, FPS, CAL_W, flip[0])[0],
+              phase0.frames_at(rec / sec0["objectKey"], t + s0["offsetS"], 1, FPS, CAL_W, flip[1])[0])
+             for t in np.linspace(t0, t0 + dur - 0.5, phase0.CALIB_FRAMES)]
+    st, cal = phase0.calibrate(pairs)
+    if st is None:
+        sys.exit("calibration failed")
+    cams = st.cameras()  # order [secondary, main]
+    print(f"stitcher: {cal['angleBetweenDeg']} deg apart, focal {cal['focalPx']} @ {CAL_W}")
+
+    cm, cs = Camera.from_stitcher(cams[1]), Camera.from_stitcher(cams[0])
+    nseg = len(report["segments"])
+    fit_pairs = []
+    for sg in sorted({round(x) for x in np.linspace(0, nseg - 1, 6)}):
+        o = report["segments"][sg]["offsetS"]
+        for t in (40.0, 140.0):
+            fit_pairs.append((
+                phase0.frames_at(rec / devs["main"]["segments"][sg]["objectKey"], t, 1, FPS, REF_W, flip[0])[0],
+                phase0.frames_at(rec / devs["secondary"]["segments"][sg]["objectKey"], t + o, 1, FPS, REF_W,
+                                 flip[1])[0]))
+    matches = match_pairs(fit_pairs)
+    ps = np.concatenate([x[0] for x in matches]); pm = np.concatenate([x[1] for x in matches])
+    before = transfer_error(cm, cs, ps, pm)
+    (cm, cs), n = refine(cm, cs, matches)
+    after = transfer_error(cm, cs, ps, pm)
+    near = before < 40
+    print(f"refined on {n} matches: median error {2 * np.median(before[near]):.1f} ->"
+          f" {2 * np.median(after[near]):.1f} px at 4K; k1 {cm.k1:.4f}/{cs.k1:.4f}")
+    cache.write_text(json.dumps({k: [*c.ref[:5], c.R.tolist()] for k, c in (("main", cm), ("secondary", cs))}))
+    return cm, cs
+
+
 # ------------------------------------------------------------------- main
 
 def main(rec: Path, seg: int, start: float, seconds: float) -> None:
@@ -321,40 +365,8 @@ def main(rec: Path, seg: int, start: float, seconds: float) -> None:
              rec / devs["secondary"]["segments"][seg]["objectKey"]]
     offsets = [0.0, report["segments"][seg]["offsetS"]]
 
-    # Geometry from segment 0's calibration (phase0's choice of frame pair).
-    s0 = report["segments"][0]
-    m0 = devs["main"]["segments"][0]
-    sec0 = devs["secondary"]["segments"][0]
-    dur = min(m0["durationMs"], sec0["durationMs"]) / 1000 - abs(s0["offsetS"]) - 1
-    t0 = max(0.0, -s0["offsetS"]) + 0.5
-    pairs = [(phase0.frames_at(rec / m0["objectKey"], t, 1, FPS, CAL_W, flip[0])[0],
-              phase0.frames_at(rec / sec0["objectKey"], t + s0["offsetS"], 1, FPS, CAL_W, flip[1])[0])
-             for t in np.linspace(t0, t0 + dur - 0.5, phase0.CALIB_FRAMES)]
-    st, cal = phase0.calibrate(pairs)
-    sw.lap("setup stitcher")
-    if st is None:
-        sys.exit("calibration failed")
-    cams = st.cameras()  # order [secondary, main]
-    print(f"stitcher: {cal['angleBetweenDeg']} deg apart, focal {cal['focalPx']} @ {CAL_W}")
-
-    # Refine at REF_W on matches from frame pairs spread over the game.
-    cm, cs = Camera.from_stitcher(cams[1]), Camera.from_stitcher(cams[0])
-    nseg = len(report["segments"])
-    fit_pairs = []
-    for sg in sorted({round(x) for x in np.linspace(0, nseg - 1, 6)}):
-        o = report["segments"][sg]["offsetS"]
-        for t in (40.0, 140.0):
-            fit_pairs.append((
-                phase0.frames_at(rec / devs["main"]["segments"][sg]["objectKey"], t, 1, FPS, REF_W, flip[0])[0],
-                phase0.frames_at(rec / devs["secondary"]["segments"][sg]["objectKey"], t + o, 1, FPS, REF_W, flip[1])[0]))
-    matches = match_pairs(fit_pairs)
-    ps = np.concatenate([x[0] for x in matches]); pm = np.concatenate([x[1] for x in matches])
-    before = transfer_error(cm, cs, ps, pm)
-    (cm, cs), n = refine(cm, cs, matches)
-    after = transfer_error(cm, cs, ps, pm)
-    near = before < 40
-    print(f"refined on {n} matches: median error {2 * np.median(before[near]):.1f} ->"
-          f" {2 * np.median(after[near]):.1f} px at 4K; k1 {cm.k1:.4f}/{cs.k1:.4f}")
+    cm, cs = setup_cameras(rec, report, devs, flip)
+    sw.lap("setup cameras")
 
     # Pass A panorama: equirectangular over everything either phone sees.
     lo = [cm.at(CAL_W), cs.at(CAL_W)]
@@ -386,8 +398,12 @@ def main(rec: Path, seg: int, start: float, seconds: float) -> None:
     print(f"overlap yaw {np.degrees(y0 + c0 * step):.1f}..{np.degrees(y0 + c1 * step):.1f} deg,"
           f" Main on the {'right' if main_right else 'left'}")
 
-    # Exposure: match Secondary to Main in the overlap of the first pair.
-    a, b = pairs[len(pairs) // 2]
+    # Exposure: match Secondary to Main in the overlap, mid segment 0.
+    s0 = report["segments"][0]
+    t_mid = 0.5 * min(devs["main"]["segments"][0]["durationMs"], devs["secondary"]["segments"][0]["durationMs"]) / 1000
+    a = phase0.frames_at(rec / devs["main"]["segments"][0]["objectKey"], t_mid, 1, FPS, CAL_W, flip[0])[0]
+    b = phase0.frames_at(rec / devs["secondary"]["segments"][0]["objectKey"], t_mid + s0["offsetS"], 1, FPS,
+                         CAL_W, flip[1])[0]
     wa, wb = pweights
     ov = (wa > 0) & (wb > 0)
     ia = cv2.remap(a, *pmaps[0], cv2.INTER_LINEAR)[ov].astype(np.float32)
