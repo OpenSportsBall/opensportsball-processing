@@ -11,10 +11,12 @@ Run on a recording downloaded from S3 (manifest.json plus <deviceId>/ dirs):
 
     uv run processing/spikes/phase0.py footage/rec1 [preview start, s]
 
-Syncs each segment pair by audio, calibrates a stitch from segment 0, and
-writes report.json, a stitched still and a short stitched preview (from
-the given Main time in segment 0) to <recording>/phase0/. Prototype only;
-the pipeline proper goes in osb_processing once this works on real games.
+Syncs each segment pair by audio, calibrates a stitch from segment 0,
+re-estimates it once per segment to see whether the mount held, and writes
+report.json, a stitched still and a short stitched preview to
+<recording>/phase0/. The preview starts at the given game time (seconds on
+Main's timeline, across segments). Prototype only; the pipeline proper
+goes in osb_processing once this works on real games.
 
 Stitching uses OpenCV's panorama stitcher, which estimates each camera's
 focal length and rotation from the matches. The phones' reported field of
@@ -147,6 +149,12 @@ def upside_down(frame: np.ndarray) -> bool:
     return bool(turf[:half].mean() > turf[half:].mean())
 
 
+def angle_between(st) -> float:
+    """Rotation between the two estimated cameras, in degrees."""
+    r0, r1 = (c.R.astype(np.float64) for c in st.cameras())
+    return float(np.degrees(np.linalg.norm(cv2.Rodrigues(r1 @ r0.T)[0])))
+
+
 def calibrate(pairs: list[tuple[np.ndarray, np.ndarray]]):
     """A stitcher whose cameras are estimated from one frame pair.
 
@@ -168,7 +176,7 @@ def calibrate(pairs: list[tuple[np.ndarray, np.ndarray]]):
     return st, {"ok": True, "pairsTried": len(pairs), "pairsOk": len(fits),
                 "focalPx": [round(f, 1) for f in focals],
                 "focalSpreadPx": [round(float(x), 1) for x in np.ptp([f for _, f, _ in fits], axis=0)],
-                "angleBetweenDeg": round(abs(yaw[1] - yaw[0]), 1),
+                "angleBetweenDeg": round(angle_between(st), 1),
                 "secondarySide": "left" if yaw[0] < yaw[1] else "right"}
 
 
@@ -255,18 +263,44 @@ def main(rec: Path, preview_at: float | None) -> None:
                         f" (spread {cal['focalSpreadPx']}), {cal['angleBetweenDeg']} deg apart,"
                         f" Secondary on the {cal['secondarySide']}" if cal["ok"] else "FAILED"))
 
+    # Did the mount hold? Re-estimate on a few pairs in every segment and
+    # compare the angle between the phones with segment 0's.
+    stability = []
+    for (ms, ss), seg in zip(pairs, report["segments"]):
+        seg_dur = min(ms["durationMs"], ss["durationMs"]) / 1000 - abs(seg["offsetS"]) - 1
+        t0 = max(0.0, -seg["offsetS"]) + 0.5
+        cal_i = calibrate([(frames_at(rec / ms["objectKey"], t, 1, 30, PREVIEW_W, flip[0])[0],
+                            frames_at(rec / ss["objectKey"], t + seg["offsetS"], 1, 30,
+                                      PREVIEW_W, flip[1])[0])
+                           for t in np.linspace(t0, t0 + seg_dur - 0.5, 3)])[1]
+        stability.append({"index": ms["index"], **({"angleBetweenDeg": cal_i["angleBetweenDeg"],
+                                                    "focalPx": cal_i["focalPx"]} if cal_i["ok"] else {"ok": False})})
+    angles = [x["angleBetweenDeg"] for x in stability if "angleBetweenDeg" in x]
+    report["stability"] = {"perSegment": stability,
+                           "angleRangeDeg": [min(angles), max(angles)] if angles else None}
+    print(f"mount: angle between phones {min(angles) if angles else '?'}-{max(angles) if angles else '?'} deg"
+          f" over {len(angles)}/{len(stability)} segments")
+
     m0, s0 = cal_pairs[len(cal_pairs) // 2]
     cv2.imwrite(str(out / "side_by_side.jpg"), np.hstack([m0, s0]))
     if st is not None:
         status, pano = st.composePanorama([s0, m0])
         if status == cv2.Stitcher_OK:
             cv2.imwrite(str(out / "stitched.jpg"), pano)
-        n = int(min(PREVIEW_SECONDS, dur) * 30)
-        t_prev = t_main0 if preview_at is None else min(max(preview_at, t_main0),
-                                                        t_main0 + dur - n / 30)
-        report["previewStartS"] = round(t_prev, 2)
-        m_seq = frames_at(main_f, t_prev, n, 30, PREVIEW_W, flip[0])
-        s_seq = frames_at(sec_f, t_prev + d, n, 30, PREVIEW_W, flip[1])
+        # Find the segment pair holding the requested game time.
+        i, local = 0, preview_at if preview_at is not None else t_main0
+        while i < len(pairs) - 1 and local >= pairs[i][0]["durationMs"] / 1000:
+            local -= pairs[i][0]["durationMs"] / 1000
+            i += 1
+        ms, ss = pairs[i]
+        d_i = report["segments"][i]["offsetS"]
+        seg_dur = min(ms["durationMs"], ss["durationMs"]) / 1000 - abs(d_i) - 1
+        t0 = max(0.0, -d_i) + 0.5
+        n = int(min(PREVIEW_SECONDS, seg_dur) * 30)
+        local = min(max(local, t0), t0 + seg_dur - n / 30)
+        report["preview"] = {"segment": ms["index"], "segmentTimeS": round(local, 2)}
+        m_seq = frames_at(rec / ms["objectKey"], local, n, 30, PREVIEW_W, flip[0])
+        s_seq = frames_at(rec / ss["objectKey"], local + d_i, n, 30, PREVIEW_W, flip[1])
         enc = None
         for a, b in zip(m_seq, s_seq):
             status, p = st.composePanorama([b, a])
