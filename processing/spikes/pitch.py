@@ -10,6 +10,7 @@
 Run after phase0.py and follow.py (cached cameras):
 
     uv run processing/spikes/pitch.py footage/rec3 <segment>
+    uv run processing/spikes/pitch.py footage/rec3 goals
 
 The phones sit at (nearly) one point and the pitch is flat, so one 3x3
 homography maps pitch coordinates (x along the touchline, z across, in
@@ -187,12 +188,16 @@ class PitchPose:
     The camera stands at (cx, cz) on the pitch, h metres up. The pitch is
     turned by `rot` about the vertical, and the ground tilted by `tilt_x`,
     `tilt_z` (radians) relative to the panorama's level.
-    `k` scales the fixed-size markings (see _elements).
-    Parameters: [cx, cz, h, rot, tilt_x, tilt_z, L, W, k].
+    `k` scales the fixed-size markings (see _elements). `warp` (degrees) adds
+    w1 * u + w2 * u**2 to every vertical angle, u = yaw / 60 degrees: a smooth
+    correction for what one flat pitch and the camera model can't explain
+    (calibration error toward a frame's edge, a crowned or tilted pitch).
+    Parameters: [cx, cz, h, rot, tilt_x, tilt_z, L, W, k(, w1, w2)].
     """
 
     def __init__(self, v):
-        self.cx, self.cz, self.h, self.rot, self.tx, self.tz, self.L, self.W, self.k = v
+        self.cx, self.cz, self.h, self.rot, self.tx, self.tz, self.L, self.W, self.k = v[:9]
+        self.w1, self.w2 = (v[9], v[10]) if len(v) > 9 else (0.0, 0.0)
         cx_, sx = np.cos(self.tx), np.sin(self.tx)
         cz_, sz = np.cos(self.tz), np.sin(self.tz)
         rx = np.array([[1, 0, 0], [0, cx_, -sx], [0, sx, cx_]])
@@ -205,14 +210,32 @@ class PitchPose:
         q = np.stack([c * X - s * Z, np.full_like(X, self.h), s * X + c * Z], -1)
         return q @ self.Rt.T
 
+    def directions3(self, xz: np.ndarray, height: np.ndarray) -> np.ndarray:
+        """Like directions, for points `height` metres above the ground."""
+        X, Z = xz[:, 0] - self.cx, xz[:, 1] - self.cz
+        c, s = np.cos(self.rot), np.sin(self.rot)
+        q = np.stack([c * X - s * Z, self.h - np.asarray(height, float), s * X + c * Z], -1)
+        return q @ self.Rt.T
+
+    def warp(self, yaw_deg):
+        u = np.asarray(yaw_deg) / 60.0
+        return self.w1 * u + self.w2 * u * u
+
+    def _to_angles(self, d):
+        yaw = np.degrees(np.arctan2(d[:, 0], d[:, 2]))
+        pitch = np.degrees(np.arctan2(d[:, 1], np.hypot(d[:, 0], d[:, 2])))
+        return np.c_[yaw, pitch + self.warp(yaw)]
+
+    def angles3(self, xz: np.ndarray, height: np.ndarray) -> np.ndarray:
+        return self._to_angles(self.directions3(xz, height))
+
     def angles(self, xz: np.ndarray) -> np.ndarray:
-        d = self.directions(xz)
-        return np.degrees(np.c_[np.arctan2(d[:, 0], d[:, 2]), np.arctan2(d[:, 1], np.hypot(d[:, 0], d[:, 2]))])
+        return self._to_angles(self.directions(xz))
 
     def to_pitch(self, yaw_deg, pitch_deg) -> np.ndarray:
         """Where rays (degrees) meet the ground, in pitch metres; NaN above
         the horizon."""
-        y, p = np.radians(yaw_deg), np.radians(pitch_deg)
+        y, p = np.radians(yaw_deg), np.radians(np.asarray(pitch_deg) - self.warp(yaw_deg))
         d = np.stack([np.sin(y) * np.cos(p), np.sin(p), np.cos(y) * np.cos(p)], -1) @ self.Rt
         with np.errstate(divide="ignore", invalid="ignore"):
             k = np.where(d[..., 1] > 1e-6, self.h / d[..., 1], np.nan)
@@ -229,9 +252,10 @@ STAGES = [
     ((NEAR_TOUCHLINE, HALFWAY, CENTRE_CIRCLE), 120, (0, 1, 2, 3, 4, 5, 7)),
     ((NEAR_TOUCHLINE, HALFWAY, CENTRE_CIRCLE), 40, (0, 1, 2, 3, 4, 5, 7)),
     (None, 40, (0, 1, 2, 3, 4, 5, 6, 7)),
-    (None, 12, (0, 1, 2, 3, 4, 5, 6, 7)),
+    (None, 12, (0, 1, 2, 3, 4, 5, 6, 7, 9, 10)),
+    (None, 6, (0, 1, 2, 3, 4, 5, 6, 7, 9, 10)),
 ]
-X_SCALE = np.array([1, 1, 0.1, 0.02, 0.01, 0.01, 1, 1, 0.05])
+X_SCALE = np.array([1, 1, 0.1, 0.02, 0.01, 0.01, 1, 1, 0.05, 0.05, 0.05])
 
 
 def fit_pose(mask: np.ndarray, pano: Pano, v0, stages=STAGES):
@@ -279,7 +303,7 @@ def draw(bg: np.ndarray, pano: Pano, pose: PitchPose) -> np.ndarray:
 def load_pose(rec: Path) -> PitchPose:
     j = json.loads((rec / "pitch" / "pitch.json").read_text())
     return PitchPose([*j["cameraXZ"], j["heightM"], j["rotRad"], *j["tiltRad"], j["lengthM"], j["widthM"],
-                      j["markingScale"]])
+                      j["markingScale"], *j.get("warpDeg", [0.0, 0.0])])
 
 
 ON_PITCH_MARGIN = 1.0  # metres outside the lines that still count (players on the line, referees)
@@ -334,6 +358,295 @@ def place_detections(rec: Path, pose: PitchPose) -> None:
           f" (range {min(on_counts)}-{max(on_counts)}); all people {int(np.median([sum(d['cls'] == 'person' for d in f['detections']) for f in data['frames']]))}")
 
 
+GOAL_W, GOAL_H = 7.32, 2.44   # full-size goal
+GOAL_WIDTHS = (5.5, 7.6)      # searched: small-sided to full-size
+END_SHIFT_M = (15.0, 6.0)     # an end's markings may sit this far off the whole-pitch fit (x, z)
+GOAL_LINE_PX = 8.0            # a goal's base is within this many panorama pixels of its goal line
+GOAL_CENTRE_FRAC = 0.15        # ... and its centre within this fraction of the 6-yard box's half-width
+                               # of the boxes' centre (both scale-free: at a grazing angle metres along
+                               # the ground are only pixels, and one end alone can't pin down scale)
+GOAL_MAX_DIST_PX = 3.0        # mean distance from the frame to white structure, at most
+
+
+def white_structures(bg: np.ndarray) -> np.ndarray:
+    """Thin bright unsaturated things anywhere (posts, crossbars, nets,
+    lines): not limited to the turf, since goals stand above it."""
+    hsv = cv2.cvtColor(bg, cv2.COLOR_BGR2HSV)
+    v = hsv[..., 2]
+    tophat = np.maximum(cv2.morphologyEx(v, cv2.MORPH_TOPHAT, np.ones((1, 15), np.uint8)),
+                        cv2.morphologyEx(v, cv2.MORPH_TOPHAT, np.ones((15, 1), np.uint8)))
+    return (((tophat > 30) & (hsv[..., 1] < 70) & (v > 130)) * 255).astype(np.uint8)
+
+
+def end_markings(side: int, L: float, k: float, step: float = 0.25) -> np.ndarray:
+    """One end's goal line (between the 18-yard box's sides), 6- and 18-yard
+    boxes and penalty arc, as pitch points."""
+    from scipy.ndimage import map_coordinates  # noqa: F401  (keeps imports local to the goal code)
+
+    x0 = side * L / 2
+    pts = []
+    half = k * PEN_HALF
+    pts.append(np.c_[np.full(80, x0), np.linspace(-half, half, 80)])
+    for depth, h_ in ((k * PEN_DEPTH, k * PEN_HALF), (k * GOAL_DEPTH, k * GOAL_HALF)):
+        xi = x0 - side * depth
+        n = int(2 * h_ / step)
+        pts.append(np.c_[np.full(n, xi), np.linspace(-h_, h_, n)])
+        m = int(depth / step)
+        for zz in (-h_, h_):
+            pts.append(np.c_[np.linspace(x0, xi, m), np.full(m, zz)])
+    t = np.arccos((PEN_DEPTH - PEN_SPOT) / CIRCLE_R)
+    a = np.linspace(-t, t, 40) + (np.pi if side > 0 else 0.0)
+    spot = x0 - side * k * PEN_SPOT
+    pts.append(np.c_[spot + k * CIRCLE_R * np.cos(a), k * CIRCLE_R * np.sin(a)])
+    return np.concatenate(pts)
+
+
+def goal_frame(x0: float, z0: float, w: float, h: float, step: float = 0.1):
+    """Posts and crossbar of a goal on the goal line x0 centred at z0:
+    (pitch xz, height) samples."""
+    ph = np.arange(0.2, h + 1e-6, step)  # posts, from just above the ground
+    cz = np.arange(-w / 2, w / 2 + 1e-6, step)
+    xz = np.r_[np.c_[np.full(len(ph), x0), np.full(len(ph), z0 - w / 2)],
+               np.c_[np.full(len(ph), x0), np.full(len(ph), z0 + w / 2)],
+               np.c_[np.full(len(cz), x0), z0 + cz]]
+    height = np.r_[ph, ph, np.full(len(cz), h)]
+    return xz, height
+
+
+END_TOUCHLINE_M = 35.0  # an end's local fit also uses this much of each touchline
+
+
+def end_points(side: int, L: float, W: float, k: float) -> np.ndarray:
+    """An end's markings plus the nearby stretch of both touchlines."""
+    x0 = side * L / 2
+    xs = np.linspace(x0, x0 - side * END_TOUCHLINE_M, 120)
+    return np.concatenate([end_markings(side, L, k), np.c_[xs, np.full(120, -W / 2)], np.c_[xs, np.full(120, W / 2)]])
+
+
+def fit_end_pose(line_dt: np.ndarray, pano: Pano, pose: PitchPose, side: int) -> tuple[PitchPose, float]:
+    """The pitch pose refitted on one end's markings only. The whole-pitch
+    fit can be metres off at a far end (a fraction of a degree near the
+    horizon is a long way on the ground); locally the paint pins it down."""
+    from scipy.ndimage import map_coordinates
+    from scipy.optimize import least_squares
+
+    v = np.array([pose.cx, pose.cz, pose.h, pose.rot, pose.tx, pose.tz, pose.L, pose.W, pose.k, pose.w1, pose.w2],
+                 float)
+    free = [0, 1, 2, 3, 4, 5, 6]
+    for trunc in (60, 25, 10):
+        dt = cv2.GaussianBlur(np.minimum(line_dt, trunc), (0, 0), max(1.0, trunc / 6))
+
+        def resid(sub, v=v):
+            p = v.copy()
+            p[free] = sub
+            q = PitchPose(p)
+            ang = q.angles(end_points(side, q.L, q.W, q.k))
+            x, y = pano.to_px(ang[:, 0], ang[:, 1])
+            ok = (x >= 0) & (x < pano.w - 1) & (y >= 0) & (y < pano.h - 1)
+            r = np.ones(len(x))
+            r[ok] = map_coordinates(dt, [y[ok], x[ok]], order=1) / trunc
+            return r
+
+        sol = least_squares(resid, v[free], loss="soft_l1", f_scale=0.3, x_scale=X_SCALE[free], diff_step=1e-3)
+        v[free] = sol.x
+    return PitchPose(v), float(np.median(resid(v[free])) * 10)
+
+
+GOAL_SEARCH_M = ((-15.0, 20.0), 15.0)  # candidates: along the pitch (inwards, outwards) and across
+GOAL_CANDIDATES = 3                     # best distinct candidates kept per end
+END_LINES_MAX_PX = 3.0                  # after the refit, an end's markings sit this close to the paint
+
+
+def goal_candidates(goal_dt: np.ndarray, pano: Pano, pose: PitchPose, side: int) -> list[tuple]:
+    """Goal-shaped white structures near one end: (mean distance px, x, z,
+    width, height) in `pose`'s coordinates, best first, at least 4 m apart.
+    Includes stored goals and other pitches' goals: the markings decide."""
+    from scipy.ndimage import map_coordinates
+
+    def score(x0, z0, w):
+        h = GOAL_H * min(1.0, w / GOAL_W)
+        ang = pose.angles3(*goal_frame(x0, z0, w, h, step=0.2))
+        x, y = pano.to_px(ang[:, 0], ang[:, 1])
+        ok = (x >= 0) & (x < pano.w - 1) & (y >= 0) & (y < pano.h - 1)
+        if ok.mean() < 0.9:
+            return 99.0
+        return float(np.minimum(map_coordinates(goal_dt, [y[ok], x[ok]], order=1), 8).mean())
+
+    hl = pose.L / 2
+    found = []
+    for dx in np.arange(GOAL_SEARCH_M[0][0], GOAL_SEARCH_M[0][1] + 1e-6, 0.5):
+        for z0 in np.arange(-GOAL_SEARCH_M[1], GOAL_SEARCH_M[1] + 1e-6, 0.5):
+            for w in np.arange(*GOAL_WIDTHS, 0.4):
+                found.append((score(side * (hl + dx), z0, w), side * (hl + dx), z0, w))
+    found.sort()
+    kept = []
+    for m, x0, z0, w in found:
+        if all(np.hypot(x0 - k[1], z0 - k[2]) >= 4 for k in kept):
+            # Polish around it.
+            best = (m, x0, z0, w)
+            for ox in np.arange(-0.5, 0.51, 0.1):
+                for oz in np.arange(-0.5, 0.51, 0.1):
+                    for ow in np.arange(-0.3, 0.31, 0.1):
+                        m2 = score(x0 + ox, z0 + oz, w + ow)
+                        if m2 < best[0]:
+                            best = (m2, x0 + ox, z0 + oz, w + ow)
+            kept.append((*best, GOAL_H * min(1.0, best[3] / GOAL_W)))
+        if len(kept) == GOAL_CANDIDATES:
+            break
+    return kept
+
+
+def detect_goals(bg: np.ndarray, mask: np.ndarray, pano: Pano, pose: PitchPose):
+    """The two on-pitch goals and a pitch pose corrected with them. Goal-
+    shaped white structures near each end are candidates; every left/right
+    pair is tried by refitting the pitch so the two goals stand mid goal
+    line and the paint still fits. The right pair leaves each end's goal
+    line, 6- and 18-yard boxes on the paint with the goals centred on them;
+    a stored goal or another pitch's can't. Run once per game.
+    Returns (goals, pose)."""
+    from scipy.ndimage import map_coordinates
+
+    line_dt = cv2.distanceTransform((mask == 0).astype(np.uint8), cv2.DIST_L2, 5)
+    goal_dt = cv2.distanceTransform((white_structures(bg) == 0).astype(np.uint8), cv2.DIST_L2, 5)
+
+    def mean_dist(dt, ang, trunc=12):
+        x, y = pano.to_px(ang[:, 0], ang[:, 1])
+        ok = (x >= 0) & (x < pano.w - 1) & (y >= 0) & (y < pano.h - 1)
+        d = np.full(len(x), float(trunc))
+        d[ok] = np.minimum(map_coordinates(dt, [y[ok], x[ok]], order=1), trunc)
+        return float(d.mean())
+
+    cands = {side: goal_candidates(goal_dt, pano, pose, side) for side in (-1, 1)}
+    for side in (-1, 1):
+        print(f"{'left' if side < 0 else 'right'} candidates:",
+              [(round(c[0], 1), round(c[1], 1), round(c[2], 1), round(c[3], 2)) for c in cands[side]])
+    trials = []
+    for cl in cands[-1]:
+        for cr in cands[1]:
+            sizes = {-1: (cl[3], cl[4]), 1: (cr[3], cr[4])}
+            q = refit_with_goals(mask, bg, pano, pose, sizes)
+            ends = {side: mean_dist(line_dt, q.angles(end_markings(side, q.L, q.k))) for side in (-1, 1)}
+            frames = {side: mean_dist(goal_dt, q.angles3(*goal_frame(side * q.L / 2, 0.0, *sizes[side])), 8)
+                      for side in (-1, 1)}
+            trials.append((sum(ends.values()) + sum(frames.values()), q, sizes, ends, frames))
+            print(f"  pair {cl[1]:.0f}/{cl[2]:.0f} + {cr[1]:.0f}/{cr[2]:.0f}: ends' lines {ends[-1]:.1f}/{ends[1]:.1f} px,"
+                  f" goals {frames[-1]:.1f}/{frames[1]:.1f} px; pitch {q.L:.1f} x {q.W:.1f}, camera {q.h:.2f} m")
+    _, q, sizes, ends, frames = min(trials, key=lambda t: t[0])
+    goals = []
+    for side in (-1, 1):
+        valid = ends[side] <= END_LINES_MAX_PX and frames[side] <= GOAL_MAX_DIST_PX
+        goals.append({"side": side, "x": round(side * q.L / 2, 2), "z": 0.0, "width": round(sizes[side][0], 2),
+                      "height": round(sizes[side][1], 2), "valid": bool(valid),
+                      "endLinesPx": round(ends[side], 2), "frameToWhitePx": round(frames[side], 2)})
+    return goals, q
+
+
+GOAL_WEIGHT = 3.0  # goal-frame residuals count this much more than line points
+
+
+def refit_with_goals(mask: np.ndarray, bg: np.ndarray, pano: Pano, pose: PitchPose, sizes: dict) -> PitchPose:
+    """Refit the whole-pitch pose on the painted lines plus the detected goal
+    frames: goals are 3D, of known size, at the middle of each goal line, so
+    they fix the camera height and the far ends' distances where flat lines
+    seen at a grazing angle can't."""
+    from scipy.ndimage import map_coordinates
+    from scipy.optimize import least_squares
+
+    line_dt = cv2.distanceTransform((mask == 0).astype(np.uint8), cv2.DIST_L2, 5)
+    goal_dt = cv2.distanceTransform((white_structures(bg) == 0).astype(np.uint8), cv2.DIST_L2, 5)
+    v = np.array([pose.cx, pose.cz, pose.h, pose.rot, pose.tx, pose.tz, pose.L, pose.W, pose.k, pose.w1, pose.w2],
+                 float)
+    free = [0, 1, 2, 3, 4, 5, 6, 7, 9, 10]
+    sizes = [(side, w, h) for side, (w, h) in sizes.items()]
+
+    def sample(dt, ang):
+        x, y = pano.to_px(ang[:, 0], ang[:, 1])
+        ok = (x >= 0) & (x < pano.w - 1) & (y >= 0) & (y < pano.h - 1)
+        r = np.ones(len(x))
+        return ok, x, y, r
+
+    for trunc in (40, 12, 6):
+        ldt = cv2.GaussianBlur(np.minimum(line_dt, trunc), (0, 0), max(1.0, trunc / 6))
+        gdt = cv2.GaussianBlur(np.minimum(goal_dt, trunc), (0, 0), max(1.0, trunc / 6))
+
+        def resid(sub, v=v):
+            p = v.copy()
+            p[free] = sub
+            q = PitchPose(p)
+            parts = []
+            for dt, ang, wgt in [(ldt, q.angles(pitch_lines(q.L, q.W, q.k)), 1.0)] + [
+                    (gdt, q.angles3(*goal_frame(side * q.L / 2, 0.0, w, h)), GOAL_WEIGHT) for side, w, h in sizes]:
+                x, y = pano.to_px(ang[:, 0], ang[:, 1])
+                ok = (x >= 0) & (x < pano.w - 1) & (y >= 0) & (y < pano.h - 1)
+                r = np.zeros(len(x)) if dt is ldt else np.ones(len(x))  # goal points must stay in view
+                r[ok] = map_coordinates(dt, [y[ok], x[ok]], order=1) / trunc
+                parts.append(wgt * r)
+            return np.concatenate(parts)
+
+        sol = least_squares(resid, v[free], loss="soft_l1", f_scale=0.3, x_scale=X_SCALE[free], diff_step=1e-3)
+        v[free] = sol.x
+    return PitchPose(v)
+
+
+def draw_goals(bg, pano, pose, goals, path):
+    crops = []
+    for g in goals:
+        img = bg.copy()
+        ang = pose.angles(end_markings(g["side"], pose.L, pose.k))
+        x, y = pano.to_px(ang[:, 0], ang[:, 1])
+        for xi, yi in zip(x.astype(int), y.astype(int)):
+            if 0 <= xi < pano.w and 0 <= yi < pano.h:
+                cv2.circle(img, (xi, yi), 1, (255, 255, 0), -1)
+        ang = pose.angles3(*goal_frame(g["x"], g["z"], g["width"], g["height"], step=0.05))
+        x, y = pano.to_px(ang[:, 0], ang[:, 1])
+        for xi, yi in zip(x.astype(int), y.astype(int)):
+            cv2.circle(img, (xi, yi), 1, (0, 0, 255) if g["valid"] else (0, 165, 255), -1)
+        c = pose.angles3(np.array([[g["x"], g["z"]]]), [1.0])[0]
+        cx, cy = pano.to_px(c[0], c[1])
+        crop = img[max(0, int(cy) - 110):int(cy) + 150, max(0, int(cx) - 420):int(cx) + 420]
+        crop = cv2.resize(crop, (1260, int(1260 * crop.shape[0] / crop.shape[1])))
+        cv2.putText(crop, f"{'left' if g['side'] < 0 else 'right'} goal: {'VALID' if g['valid'] else 'rejected'},"
+                    f" {g['width']:.2f} x {g['height']:.2f} m; lines {g['endLinesPx']:.1f}px, frame {g['frameToWhitePx']:.1f}px",
+                    (10, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        crops.append(crop)
+    cv2.imwrite(str(path), np.vstack(crops))
+
+
+def goals_main(rec: Path) -> None:
+    """Detect the on-pitch goals once per game and correct the pitch map with
+    them (needs a normal run first). Writes pitch/goals.json, goals.jpg and
+    an updated pitch.json (the lines-only fit is kept as pitch_lines_only.json)."""
+    out = rec / "pitch"
+    pano = Pano()
+    bg = cv2.imread(str(out / "background.png"))
+    base = out / "pitch_lines_only.json"
+    if not base.exists():
+        base.write_text((out / "pitch.json").read_text())
+    j = json.loads(base.read_text())
+    pose = PitchPose([*j["cameraXZ"], j["heightM"], j["rotRad"], *j["tiltRad"], j["lengthM"], j["widthM"],
+                      j["markingScale"], *j.get("warpDeg", [0.0, 0.0])])
+    goals, q = detect_goals(bg, line_mask(bg), pano, pose)
+    for g in goals:
+        print(f"{'left ' if g['side'] < 0 else 'right'} goal: {'valid' if g['valid'] else 'REJECTED'}; "
+              f"{g['width']} x {g['height']} m; end markings {g['endLinesPx']} px from paint,"
+              f" frame {g['frameToWhitePx']} px from white")
+    draw_goals(bg, pano, q, goals, out / "goals.jpg")
+    (out / "goals.json").write_text(json.dumps({"goals": goals}, indent=1))
+    if all(g["valid"] for g in goals):
+        print(f"pitch map corrected: {pose.L:.1f} x {pose.W:.1f} -> {q.L:.1f} x {q.W:.1f} m,"
+              f" camera {pose.h:.2f} -> {q.h:.2f} m up")
+        (out / "pitch.json").write_text(json.dumps({
+            "cameraXZ": [q.cx, q.cz], "heightM": q.h, "rotRad": q.rot, "tiltRad": [q.tx, q.tz],
+            "lengthM": q.L, "widthM": q.W, "markingScale": q.k, "warpDeg": [q.w1, q.w2],
+            "fittedWith": "lines+goals"}, indent=1))
+        cv2.imwrite(str(out / "overlay_goals.jpg"), cv2.resize(draw(bg, pano, q), (pano.w // 3, pano.h // 3)))
+
+
+def load_goals(rec: Path):
+    path = rec / "pitch" / "goals.json"
+    return [g for g in json.loads(path.read_text())["goals"] if g["valid"]] if path.exists() else None
+
+
 def main(rec: Path, seg: int) -> None:
     out = rec / "pitch"
     out.mkdir(exist_ok=True)
@@ -353,15 +666,19 @@ def main(rec: Path, seg: int) -> None:
     # painted centre circle spans ~32 deg and dips 2.5-5.3 deg, which puts
     # its centre ~31 m away with the camera ~1.9 m up; the near touchline
     # passes under the panorama, so it is within ~2 m of the camera.
-    v0 = [0.0, -31.5, 1.9, np.radians(-4), 0.0, 0.0, 100.0, 59.0, 1.0]
+    v0 = [0.0, -31.5, 1.9, np.radians(-4), 0.0, 0.0, 100.0, 59.0, 1.0, 0.0, 0.0]
     cv2.imwrite(str(out / "overlay_init.jpg"), cv2.resize(draw(bg, pano, PitchPose(v0)), (pano.w // 3, pano.h // 3)))
     pose = fit_pose(mask, pano, v0)
     cv2.imwrite(str(out / "overlay.jpg"), cv2.resize(draw(bg, pano, pose), (pano.w // 3, pano.h // 3)))
     (out / "pitch.json").write_text(json.dumps({
         "cameraXZ": [pose.cx, pose.cz], "heightM": pose.h, "rotRad": pose.rot,
-        "tiltRad": [pose.tx, pose.tz], "lengthM": pose.L, "widthM": pose.W, "markingScale": pose.k}, indent=1))
+        "tiltRad": [pose.tx, pose.tz], "lengthM": pose.L, "widthM": pose.W, "markingScale": pose.k,
+        "warpDeg": [pose.w1, pose.w2]}, indent=1))
     place_detections(rec, pose)
 
 
 if __name__ == "__main__":
-    main(Path(sys.argv[1]), int(sys.argv[2]))
+    if len(sys.argv) > 2 and sys.argv[2] == "goals":
+        goals_main(Path(sys.argv[1]))
+    else:
+        main(Path(sys.argv[1]), int(sys.argv[2]))
