@@ -45,7 +45,7 @@ STATIC_MIN_S = 30.0       # a spot seen over this long without moving is static 
                           # kick sits still for 10 s or more; 4 s removed it)
 NEAR_PLAYER_M = 6.0       # the match ball is usually this close to someone
 BRIDGE_S = 1.0            # interpolate gaps up to this long
-PITCH_MARGIN_M = 1.0      # candidates this far outside the lines still count (the ball rolls over them)
+PITCH_MARGIN_M = 3.0      # candidates this far outside the lines still count (balls at the corners and touchlines)
 MIN_HITS = 2              # a track shorter than this scores nothing
 MIN_JUDGE = 0.3           # candidates scored below this by balljudge.py are ignored (0: judge not used)
 BODY_FRAC = 0.8           # candidates in the top 80% of a person's box are kit, hands, knees

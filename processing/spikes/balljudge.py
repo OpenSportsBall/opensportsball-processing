@@ -7,10 +7,10 @@
 # ///
 """A small classifier that judges ball candidates from a crop around each.
 
-    uv run processing/spikes/balljudge.py data  footage/rec3      # crops from the labels + motion.py's candidates
-    uv run processing/spikes/balljudge.py train footage/rec3 [epochs]
+    uv run processing/spikes/balljudge.py data  footage/rec3 [train clip sets] [test clip sets]   # e.g. seg9 seg3
+    uv run processing/spikes/balljudge.py train footage/rec3 [epochs] [model name]
     uv run processing/spikes/balljudge.py eval  footage/rec3      # held-back moments: candidates ranked by the judge
-    uv run processing/spikes/balljudge.py clip  footage/rec3 footage/rec3/detect/ball_9_60_120.json  # score a clip's candidates
+    uv run processing/spikes/balljudge.py clip  footage/rec3 <candidates.json> [model name] [output tag]
 
 Motion candidates (motion.py) are nearly free but ~120 per frame; the
 fine-tuned detector is accurate but scans ~28 tiles of 640 px per frame.
@@ -105,14 +105,46 @@ def expected_at(rec: Path):
     return at
 
 
-def data(rec: Path) -> None:
+def clip_frames(rec: Path, name: str, split: str):
+    """Frames of a clip label set (labelset.py clip) with their balls and,
+    as candidates, every detection the clip's detector made at that
+    moment (its false ones are the most useful negatives)."""
+    lab = rec / f"labels_{name}"
+    items = json.loads((lab / "items.json").read_text())
+    labels = json.loads((lab / "labels.json").read_text())
+    seg0, start = int(items[0]["id"].split("_")[0][1:]), float(items[0]["id"].split("_")[1])
+    files = sorted((rec / "detect").glob(f"ball_{seg0}_{start:g}_*.json"))
+    cands = json.loads(files[0].read_text()) if files else None
+    out = []
+    for it in items:
+        k = int(round(it["clipT"] * cands["fps"])) if cands else -1
+        for f in it["frames"]:
+            v = labels.get(f["id"])
+            if not v or v["status"] == "unsure":
+                continue
+            phone = 0 if f["phone"] == "main" else 1
+            dets = [{"x": (d["box"][0] + d["box"][2]) / 2, "y": (d["box"][1] + d["box"][3]) / 2, "expect": 0}
+                    for d in cands["frames"][k]["detections"] if d["phone"] == phone] if 0 <= k < len(cands["frames"]) else []
+            out.append((split, dict(f, candidates=[]), v.get("balls", []), dets, lab))
+    return out
+
+
+def data(rec: Path, train_sets=(), test_sets=()) -> None:
+    """Crops from the random label set (split by moment into train/valid)
+    plus clip sets: `train_sets` join the training data, `test_sets` are
+    held out whole (split "test")."""
     lab_dir, frames = frames_with_split(rec)
+    frames = [(sp, f, balls, cands, lab_dir) for sp, f, balls, cands in frames]
+    for name in train_sets:
+        frames += clip_frames(rec, name, "train")
+    for name in test_sets:
+        frames += clip_frames(rec, name, "test")
     out = rec / "balljudge"
     out.mkdir(exist_ok=True)
     diam_at = expected_at(rec)
     rng = np.random.default_rng(3)
     X, y, split, meta = [], [], [], []
-    for k, (sp, f, balls, cands) in enumerate(frames):
+    for k, (sp, f, balls, cands, lab_dir) in enumerate(frames):
         img = cv2.imread(str(lab_dir / f["image"]))
         for b in balls:
             d = diam_at(f["phone"], b["x"], b["y"])
@@ -120,8 +152,12 @@ def data(rec: Path) -> None:
                 dx, dy = rng.integers(-JITTER, JITTER + 1, size=2)
                 X.append(crop_at(img, b["x"] + dx, b["y"] + dy, d)); y.append(1); split.append(sp)
                 meta.append((f["id"], "ball"))
-        negs = [(c["x"], c["y"], expect_px(c)) for c in cands
+        negs = [(c["x"], c["y"], expect_px(c) if c.get("expect") else diam_at(f["phone"], c["x"], c["y"])) for c in cands
                 if all(np.hypot(c["x"] - b["x"], c["y"] - b["y"]) > HIT_PX for b in balls)]
+        if not f["candidates"] and not cands:  # a clip frame with no detections: random field crops
+            h, w = img.shape[:2]
+            negs = [(float(x), float(yy), diam_at(f["phone"], x, yy))
+                    for x, yy in zip(rng.integers(0, w, 12), rng.integers(760, h, 12))]
         hard = [(c["x"], c["y"], diam_at(f["phone"], c["x"], c["y"])) for c in f["candidates"]
                 if all(np.hypot(c["x"] - b["x"], c["y"] - b["y"]) > HIT_PX for b in balls)]
         keep = [negs[i] for i in rng.permutation(len(negs))[:NEG_PER_FRAME]] + hard
@@ -131,7 +167,7 @@ def data(rec: Path) -> None:
             print(f"{k + 1}/{len(frames)} frames, {len(X)} crops", flush=True)
     X = np.stack(X); y = np.array(y, np.uint8); split = np.array(split)
     np.savez_compressed(out / "crops.npz", X=X, y=y, split=split)
-    for sp in ("train", "valid"):
+    for sp in ("train", "valid", "test"):
         m = split == sp
         print(f"{sp}: {m.sum()} crops, {y[m].sum()} positives")
 
@@ -154,7 +190,7 @@ def to_tensor(X: np.ndarray, torch):
     return torch.from_numpy(X[..., ::-1].copy()).permute(0, 3, 1, 2).float() / 255
 
 
-def train(rec: Path, epochs: int) -> None:
+def train(rec: Path, epochs: int, name: str = "judge") -> None:
     import torch
     import torch.nn.functional as F
 
@@ -162,7 +198,9 @@ def train(rec: Path, epochs: int) -> None:
     z = np.load(out / "crops.npz")
     X, y, split = z["X"], z["y"], z["split"]
     dev = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
-    tr, va = split == "train", split == "valid"
+    tr, va, te = split == "train", split == "valid", split == "test"
+    if te.any():
+        Xte, yte = to_tensor(X[te], torch).to(dev), y[te]
     Xt, yt = to_tensor(X[tr], torch), torch.from_numpy(y[tr]).float()
     Xv, yv = to_tensor(X[va], torch).to(dev), torch.from_numpy(y[va]).float().to(dev)
     net = Judge.build().to(dev)
@@ -187,8 +225,13 @@ def train(rec: Path, epochs: int) -> None:
         ap = average_precision(s.cpu().numpy(), yv.cpu().numpy())
         if ap > best:
             best = ap
-            torch.save(net.state_dict(), out / "judge.pt")
-        print(f"epoch {ep}: loss {loss.item():.3f}, valid AP {ap:.3f} (best {best:.3f}), {(time.time() - t0) / 60:.1f} min",
+            torch.save(net.state_dict(), out / f"{name}.pt")
+        extra = ""
+        if te.any():
+            with torch.no_grad():
+                st = torch.sigmoid(torch.cat([net(Xte[i:i + 512]).squeeze(1) for i in range(0, len(Xte), 512)]))
+            extra = f", held-out clip AP {average_precision(st.cpu().numpy(), yte):.3f}"
+        print(f"epoch {ep}: loss {loss.item():.3f}, valid AP {ap:.3f} (best {best:.3f}){extra}, {(time.time() - t0) / 60:.1f} min",
               flush=True)
 
 
@@ -198,12 +241,12 @@ def average_precision(scores, labels) -> float:
     return float((prec * l_).sum() / max(1, l_.sum()))
 
 
-def load_judge(rec: Path):
+def load_judge(rec: Path, name: str = "judge"):
     import torch
 
     dev = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
     net = Judge.build().to(dev)
-    net.load_state_dict(torch.load(rec / "balljudge" / "judge.pt", map_location=dev))
+    net.load_state_dict(torch.load(rec / "balljudge" / f"{name}.pt", map_location=dev))
     net.eval()
 
     def score(crops: np.ndarray) -> np.ndarray:
@@ -264,7 +307,7 @@ def evaluate(rec: Path) -> None:
     print(f"\nstock detector alone (conf >= 0.2): match ball {100 * det_only / n_match:.0f}%")
 
 
-def judge_clip(rec: Path, cands_path: Path) -> None:
+def judge_clip(rec: Path, cands_path: Path, name: str = "judge", out_tag: str = "") -> None:
     """Adds a "judge" score to every candidate in a ballclip.py file: the
     clip is streamed once per phone at the candidates' frame rate (a
     couple of minutes for 2 minutes of 4K), each candidate cropped from
@@ -280,7 +323,7 @@ def judge_clip(rec: Path, cands_path: Path) -> None:
     devs = {d["role"]: d for d in manifest["devices"]}
     flip = [report["upsideDown"]["main"], report["upsideDown"]["secondary"]]
     diam_at = expected_at(rec)
-    score = load_judge(rec)
+    score = load_judge(rec, name)
     W, H = follow.SRC_W, follow.SRC_H
     t0, n = time.time(), 0
     for phone in (0, 1):
@@ -300,6 +343,8 @@ def judge_clip(rec: Path, cands_path: Path) -> None:
                 d["judge"] = round(float(v), 3)
             n += len(dets)
         print(f"{role}: done, {n} candidates judged, {(time.time() - t0) / 60:.1f} min", flush=True)
+    if out_tag:
+        cands_path = cands_path.with_name(cands_path.name[:-5] + f".{out_tag}.json")
     cands_path.write_text(json.dumps(data))
     js = np.array([d["judge"] for f in frames for d in f["detections"] if "judge" in d])
     print(f"judge >= 0.5: {100 * (js >= 0.5).mean():.0f}% of candidates; >= 0.9: {100 * (js >= 0.9).mean():.0f}%")
@@ -308,11 +353,14 @@ def judge_clip(rec: Path, cands_path: Path) -> None:
 if __name__ == "__main__":
     cmd, rec = sys.argv[1], Path(sys.argv[2])
     if cmd == "clip":
-        judge_clip(rec, Path(sys.argv[3]))
+        judge_clip(rec, Path(sys.argv[3]), sys.argv[4] if len(sys.argv) > 4 else "judge",
+                   sys.argv[5] if len(sys.argv) > 5 else "")
     elif cmd == "data":
-        data(rec)
+        train_sets = [x for x in (sys.argv[3] if len(sys.argv) > 3 else "").split(",") if x]
+        test_sets = [x for x in (sys.argv[4] if len(sys.argv) > 4 else "").split(",") if x]
+        data(rec, train_sets, test_sets)
     elif cmd == "train":
-        train(rec, int(sys.argv[3]) if len(sys.argv) > 3 else 30)
+        train(rec, int(sys.argv[3]) if len(sys.argv) > 3 else 30, sys.argv[4] if len(sys.argv) > 4 else "judge")
     elif cmd == "eval":
         evaluate(rec)
     else:
