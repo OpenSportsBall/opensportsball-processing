@@ -11,12 +11,15 @@ Run after phase0.py (it reads phase0/report.json for the audio offsets):
 
     uv run processing/spikes/follow.py footage/rec3 <segment> <start s> <seconds> [play|players] [features]
 
+The clip may run on into the following segments (game_stream).
+
 features: comma-separated, e.g. goalkick,goalframe (see play_targets).
 "ball" needs ballclip.py's candidates for the same segment, start and length.
-Best so far on the night game: "play goalkick,goalframe,unsure" (catches
-every key moment in the test clip, but zoomed out at times), then "play
-goalframe". Tried and not adopted: lead, nowalk, fastboost; ball is
-promising but tracks the ball only part of the time (docs/BACKLOG.md).
+Best so far on the night game, scored against reviewed must-see boxes
+(playbench.py, 13 moments): "play goalkick,goalframe,unsure,ball,goalin"
+captures 9/13 at a 54 deg median width; without the ball ("A",
+goalkick,goalframe,unsure) 4/13. Tried and not adopted: lead, nowalk,
+fastboost, weak, allnear, flow, lone, gk2, ballhold (docs/BACKLOG.md).
 Goal positions come from `pitch.py <recording> goals` when it has run.
 
 1. Geometry: the panorama stitcher's cameras (focal length, principal
@@ -265,22 +268,84 @@ class Stopwatch:
 
 # --------------------------------------------------------------- media io
 
+PREROLL_S = 1.0  # decode this much before a seek point and drop it (see frame_stream)
+
+
 def frame_stream(path: Path, start: float, seconds: float, width: int, fps: float = FPS):
     """Yields raw NV12 frames (flat uint8) at constant `fps`, decoded in
-    hardware, as the phone recorded them (no rotation applied)."""
+    hardware, as the phone recorded them (no rotation applied).
+
+    Decoding starts PREROLL_S early and drops those frames: right after a
+    seek the decoder's first ~0.25-0.5 s is missing and the fps filter
+    fills it by repeating one frame (a freeze at the start of every clip,
+    and at every segment switch)."""
     height = round(width * 9 / 16)
+    pre = min(PREROLL_S, start)
+    skip = int(round(pre * fps))
     proc = subprocess.Popen(
-        ["ffmpeg", "-v", "error", "-noautorotate", "-hwaccel", "videotoolbox", "-ss", f"{start:.4f}",
-         "-i", str(path), "-t", f"{seconds:.3f}", "-vf", f"fps={fps},scale={width}:{height}",
+        ["ffmpeg", "-v", "error", "-noautorotate", "-hwaccel", "videotoolbox", "-ss", f"{start - pre:.4f}",
+         "-i", str(path), "-t", f"{seconds + pre:.3f}", "-vf", f"fps={fps},scale={width}:{height}",
          "-f", "rawvideo", "-pix_fmt", "nv12", "-"],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     size = width * height * 3 // 2
-    while True:
-        buf = bytearray(size)  # writable, so torch can share it without a copy
-        if proc.stdout.readinto(buf) < size:
-            break
-        yield np.frombuffer(buf, np.uint8)
-    proc.wait()
+    try:
+        n = 0
+        while True:
+            buf = bytearray(size)  # writable, so torch can share it without a copy
+            if proc.stdout.readinto(buf) < size:
+                break
+            n += 1
+            if n > skip:
+                yield np.frombuffer(buf, np.uint8)
+    finally:  # also when the caller stops early
+        proc.kill()
+        proc.wait()
+
+
+def game_stream(rec: Path, devs: dict, report: dict, phone: int, seg: int, start: float, seconds: float,
+                width: int, fps: float = FPS):
+    """Exactly round(seconds * fps) frames of one phone from `start` s into
+    segment `seg` on Main's clock, carrying on into the following segments.
+    Main's segments are taken as back to back (their durations); each piece
+    of Secondary is read at that segment's own audio offset, which jumps at
+    switches. Where a phone has no frame for a moment (the offset puts it
+    before its segment began, or a file ends early) its nearest frame is
+    repeated, so the two phones stay frame-aligned."""
+    role = ("main", "secondary")[phone]
+    segs_main = devs["main"]["segments"]
+    total = int(round(seconds * fps))
+    sent, t, k, last = 0, start, seg, None
+    while sent < total:
+        if k >= len(segs_main):
+            raise SystemExit(f"clip runs past the last segment ({len(segs_main)})")
+        dur = segs_main[k]["durationMs"] / 1000
+        if t >= dur:  # start beyond this segment: move on
+            t, k = t - dur, k + 1
+            continue
+        n = min(total - sent, int(round((dur - t) * fps)))
+        off = 0.0 if phone == 0 else report["segments"][k]["offsetS"]
+        local = t + off
+        lead = int(round(-local * fps)) if local < 0 else 0
+        path = rec / devs[role]["segments"][k]["objectKey"]
+        got = 0
+        frames = frame_stream(path, max(0.0, local), (n - lead) / fps + 1 / fps, width, fps)
+        for buf in frames:
+            if got == 0:
+                for _ in range(min(lead, n)):  # before this segment began: hold its first frame
+                    yield buf
+                    got += 1
+            if got >= n:
+                break
+            yield buf
+            last, got = buf, got + 1
+        frames.close()
+        while got < n and last is not None:  # file ended early: hold its last frame
+            yield last
+            got += 1
+        if k != seg and phone == 0:
+            print(f"crossed into segment {k} at {sent / fps:.2f} s of the clip", flush=True)
+        sent += n
+        t, k = 0.0, k + 1
 
 
 def prefetch(gen, depth: int = 6):
@@ -525,6 +590,21 @@ GOAL_MIN_PLAYERS = 4     # ... at least this many
 GOAL_MAX_HFOV = 75.0     # the union must fit in this
 GOAL_RECENT_S = 10.0     # if it doesn't fit, prefer the goal end if play was there this recently
 UNSURE_HFOV = ((1, 55.0), (2, 42.0))
+BALL_HOLD_S = 4.0        # ballhold: in a lull, the ball seen this recently is where play stopped ...
+BALL_STILL_M = 2.0       # ... and only if it moved less than this in its last second (placed for a restart)
+BALL_HOLD_NEAR_M = 35.0  # ... frame it with the players within this (the restart's taker and group)
+INSIDE_M = 0.0           # players this far outside the lines still count (throw-in takers stand outside)
+LONE_SPEED = 5.0         # lone: a runner faster than this, away from the hotspot, may have the ball ...
+LONE_MAX_HFOV = 75.0     # ... include them if the view stays within this
+GOAL_IN_M = 30.0         # goalin: hotspot within this of a goal line keeps the goal mouth in frame
+GK_COOLDOWN_S = 20.0     # gk2: no new goal kick at the same end this soon after one ended
+GK_LEAVE_M = 35.0        # gk2: a goal kick framing ends once the hotspot is this far from that goal
+GK_GONE_S = 1.5          # gk2: ... or the lone-taker pattern has been absent this long
+FLOW_S = 0.5             # flow: aim ahead of the hotspot by the nearby runners' mean velocity x this
+FLOW_MAX_M = 6.0         # ... at most this far
+WEAK_TRACKED = 13        # weak: fewer players tracked than this (1 s median) ...
+WEAK_JUMP_M = 15.0       # ... or the hotspot wanders this far from its +-1 s mean
+WEAK_HFOV = (60.0, 80.0) # ... then frame all tracked players, this wide
 BALL_MIN_RUN_S = 0.5     # ball: trust the tracked ball only in stretches at least this long
 BALL_OFF_PITCH_M = 3.0   # ... and within this of the lines (a lofted ball projects beyond them)  # unsure: with at most N runners near the hotspot, at least this wide
 LEAD_S = 1.0             # lead: aim where the hotspot will be this much later (processing is offline)
@@ -601,7 +681,21 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
     the hotspot: don't zoom in tight, the ball may be elsewhere), "lead"
     (aim where the hotspot will be LEAD_S later), "ball" (aim at the
     tracked ball where there is one, see ball_track; elsewhere as before),
-    and "nowalk" / "fastboost" (hotspot weights, see hot_weights)."""
+    "nowalk" / "fastboost" (hotspot weights, see hot_weights), "weak"
+    (when few players are tracked or the hotspot jumps around, the player
+    signal can't be trusted: frame all tracked players, wide, instead of
+    the hotspot or a lull hold), "allnear" (always frame everyone near the
+    hotspot, not just the runners), "flow" (aim a little ahead of the
+    hotspot along the nearby runners' mean velocity), "lone" (a fast runner
+    away from the hotspot may have the ball: include them if it fits),
+    "goalin" (hotspot within GOAL_IN_M of a goal keeps the goal mouth in
+    frame), "ballhold" (in a lull, stay on where the ball was last seen,
+    with the players around it) and "gk2" (goal kicks
+    end when the hotspot leaves that end or the taker pattern is gone, and
+    don't repeat at the same end for GK_COOLDOWN_S).
+
+    A feature "NAME=value" (value "a:b" for a pair) overrides a module
+    constant for this run, e.g. "WEAK_HFOV=50:70", "LULL_RUNNERS=-1"."""
     import pitch as P
     import play
 
@@ -615,7 +709,7 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
         xz = []
         for yw, _, _, feet in fd:
             x, z = pose.to_pitch(np.degrees(yw), np.degrees(feet))
-            if not np.isnan(x) and abs(x) <= hl and abs(z) <= hw:
+            if not np.isnan(x) and abs(x) <= hl + INSIDE_M and abs(z) <= hw + INSIDE_M:
                 xz.append((float(x), float(z)))
         inside.append(xz)
     loiter = loiter_cells(inside, pose)
@@ -644,77 +738,6 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
         vfov = 2 * np.arctan(np.tan(hfov / 2) * OUT_H / OUT_W)
         return aim[0], aim[1] - AIM_UP * vfov, hfov
 
-    tyaw, tpitch, thfov = np.zeros(T), np.zeros(T), np.zeros(T)
-    running = np.array([(np.hypot(*v.T) > play.RUN_SPEED).sum() if len(v) else 0 for v in vel])
-    spots = hotspots(pos, vel, FPS, features)
-    ball_at = ball_track(rec, start, T, pos, pose) if "ball" in features else np.full((T, 2), np.nan)
-    has_ball = ~np.isnan(ball_at[:, 0])
-    lead = int(LEAD_S * FPS) if "lead" in features else 0
-    last = (0.5 * (y0 + y1), 0.5 * (p0 + p1), np.radians(MAX_HFOV))
-    near_runners = np.zeros(T)
-    for i in range(T):
-        j = min(T - 1, i + lead)  # with "lead", the hotspot and players LEAD_S ahead
-        if len(pos[j]) >= 2 and not np.isnan(spots[j, 0]):
-            # Frame the players around the hotspot (running ones if enough).
-            near = np.hypot(*(pos[j] - spots[j]).T) < 2 * HOT_BANDWIDTH_M
-            run = near & (np.hypot(*vel[j].T) > play.RUN_SPEED)
-            near_runners[i] = run.sum()
-            who = pos[j][run] if run.sum() >= 2 else pos[j][near] if near.sum() >= 2 else pos[j]
-            last = finish(*target(spots[j], who))
-        if has_ball[i]:
-            # Frame the ball and the players around it.
-            b = ball_at[i]
-            near = pos[i][np.hypot(*(pos[i] - b).T) < 2 * HOT_BANDWIDTH_M] if len(pos[i]) else np.zeros((0, 2))
-            last = finish(*target(b, np.vstack([b[None], near])))
-        tyaw[i], tpitch[i], thfov[i] = last
-    if "unsure" in features:
-        # Few runners near the hotspot: the evidence is thin, so stay wide.
-        n = np.convolve(near_runners, np.ones(int(FPS)) / int(FPS), mode="same")
-        widened = 0
-        for i in range(T):
-            for most, wide in UNSURE_HFOV:
-                if n[i] <= most and thfov[i] < np.radians(wide) and not has_ball[i]:
-                    vfov_old = 2 * np.arctan(np.tan(thfov[i] / 2) * OUT_H / OUT_W)
-                    thfov[i] = np.radians(wide)
-                    vfov_new = 2 * np.arctan(np.tan(thfov[i] / 2) * OUT_H / OUT_W)
-                    tpitch[i] -= AIM_UP * (vfov_new - vfov_old)  # keep the aim point where it was in the view
-                    widened += 1
-                    break
-        print(f"unsure: {widened} frames widened (few runners near the hotspot)")
-
-    # Lulls: few runners for long enough (median-filtered so a lone jogger
-    # doesn't break one up).
-    lull = median_filter((running <= LULL_RUNNERS).astype(np.uint8), int(FPS) | 1) > 0
-    events, i = [], 0
-    while i < T:
-        if not lull[i]:
-            i += 1
-            continue
-        j = i
-        while j < T and lull[j]:
-            j += 1
-        if (j - i) / FPS >= LULL_MIN_S:
-            k = max(0, i - int(HOLD_BACK_S * FPS))
-            held = (tyaw[k], tpitch[k], thfov[k])
-            takers = 0
-            for f in range(i, j):
-                if has_ball[f]:
-                    continue  # the ball says where the restart is
-                tk = restart_taker(pos[f], vel[f], pose)
-                if tk is not None:
-                    kind, at = tk
-                    others = pos[f][np.hypot(*(pos[f] - at).T) > 1.0]
-                    group = np.median(others, axis=0)
-                    # Aim between taker and the group; cover both.
-                    aim, spread = target((at + group) / 2, np.vstack([at[None], others]))
-                    tyaw[f], tpitch[f], thfov[f] = finish(aim, spread, RESTART_MAX_HFOV)
-                    takers += 1
-                    last_kind = kind
-                else:
-                    tyaw[f], tpitch[f], thfov[f] = held
-            events.append({"startS": round(start + i / FPS, 2), "endS": round(start + j / FPS, 2),
-                           "restartFrames": takers, "restart": last_kind if takers else None})
-        i = j
     hl, hw = pose.L / 2, pose.W / 2
     # The on-pitch goals from pitch.py's once-per-game detection, else the
     # pitch model's goal-line centres.
@@ -735,6 +758,148 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
             return None
         centre = np.radians(pose.angles(np.mean(points, axis=0)[None])[0])
         return finish(np.array([(lo_ + hi_) / 2, centre[1]]), spread, max_hfov)
+
+    tyaw, tpitch, thfov = np.zeros(T), np.zeros(T), np.zeros(T)
+    mode = ["hotspot"] * T  # which rule set each frame's aim (play_debug.json)
+    running = np.array([(np.hypot(*v.T) > play.RUN_SPEED).sum() if len(v) else 0 for v in vel])
+    spots = hotspots(pos, vel, FPS, features)
+    ball_at = ball_track(rec, start, T, pos, pose) if "ball" in features else np.full((T, 2), np.nan)
+    has_ball = ~np.isnan(ball_at[:, 0])
+    lead = int(LEAD_S * FPS) if "lead" in features else 0
+    last = (0.5 * (y0 + y1), 0.5 * (p0 + p1), np.radians(MAX_HFOV))
+    near_runners = np.zeros(T)
+    for i in range(T):
+        j = min(T - 1, i + lead)  # with "lead", the hotspot and players LEAD_S ahead
+        if len(pos[j]) >= 2 and not np.isnan(spots[j, 0]):
+            # Frame the players around the hotspot (running ones if enough).
+            near = np.hypot(*(pos[j] - spots[j]).T) < 2 * HOT_BANDWIDTH_M
+            run = near & (np.hypot(*vel[j].T) > play.RUN_SPEED)
+            near_runners[i] = run.sum()
+            if "allnear" in features:
+                who = pos[j][near] if near.sum() >= 2 else pos[j]
+            else:
+                who = pos[j][run] if run.sum() >= 2 else pos[j][near] if near.sum() >= 2 else pos[j]
+            aim_at = spots[j]
+            if "flow" in features and run.sum() >= 2:
+                v = vel[j][run].mean(0) * FLOW_S
+                n_v = np.hypot(*v)
+                aim_at = spots[j] + v * (min(n_v, FLOW_MAX_M) / max(n_v, 1e-9))
+            last = finish(*target(aim_at, who))
+            # Things the hotspot framing may leave out, if they fit in view.
+            extra = []
+            if "lone" in features:
+                fast = (~near) & (np.hypot(*vel[j].T) > LONE_SPEED)
+                extra += list(pos[j][fast])
+            if "goalin" in features:
+                side = 1 if aim_at[0] > 0 else -1
+                if side * (goal_at[side][0] - aim_at[0]) <= GOAL_IN_M:
+                    extra.append(goal_at[side])
+            if extra:
+                fr = span(np.vstack([who, np.array(extra)]), LONE_MAX_HFOV)
+                if fr is not None:
+                    last = fr
+        if has_ball[i]:
+            # Frame the ball and the players around it.
+            b = ball_at[i]
+            near = pos[i][np.hypot(*(pos[i] - b).T) < 2 * HOT_BANDWIDTH_M] if len(pos[i]) else np.zeros((0, 2))
+            last = finish(*target(b, np.vstack([b[None], near])))
+        tyaw[i], tpitch[i], thfov[i] = last
+        mode[i] = "ball" if has_ball[i] else "hotspot"
+    if "unsure" in features:
+        # Few runners near the hotspot: the evidence is thin, so stay wide.
+        n = np.convolve(near_runners, np.ones(int(FPS)) / int(FPS), mode="same")
+        widened = 0
+        for i in range(T):
+            for most, wide in UNSURE_HFOV:
+                if n[i] <= most and thfov[i] < np.radians(wide) and not has_ball[i]:
+                    vfov_old = 2 * np.arctan(np.tan(thfov[i] / 2) * OUT_H / OUT_W)
+                    thfov[i] = np.radians(wide)
+                    mode[i] = "unsure"
+                    vfov_new = 2 * np.arctan(np.tan(thfov[i] / 2) * OUT_H / OUT_W)
+                    tpitch[i] -= AIM_UP * (vfov_new - vfov_old)  # keep the aim point where it was in the view
+                    widened += 1
+                    break
+        print(f"unsure: {widened} frames widened (few runners near the hotspot)")
+
+    # Lulls: few runners for long enough (median-filtered so a lone jogger
+    # doesn't break one up).
+    lull = median_filter((running <= LULL_RUNNERS).astype(np.uint8), int(FPS) | 1) > 0
+    events, i = [], 0
+    while i < T:
+        if not lull[i]:
+            i += 1
+            continue
+        j = i
+        while j < T and lull[j]:
+            j += 1
+        if (j - i) / FPS >= LULL_MIN_S:
+            if i == 0:
+                # The clip starts in this lull: there's no "before" to hold
+                # (frame 0's hotspot has no history), so hold where play
+                # starts once it ends. Offline, so we can look ahead.
+                k = min(T - 1, j + int(HOLD_BACK_S * FPS))
+            else:
+                k = max(0, i - int(HOLD_BACK_S * FPS))
+            held = (tyaw[k], tpitch[k], thfov[k])
+            takers = 0
+            for f in range(i, j):
+                if has_ball[f]:
+                    continue  # the ball says where the restart is
+                if "ballhold" in features:
+                    back = np.where(has_ball[max(0, f - int(BALL_HOLD_S * FPS)):f])[0]
+                    still = False
+                    if len(back):
+                        k_b = max(0, f - int(BALL_HOLD_S * FPS)) + back[-1]
+                        b = ball_at[k_b]
+                        k_a = max(0, k_b - int(FPS))
+                        still = has_ball[k_a] and np.hypot(*(b - ball_at[k_a])) < BALL_STILL_M
+                    if still:
+                        grp = pos[f][np.hypot(*(pos[f] - b).T) < BALL_HOLD_NEAR_M] if len(pos[f]) else np.zeros((0, 2))
+                        fr = span(np.vstack([b[None], grp]), LONE_MAX_HFOV)
+                        tyaw[f], tpitch[f], thfov[f] = fr if fr is not None else finish(*target(b, np.vstack([b[None], grp])))
+                        mode[f] = "ballhold"
+                        continue
+                tk = restart_taker(pos[f], vel[f], pose)
+                if tk is not None:
+                    kind, at = tk
+                    others = pos[f][np.hypot(*(pos[f] - at).T) > 1.0]
+                    group = np.median(others, axis=0)
+                    # Aim between taker and the group; cover both.
+                    aim, spread = target((at + group) / 2, np.vstack([at[None], others]))
+                    tyaw[f], tpitch[f], thfov[f] = finish(aim, spread, RESTART_MAX_HFOV)
+                    mode[f] = "restart"
+                    takers += 1
+                    last_kind = kind
+                else:
+                    tyaw[f], tpitch[f], thfov[f] = held
+                    mode[f] = "lull"
+            events.append({"startS": round(start + i / FPS, 2), "endS": round(start + j / FPS, 2),
+                           "restartFrames": takers, "restart": last_kind if takers else None})
+        i = j
+    if "weak" in features:
+        n_tracked = median_filter(np.array([len(p_) for p_ in pos]), int(FPS) | 1, mode="nearest")
+        w = int(FPS)
+        jump = np.zeros(T)
+        for i in range(T):
+            sp = spots[max(0, i - w):i + w + 1]
+            sp = sp[~np.isnan(sp[:, 0])]
+            if len(sp):
+                jump[i] = np.hypot(*(sp - sp.mean(0)).T).max()
+        weak = median_filter(((n_tracked < WEAK_TRACKED) | (jump > WEAK_JUMP_M)).astype(np.uint8),
+                             int(FPS) | 1) > 0
+        n_weak = 0
+        for i in range(T):
+            if not weak[i] or len(pos[i]) < 2 or has_ball[i]:
+                continue
+            ang = np.radians(pose.angles(pos[i]))
+            lo_, hi_ = np.percentile(ang[:, 0], [10, 90])
+            centre = np.radians(pose.angles(np.median(pos[i], axis=0)[None])[0])
+            spread = hi_ - lo_ + 2 * np.radians(MARGIN_DEG)
+            tyaw[i], tpitch[i], thfov[i] = finish(np.array([(lo_ + hi_) / 2, centre[1]]),
+                                                  max(spread, np.radians(WEAK_HFOV[0])), WEAK_HFOV[1])
+            mode[i] = "weak"
+            n_weak += 1
+        print(f"weak: {n_weak} frames ({100 * n_weak / T:.0f}%) framed on all players")
 
     def near_goal_recently(i, side, secs, metres):
         a = max(0, i - int(secs * FPS))
@@ -767,7 +932,7 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
                     aim, spread = target((pos[i][j] + np.median(others, axis=0)) / 2,
                                          np.vstack([pos[i][j][None], others]))
                     fr = finish(aim, spread, RESTART_MAX_HFOV)
-                flag[i], frame_for[i] = True, fr
+                flag[i], frame_for[i] = True, (fr, side)
                 break
         w = int(GK_WINDOW_S * FPS)
         frac = np.convolve(flag.astype(float), np.ones(2 * w + 1) / (2 * w + 1), mode="same")
@@ -778,16 +943,28 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
         resumed = np.convolve((running >= GK_RESUME_RUNNERS).astype(float),
                               np.ones(int(GK_RESUME_S * FPS)) / int(GK_RESUME_S * FPS), mode="same") >= 0.99
         n_kicks, held, state, since, follow, last_fr = 0, 0, False, 0, 0, None
+        gk2 = "gk2" in features
+        side_now, last_seen, ended = 0, 0, {-1: -10 ** 9, 1: -10 ** 9}
         for i in range(T):
             if keep[i] and i in frame_for:
-                last_fr = frame_for[i]
-                if not state:
+                fr, side = frame_for[i]
+                if state and side == side_now:
+                    last_fr, last_seen = fr, i
+                elif not state and not (gk2 and i - ended[side] < GK_COOLDOWN_S * FPS):
+                    last_fr, last_seen = fr, i
                     n_kicks += 1
-                    state, since = True, i
-            if state and ((resumed[i] and i - since > FPS) or i - since > GK_MAX_S * FPS):
+                    state, since, side_now = True, i, side
+            stop = state and ((resumed[i] and i - since > FPS) or i - since > GK_MAX_S * FPS)
+            if state and gk2 and not stop:
+                sp = spots[i]
+                far = not np.isnan(sp[0]) and np.hypot(*(sp - goal_at[side_now])) > GK_LEAVE_M
+                stop = (far and i - since > FPS) or i - last_seen > GK_GONE_S * FPS
+            if stop:
                 state, follow = False, int(GK_FOLLOW_S * FPS)
+                ended[side_now] = i
             if state or follow > 0:
                 tyaw[i], tpitch[i], thfov[i] = last_fr
+                mode[i] = "goalkick"
                 held += 1
                 if not state:
                     follow -= 1
@@ -819,6 +996,7 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
         for i in range(T):
             if keep[i] and i in frame_for:
                 tyaw[i], tpitch[i], thfov[i] = frame_for[i]
+                mode[i] = "goalframe"
                 n += 1
         print(f"goalframe: {n} frames widened to include a goal")
 
@@ -833,12 +1011,76 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
         {"pos": np.round(pos[i], 1).tolist(), "vel": np.round(vel[i], 1).tolist(),
          "ball": None if not has_ball[i] else np.round(ball_at[i], 1).tolist(),
          "hot": None if np.isnan(spots[i, 0]) else np.round(spots[i], 1).tolist(),
+         "mode": mode[i], "running": int(running[i]),
          "aimYawDeg": round(float(np.degrees(tyaw[i])), 2), "hfovDeg": round(float(np.degrees(thfov[i])), 1)}
         for i in range(T)]}))
     return tyaw, tpitch, thfov
 
 
 # ------------------------------------------------------------------- main
+
+def apply_overrides(features: tuple) -> tuple:
+    """"NAME=value" features set module constants for this run (value
+    "a:b" makes a pair); the rest are returned as the feature flags."""
+    flags = []
+    for f in features:
+        if "=" not in f:
+            flags.append(f)
+            continue
+        name, val = f.split("=", 1)
+        assert name in globals(), f"unknown constant {name}"
+        parts = [float(v) for v in val.split(":")]
+        globals()[name] = parts[0] if len(parts) == 1 else tuple(parts)
+        print(f"override {name} = {globals()[name]}")
+    return tuple(flags)
+
+
+def passa_cache(out: Path, seg: int, start: float, seconds: float) -> Path:
+    return out / f"passA_{seg}_{start:g}_{seconds:g}.json"
+
+
+def plan_path(rec: Path, out: Path, seg: int, start: float, dets, extent, aim: str, features: tuple):
+    """From pass A's detections to the camera path (yaw, pitch, hfov per
+    frame, radians): the per-frame aim, then smoothing and the pan-speed
+    cap. Writes path_<tag>.json."""
+    y0, y1, p0, p1 = extent
+    T = len(dets)
+    if aim == "play":
+        tyaw, tpitch, thfov = play_targets(rec, dets, extent, start, features)
+    else:
+        tyaw, tpitch, thfov = np.zeros(T), np.zeros(T), np.zeros(T)
+        last = (0.5 * (y0 + y1), 0.5 * (p0 + p1), np.radians(MAX_HFOV))
+        for i, fd in enumerate(dets):
+            if len(fd) >= 2:
+                yw = np.array([d[0] for d in fd])
+                pt = np.array([d[1] for d in fd])
+                lo_, hi_ = np.percentile(yw, [15, 85])
+                spread = hi_ - lo_ + 2 * np.radians(MARGIN_DEG)
+                last = (np.median(yw), np.median(pt),
+                        np.clip(spread, np.radians(MIN_HFOV), np.radians(MAX_HFOV)))
+            tyaw[i], tpitch[i], thfov[i] = last
+    win = int(FPS) | 1
+    sig = SMOOTH_S * FPS
+    yaw = gaussian_filter1d(median_filter(tyaw, win, mode="nearest"), sig, mode="nearest")
+    pitch = gaussian_filter1d(median_filter(tpitch, win, mode="nearest"), 2 * sig, mode="nearest")
+    hfov = gaussian_filter1d(median_filter(thfov, 3 * win, mode="nearest"), 2 * sig, mode="nearest")
+    vmax = np.radians(MAX_PAN_DEG_S) / FPS
+    for i in range(1, T):
+        yaw[i] = yaw[i - 1] + np.clip(yaw[i] - yaw[i - 1], -vmax, vmax)
+    # Keep the view inside what the phones saw vertically.
+    vfov = 2 * np.arctan(np.tan(hfov / 2) * OUT_H / OUT_W)
+    pitch = np.clip(pitch, p0 + vfov / 2, p1 - vfov / 2)
+    tag = "_".join([aim, *features])
+    (out / f"path_{tag}.json").write_text(json.dumps({
+        "segment": seg, "startS": start, "fps": FPS, "aim": aim,
+        "yawDeg": np.round(np.degrees(yaw), 2).tolist(),
+        "pitchDeg": np.round(np.degrees(pitch), 2).tolist(),
+        "hfovDeg": np.round(np.degrees(hfov), 2).tolist()}))
+    print(f"path: yaw {np.degrees(yaw.min()):.0f}..{np.degrees(yaw.max()):.0f} deg,"
+          f" hfov {np.degrees(hfov.min()):.0f}..{np.degrees(hfov.max()):.0f} deg")
+    return yaw, pitch, hfov
+
+
 
 def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", features: tuple = ()) -> None:
     sw = Stopwatch()
@@ -847,10 +1089,16 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
     devs = {d["role"]: d for d in manifest["devices"]}
     out = rec / "follow"
     out.mkdir(exist_ok=True)
+    cache = passa_cache(out, seg, start, seconds)
+    if os.environ.get("OSB_NO_RENDER") and cache.exists():
+        c = json.loads(cache.read_text())
+        print(f"pass A from {cache.name}")
+        plan_path(rec, out, seg, start, [[tuple(d) for d in fd] for fd in c["dets"]], tuple(c["extent"]),
+                  aim, features)
+        return
     flip = [report["upsideDown"]["main"], report["upsideDown"]["secondary"]]
-    files = [rec / devs["main"]["segments"][seg]["objectKey"],
-             rec / devs["secondary"]["segments"][seg]["objectKey"]]
-    offsets = [0.0, report["segments"][seg]["offsetS"]]
+    def streams_at(t0, secs, width):
+        return [prefetch(game_stream(rec, devs, report, ph, seg, t0, secs, width)) for ph in (0, 1)]
 
     cm, cs = setup_cameras(rec, report, devs, flip)
     sw.lap("setup cameras")
@@ -908,8 +1156,7 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
     warm = min(WARMUP_S, start)
     a_start = start - warm
     mog = cv2.createBackgroundSubtractorMOG2(history=300, varThreshold=24, detectShadows=True)
-    streams = [prefetch(frame_stream(f, a_start + o, warm + seconds, CAL_W))
-               for f, o in zip(files, offsets)]
+    streams = streams_at(a_start, warm + seconds, CAL_W)
     dets: list[list[tuple[float, float, float]]] = []
     field = None
     n_warm = int(warm * FPS)
@@ -974,53 +1221,23 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
     print(f"pass A: {len(dets)} frames, players detected per frame median {int(np.median(counts))}"
           f" (range {min(counts)}-{max(counts)})")
 
-    # Path: where play is and how wide, then smooth.
-    T = len(dets)
-    if aim == "play":
-        tyaw, tpitch, thfov = play_targets(rec, dets, (y0, y1, p0, p1), start, features)
-    else:
-        tyaw, tpitch, thfov = np.zeros(T), np.zeros(T), np.zeros(T)
-        last = (0.5 * (y0 + y1), 0.5 * (p0 + p1), np.radians(MAX_HFOV))
-        for i, fd in enumerate(dets):
-            if len(fd) >= 2:
-                yw = np.array([d[0] for d in fd])
-                pt = np.array([d[1] for d in fd])
-                lo_, hi_ = np.percentile(yw, [15, 85])
-                spread = hi_ - lo_ + 2 * np.radians(MARGIN_DEG)
-                last = (np.median(yw), np.median(pt),
-                        np.clip(spread, np.radians(MIN_HFOV), np.radians(MAX_HFOV)))
-            tyaw[i], tpitch[i], thfov[i] = last
-    win = int(FPS) | 1
-    sig = SMOOTH_S * FPS
-    yaw = gaussian_filter1d(median_filter(tyaw, win, mode="nearest"), sig, mode="nearest")
-    pitch = gaussian_filter1d(median_filter(tpitch, win, mode="nearest"), 2 * sig, mode="nearest")
-    hfov = gaussian_filter1d(median_filter(thfov, 3 * win, mode="nearest"), 2 * sig, mode="nearest")
-    vmax = np.radians(MAX_PAN_DEG_S) / FPS
-    for i in range(1, T):
-        yaw[i] = yaw[i - 1] + np.clip(yaw[i] - yaw[i - 1], -vmax, vmax)
-    # Keep the view inside what the phones saw vertically.
-    vfov = 2 * np.arctan(np.tan(hfov / 2) * OUT_H / OUT_W)
-    pitch = np.clip(pitch, p0 + vfov / 2, p1 - vfov / 2)
-    tag = "_".join([aim, *features])
-    (out / f"path_{tag}.json").write_text(json.dumps({
-        "segment": seg, "startS": start, "fps": FPS, "aim": aim,
-        "yawDeg": np.round(np.degrees(yaw), 2).tolist(),
-        "pitchDeg": np.round(np.degrees(pitch), 2).tolist(),
-        "hfovDeg": np.round(np.degrees(hfov), 2).tolist()}))
-    print(f"path: yaw {np.degrees(yaw.min()):.0f}..{np.degrees(yaw.max()):.0f} deg,"
-          f" hfov {np.degrees(hfov.min()):.0f}..{np.degrees(hfov.max()):.0f} deg")
-
+    if os.environ.get("OSB_NO_RENDER"):
+        passa_cache(out, seg, start, seconds).write_text(json.dumps({"dets": dets, "extent": [y0, y1, p0, p1]}))
+    yaw, pitch, hfov = plan_path(rec, out, seg, start, dets, (y0, y1, p0, p1), aim, features)
     sw.lap("path")
     if os.environ.get("OSB_NO_RENDER"):
         print("OSB_NO_RENDER set: stopping before pass B")
         return
+    T = len(dets)
+    tag = "_".join([aim, *features])
+
     # Pass B: render the virtual camera from full-resolution frames. Each
     # pixel comes from one phone, switching at that frame's seam.
     renderer = gpu.ViewRenderer([cm, cs], flip, SRC_W, OUT_W, OUT_H, gains, main_right,
                                 p0, step, np.radians(SEAM_FEATHER_DEG),
                                 np.radians(TONE_FEATHER_DEG), dev)
     seams_t = torch.tensor(np.array(seams), dtype=torch.float32, device=dev)
-    streams = [prefetch(frame_stream(f, start + o, seconds, SRC_W)) for f, o in zip(files, offsets)]
+    streams = streams_at(start, seconds, SRC_W)
     enc = NV12Encoder(out / f"follow_{tag}.mp4", OUT_W, OUT_H)
     for i, (fa, fb) in enumerate(zip(*streams)):
         sw.lap("B: decode")
@@ -1042,4 +1259,4 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
 if __name__ == "__main__":
     main(Path(sys.argv[1]), int(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4]),
          sys.argv[5] if len(sys.argv) > 5 else "play",
-         tuple(f for f in sys.argv[6].split(",") if f) if len(sys.argv) > 6 else ())
+         apply_overrides(tuple(f for f in sys.argv[6].split(",") if f)) if len(sys.argv) > 6 else ())
