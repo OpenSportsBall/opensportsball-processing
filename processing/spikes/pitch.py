@@ -11,6 +11,7 @@ Run after phase0.py and follow.py (cached cameras):
 
     uv run processing/spikes/pitch.py footage/rec3 <segment>
     uv run processing/spikes/pitch.py footage/rec3 goals
+    uv run processing/spikes/pitch.py footage/rec3 fixture footage/fixtures/pitch/<name>
 
 The phones sit at (nearly) one point and the pitch is flat, so one 3x3
 homography maps pitch coordinates (x along the touchline, z across, in
@@ -612,6 +613,27 @@ def draw_goals(bg, pano, pose, goals, path):
     cv2.imwrite(str(path), np.vstack(crops))
 
 
+def draw_map(bg: np.ndarray, pano: Pano, pose: PitchPose, goals: list[dict]) -> np.ndarray:
+    """The background panorama with the fitted pitch lines (red) and the
+    detected goals' frames (yellow posts and crossbar, white ground
+    outline of the goal mouth)."""
+    img = draw(bg, pano, pose)
+    for g in goals:
+        if not g["valid"]:
+            continue
+        ang = pose.angles3(*goal_frame(g["x"], g["z"], g["width"], g["height"], step=0.03))
+        x, y = pano.to_px(ang[:, 0], ang[:, 1])
+        for xi, yi in zip(x.astype(int), y.astype(int)):
+            cv2.circle(img, (xi, yi), 2, (0, 230, 255), -1)
+        c = pose.angles3(np.array([[g["x"], g["z"]]]), [g["height"] + 1.0])[0]
+        cx, cy = pano.to_px(c[0], c[1])
+        cv2.putText(img, f"{g['width']:.1f} x {g['height']:.2f} m", (int(cx) - 70, max(20, int(cy))),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 230, 255), 2)
+    cv2.putText(img, f"pitch {pose.L:.1f} x {pose.W:.1f} m, camera {pose.h:.2f} m up", (20, pano.h - 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3)
+    return img
+
+
 def goals_main(rec: Path) -> None:
     """Detect the on-pitch goals once per game and correct the pitch map with
     them (needs a normal run first). Writes pitch/goals.json, goals.jpg and
@@ -640,11 +662,78 @@ def goals_main(rec: Path) -> None:
             "lengthM": q.L, "widthM": q.W, "markingScale": q.k, "warpDeg": [q.w1, q.w2],
             "fittedWith": "lines+goals"}, indent=1))
         cv2.imwrite(str(out / "overlay_goals.jpg"), cv2.resize(draw(bg, pano, q), (pano.w // 3, pano.h // 3)))
+    cv2.imwrite(str(out / "map.jpg"), cv2.resize(draw_map(bg, pano, q, goals), (pano.w // 2, pano.h // 2)),
+                [cv2.IMWRITE_JPEG_QUALITY, 90])
 
 
 def load_goals(rec: Path):
     path = rec / "pitch" / "goals.json"
     return [g for g in json.loads(path.read_text())["goals"] if g["valid"]] if path.exists() else None
+
+
+# Starting guess for the night game (hand-read; see main). Kept here so the
+# regression fixture reproduces the same fit.
+START_POSE = [0.0, -31.5, 1.9, float(np.radians(-4)), 0.0, 0.0, 100.0, 59.0, 1.0, 0.0, 0.0]
+
+
+def pose_json(pose: PitchPose) -> dict:
+    return {"cameraXZ": [pose.cx, pose.cz], "heightM": pose.h, "rotRad": pose.rot, "tiltRad": [pose.tx, pose.tz],
+            "lengthM": pose.L, "widthM": pose.W, "markingScale": pose.k, "warpDeg": [pose.w1, pose.w2]}
+
+
+def pose_from_json(j: dict) -> PitchPose:
+    return PitchPose([*j["cameraXZ"], j["heightM"], j["rotRad"], *j["tiltRad"], j["lengthM"], j["widthM"],
+                      j["markingScale"], *j.get("warpDeg", [0.0, 0.0])])
+
+
+def map_pitch(bg: np.ndarray, start: list[float]):
+    """The whole mapping from a background panorama: the lines-only fit,
+    the goals, and the map corrected with them. Returns (lines pose, goals,
+    final pose); final is the lines pose if the goals aren't both valid."""
+    pano = Pano()
+    mask = line_mask(bg)
+    lines = fit_pose(mask, pano, start)
+    goals, corrected = detect_goals(bg, mask, pano, lines)
+    return lines, goals, corrected if all(g["valid"] for g in goals) else lines
+
+
+def key_points(pose: PitchPose, goals: list[dict]) -> dict:
+    """Viewing angles (degrees) of points that pin the map down: corners,
+    centre spot, penalty spots, and each goal's post bases and crossbar ends."""
+    hl, hw = pose.L / 2, pose.W / 2
+    pts = {"corner_far_left": ([-hl, hw], 0.0), "corner_far_right": ([hl, hw], 0.0),
+           "corner_near_left": ([-hl, -hw], 0.0), "corner_near_right": ([hl, -hw], 0.0),
+           "centre_spot": ([0.0, 0.0], 0.0),
+           "penalty_spot_left": ([-hl + pose.k * PEN_SPOT, 0.0], 0.0),
+           "penalty_spot_right": ([hl - pose.k * PEN_SPOT, 0.0], 0.0)}
+    for g in goals:
+        side = "left" if g["side"] < 0 else "right"
+        for zname, dz in (("a", -g["width"] / 2), ("b", g["width"] / 2)):
+            pts[f"goal_{side}_post_{zname}_base"] = ([g["x"], g["z"] + dz], 0.0)
+            pts[f"goal_{side}_post_{zname}_top"] = ([g["x"], g["z"] + dz], g["height"])
+    return {k: [round(float(v), 4) for v in pose.angles3(np.array([xz]), [h])[0]] for k, (xz, h) in pts.items()}
+
+
+def save_fixture(rec: Path, dest: Path) -> None:
+    """Freezes the current, checked mapping as a regression fixture: the
+    background panorama it starts from, the starting guess, and the results
+    (lines-only fit, goals, final map, key points' angles). Footage shows
+    people: keep fixtures out of git (footage/ is ignored)."""
+    out = rec / "pitch"
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / "background.png").write_bytes((out / "background.png").read_bytes())
+    final = load_pose(rec)
+    goals = json.loads((out / "goals.json").read_text())["goals"]
+    expected = {
+        "startPose": START_POSE,
+        "linesOnly": json.loads((out / "pitch_lines_only.json").read_text()),
+        "final": pose_json(final),
+        "goals": goals,
+        "keyPointsDeg": key_points(final, goals),
+        "source": str(rec), "checkedBy": "eye, 2026-10-15: lines and both goals on the paint/posts",
+    }
+    (dest / "expected.json").write_text(json.dumps(expected, indent=1))
+    print(f"fixture saved to {dest}: background.png, expected.json ({len(expected['keyPointsDeg'])} key points)")
 
 
 def main(rec: Path, seg: int) -> None:
@@ -666,7 +755,7 @@ def main(rec: Path, seg: int) -> None:
     # painted centre circle spans ~32 deg and dips 2.5-5.3 deg, which puts
     # its centre ~31 m away with the camera ~1.9 m up; the near touchline
     # passes under the panorama, so it is within ~2 m of the camera.
-    v0 = [0.0, -31.5, 1.9, np.radians(-4), 0.0, 0.0, 100.0, 59.0, 1.0, 0.0, 0.0]
+    v0 = START_POSE
     cv2.imwrite(str(out / "overlay_init.jpg"), cv2.resize(draw(bg, pano, PitchPose(v0)), (pano.w // 3, pano.h // 3)))
     pose = fit_pose(mask, pano, v0)
     cv2.imwrite(str(out / "overlay.jpg"), cv2.resize(draw(bg, pano, pose), (pano.w // 3, pano.h // 3)))
@@ -680,5 +769,7 @@ def main(rec: Path, seg: int) -> None:
 if __name__ == "__main__":
     if len(sys.argv) > 2 and sys.argv[2] == "goals":
         goals_main(Path(sys.argv[1]))
+    elif len(sys.argv) > 3 and sys.argv[2] == "fixture":
+        save_fixture(Path(sys.argv[1]), Path(sys.argv[3]))
     else:
         main(Path(sys.argv[1]), int(sys.argv[2]))

@@ -12,8 +12,11 @@ Run after phase0.py (it reads phase0/report.json for the audio offsets):
     uv run processing/spikes/follow.py footage/rec3 <segment> <start s> <seconds> [play|players] [features]
 
 features: comma-separated, e.g. goalkick,goalframe (see play_targets).
-Best so far on the night game: "play goalframe", and "play
-goalkick,goalframe,unsure" (catches goal kicks and clearances, but wider).
+"ball" needs ballclip.py's candidates for the same segment, start and length.
+Best so far on the night game: "play goalkick,goalframe,unsure" (catches
+every key moment in the test clip, but zoomed out at times), then "play
+goalframe". Tried and not adopted: lead, nowalk, fastboost; ball is
+promising but tracks the ball only part of the time (docs/BACKLOG.md).
 Goal positions come from `pitch.py <recording> goals` when it has run.
 
 1. Geometry: the panorama stitcher's cameras (focal length, principal
@@ -378,9 +381,25 @@ HOT_BANDWIDTH_M = 10.0  # how far one running player's pull reaches
 HOT_SWITCH = 1.5        # another spot must be this much stronger to move to it
 HOT_PERSIST_S = 0.7     # ... for this long
 TRACK_SMOOTH_S = 0.5    # position smoothing before velocity (far-side jitter)
+WALK_SPEED = 2.0        # "nowalk": slower than this (standing, walking) weighs nothing
+FAST_SPEED = 4.0        # "fastboost": above this (a firm run) ...
+FAST_GAIN = 2.0         # ... each further m/s adds this much extra weight (3x the slope)
 
 
-def hotspots(pos, vel, fps):
+def hot_weights(speed, features=()):
+    """Speed weights for the hotspot: linear in speed, 0.5..8 m/s, so
+    several moving players outweigh one sprinter. "nowalk" zeroes players
+    below WALK_SPEED; "fastboost" steepens the slope above FAST_SPEED."""
+    s = np.clip(speed, 0.0, 8.0)
+    w = np.maximum(s, 0.5)
+    if "fastboost" in features:
+        w = w + FAST_GAIN * np.maximum(0.0, s - FAST_SPEED)
+    if "nowalk" in features:
+        w = np.where(s < WALK_SPEED, 0.0, w)
+    return w
+
+
+def hotspots(pos, vel, fps, features=()):
     """Per frame, where running is most concentrated: players pooled over
     +-HOT_WINDOW_S, weighted by speed, smoothed with a Gaussian of
     HOT_BANDWIDTH_M; the peak is found by mean shift. The camera stays with
@@ -401,8 +420,10 @@ def hotspots(pos, vel, fps):
             spots[i] = cur if cur is not None else np.nan
             continue
         x = np.vstack(xs)
-        # Linear in speed: several moving players outweigh one sprinter.
-        w = np.clip(np.hypot(*np.vstack(vs).T), 0.5, 8.0)
+        w = hot_weights(np.hypot(*np.vstack(vs).T), features)
+        if w.sum() <= 0:  # nobody counts (everyone walking): stay put
+            spots[i] = cur if cur is not None else np.nan
+            continue
 
         def density(p):
             return float((w * np.exp(-((x - p) ** 2).sum(1) / h2)).sum())
@@ -410,7 +431,9 @@ def hotspots(pos, vel, fps):
         def climb(p):
             for _ in range(20):
                 g = w * np.exp(-((x - p) ** 2).sum(1) / h2)
-                q = (g[:, None] * x).sum(0) / max(g.sum(), 1e-9)
+                if g.sum() < 1e-9:  # nothing weighted within reach: stay
+                    return p
+                q = (g[:, None] * x).sum(0) / g.sum()
                 if np.hypot(*(q - p)) < 0.05:
                     return q
                 p = q
@@ -501,8 +524,64 @@ GOAL_ZONE_M = 20.0       # goalframe: players within this of a goal line
 GOAL_MIN_PLAYERS = 4     # ... at least this many
 GOAL_MAX_HFOV = 75.0     # the union must fit in this
 GOAL_RECENT_S = 10.0     # if it doesn't fit, prefer the goal end if play was there this recently
-UNSURE_HFOV = ((1, 55.0), (2, 42.0))  # unsure: with at most N runners near the hotspot, at least this wide
+UNSURE_HFOV = ((1, 55.0), (2, 42.0))
+BALL_MIN_RUN_S = 0.5     # ball: trust the tracked ball only in stretches at least this long
+BALL_OFF_PITCH_M = 3.0   # ... and within this of the lines (a lofted ball projects beyond them)  # unsure: with at most N runners near the hotspot, at least this wide
 LEAD_S = 1.0             # lead: aim where the hotspot will be this much later (processing is offline)
+
+
+def ball_track(rec: Path, start: float, T: int, pos, pose) -> np.ndarray:
+    """Per follow frame, the match ball on the pitch (x, z) or NaN: the
+    fine-tuned detector's candidates for this clip (ballclip.py) through
+    ball.py's tracker (static spots dropped, tracks linked under a speed
+    limit, one physically consistent chain chosen, gaps up to 1 s bridged),
+    resampled to FPS. Kept only in stretches of at least BALL_MIN_RUN_S, and
+    near the lines."""
+    import ball as B
+
+    paths = sorted((rec / "detect").glob(f"ball_*_{start:g}_*.json"))
+    if not paths:
+        raise SystemExit(f"ball: no ballclip.py candidates for start {start:g} s in {rec / 'detect'}")
+    data = json.loads(paths[0].read_text())
+    bf = data["fps"]
+    n = len(data["frames"])
+    # Players on the pitch at the candidates' frame rate (for track scoring).
+    people = [pos[min(T - 1, int(round(k * FPS / bf)))] for k in range(n)]
+    cands = [[d for d in f["detections"] if d["onPitch"]] for f in data["frames"]]
+    spots = B.static_spots(cands, bf)
+    keep = [[d for d in fr if all(np.hypot(*(np.array(d["xz"]) - s_)) > B.STATIC_RADIUS for s_ in spots)]
+            for fr in cands]
+    tracks = B.link(keep, bf)
+    est, src, _ = B.choose(tracks, people, n, bf)
+    out = np.full((T, 2), np.nan)
+    hl, hw = pose.L / 2 + BALL_OFF_PITCH_M, pose.W / 2 + BALL_OFF_PITCH_M
+    for i in range(T):
+        k = i * bf / FPS
+        a, b = int(np.floor(k)), min(n - 1, int(np.floor(k)) + 1)
+        if a >= n or est[a] is None or est[b] is None:
+            continue
+        w = k - a
+        p = (1 - w) * est[a] + w * est[b]
+        if abs(p[0]) <= hl and abs(p[1]) <= hw:
+            out[i] = p
+    # Drop short islands: a lone short track is more likely a false one.
+    known = ~np.isnan(out[:, 0])
+    i = 0
+    while i < T:
+        if not known[i]:
+            i += 1
+            continue
+        j = i
+        while j < T and known[j]:
+            j += 1
+        if (j - i) / FPS < BALL_MIN_RUN_S:
+            out[i:j] = np.nan
+        i = j
+    n_det = sum(s_ is not None for s_ in src)
+    print(f"ball: {sum(map(len, cands))} on-pitch candidates, {len(spots)} static spots, {len(tracks)} tracks;"
+          f" chain detected in {n_det}/{n} frames; aim at the ball in"
+          f" {100 * np.mean(~np.isnan(out[:, 0])):.0f}% of the clip")
+    return out
 
 
 def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = ()):
@@ -519,8 +598,10 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
     soon after play was at that end: frame the taker and the group),
     "goalframe" (several players near a goal while the hotspot is
     elsewhere: frame both, and the goal mouth), "unsure" (few runners near
-    the hotspot: don't zoom in tight, the ball may be elsewhere) and "lead"
-    (aim where the hotspot will be LEAD_S later)."""
+    the hotspot: don't zoom in tight, the ball may be elsewhere), "lead"
+    (aim where the hotspot will be LEAD_S later), "ball" (aim at the
+    tracked ball where there is one, see ball_track; elsewhere as before),
+    and "nowalk" / "fastboost" (hotspot weights, see hot_weights)."""
     import pitch as P
     import play
 
@@ -565,7 +646,9 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
 
     tyaw, tpitch, thfov = np.zeros(T), np.zeros(T), np.zeros(T)
     running = np.array([(np.hypot(*v.T) > play.RUN_SPEED).sum() if len(v) else 0 for v in vel])
-    spots = hotspots(pos, vel, FPS)
+    spots = hotspots(pos, vel, FPS, features)
+    ball_at = ball_track(rec, start, T, pos, pose) if "ball" in features else np.full((T, 2), np.nan)
+    has_ball = ~np.isnan(ball_at[:, 0])
     lead = int(LEAD_S * FPS) if "lead" in features else 0
     last = (0.5 * (y0 + y1), 0.5 * (p0 + p1), np.radians(MAX_HFOV))
     near_runners = np.zeros(T)
@@ -578,6 +661,11 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
             near_runners[i] = run.sum()
             who = pos[j][run] if run.sum() >= 2 else pos[j][near] if near.sum() >= 2 else pos[j]
             last = finish(*target(spots[j], who))
+        if has_ball[i]:
+            # Frame the ball and the players around it.
+            b = ball_at[i]
+            near = pos[i][np.hypot(*(pos[i] - b).T) < 2 * HOT_BANDWIDTH_M] if len(pos[i]) else np.zeros((0, 2))
+            last = finish(*target(b, np.vstack([b[None], near])))
         tyaw[i], tpitch[i], thfov[i] = last
     if "unsure" in features:
         # Few runners near the hotspot: the evidence is thin, so stay wide.
@@ -585,7 +673,7 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
         widened = 0
         for i in range(T):
             for most, wide in UNSURE_HFOV:
-                if n[i] <= most and thfov[i] < np.radians(wide):
+                if n[i] <= most and thfov[i] < np.radians(wide) and not has_ball[i]:
                     vfov_old = 2 * np.arctan(np.tan(thfov[i] / 2) * OUT_H / OUT_W)
                     thfov[i] = np.radians(wide)
                     vfov_new = 2 * np.arctan(np.tan(thfov[i] / 2) * OUT_H / OUT_W)
@@ -610,6 +698,8 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
             held = (tyaw[k], tpitch[k], thfov[k])
             takers = 0
             for f in range(i, j):
+                if has_ball[f]:
+                    continue  # the ball says where the restart is
                 tk = restart_taker(pos[f], vel[f], pose)
                 if tk is not None:
                     kind, at = tk
@@ -707,7 +797,7 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
         flag = np.zeros(T, bool)
         frame_for = {}
         for i in range(T):
-            if len(pos[i]) < 4 or np.isnan(spots[i, 0]):
+            if len(pos[i]) < 4 or np.isnan(spots[i, 0]) or has_ball[i]:
                 continue
             for side in (-1, 1):
                 mouth = goal_at[side]
@@ -741,6 +831,8 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
     # Per-frame players and aim, for diagnosing what the camera followed.
     (rec / "follow" / "play_debug.json").write_text(json.dumps({"startS": start, "fps": FPS, "frames": [
         {"pos": np.round(pos[i], 1).tolist(), "vel": np.round(vel[i], 1).tolist(),
+         "ball": None if not has_ball[i] else np.round(ball_at[i], 1).tolist(),
+         "hot": None if np.isnan(spots[i, 0]) else np.round(spots[i], 1).tolist(),
          "aimYawDeg": round(float(np.degrees(tyaw[i])), 2), "hfovDeg": round(float(np.degrees(thfov[i])), 1)}
         for i in range(T)]}))
     return tyaw, tpitch, thfov
