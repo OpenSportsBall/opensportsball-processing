@@ -627,7 +627,8 @@ def ball_track(rec: Path, start: float, T: int, pos, pose) -> np.ndarray:
     n = len(data["frames"])
     # Players on the pitch at the candidates' frame rate (for track scoring).
     people = [pos[min(T - 1, int(round(k * FPS / bf)))] for k in range(n)]
-    cands = [[d for d in f["detections"] if d["onPitch"]] for f in data["frames"]]
+    cands = [[d for d in f["detections"] if d["onPitch"] and d.get("judge", 1.0) >= B.MIN_JUDGE]
+             for f in data["frames"]]
     spots = B.static_spots(cands, bf)
     keep = [[d for d in fr if all(np.hypot(*(np.array(d["xz"]) - s_)) > B.STATIC_RADIUS for s_ in spots)]
             for fr in cands]
@@ -1028,10 +1029,16 @@ def apply_overrides(features: tuple) -> tuple:
             flags.append(f)
             continue
         name, val = f.split("=", 1)
-        assert name in globals(), f"unknown constant {name}"
         parts = [float(v) for v in val.split(":")]
-        globals()[name] = parts[0] if len(parts) == 1 else tuple(parts)
-        print(f"override {name} = {globals()[name]}")
+        value = parts[0] if len(parts) == 1 else tuple(parts)
+        if "." in name:  # another spike module's constant, e.g. ball.MAX_MISSED_S
+            import importlib
+            mod, attr = name.split(".", 1)
+            setattr(importlib.import_module(mod), attr, value)
+        else:
+            assert name in globals(), f"unknown constant {name}"
+            globals()[name] = value
+        print(f"override {name} = {value}")
     return tuple(flags)
 
 

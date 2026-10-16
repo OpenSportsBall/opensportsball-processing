@@ -44,6 +44,7 @@ STATIC_RADIUS = 1.5       # metres
 STATIC_MIN_S = 4.0        # a spot seen over this long without moving is static
 NEAR_PLAYER_M = 6.0       # the match ball is usually this close to someone
 BRIDGE_S = 1.0            # interpolate gaps up to this long
+MIN_JUDGE = 0.0           # candidates scored below this by balljudge.py are ignored (0: judge not used)
 BODY_FRAC = 0.8           # candidates in the top 80% of a person's box are kit, hands, knees
 
 

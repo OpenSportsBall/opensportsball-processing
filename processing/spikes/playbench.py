@@ -79,6 +79,9 @@ def run_variant(rec: Path, name: str, features: str) -> dict[str, Path]:
         if r.returncode:
             print(r.stdout[-2000:], r.stderr[-3000:])
             raise SystemExit(f"{name} failed on {set_name}")
+        for line in r.stdout.splitlines():
+            if line.startswith("ball:"):
+                print(f"  [{set_name}] {line[line.index('aim at the ball'):]}", flush=True)
         flags = [f for f in features.split(",") if "=" not in f]
         src = rec / "follow" / ("path_" + "_".join(["play", *flags]) + ".json")
         shutil.copy(src, dest)
