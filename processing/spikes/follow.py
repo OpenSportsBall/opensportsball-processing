@@ -619,7 +619,8 @@ def ball_track(rec: Path, start: float, T: int, pos, pose) -> np.ndarray:
     near the lines."""
     import ball as B
 
-    paths = sorted((rec / "detect").glob(f"ball_*_{start:g}_*.json"))
+    tag = os.environ.get("OSB_BALL_TAG", "")  # e.g. "win" for ballwin.py's candidates
+    paths = sorted((rec / "detect").glob(f"ball_*_{start:g}_*{tag}.json"))
     if not paths:
         raise SystemExit(f"ball: no ballclip.py candidates for start {start:g} s in {rec / 'detect'}")
     data = json.loads(paths[0].read_text())

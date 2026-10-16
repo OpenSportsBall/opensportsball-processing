@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -47,7 +48,9 @@ def setup(rec: Path, name: str):
     items = json.loads((lab / "items.json").read_text())
     labels = json.loads((lab / "labels.json").read_text())
     seg0, start = int(items[0]["id"].split("_")[0][1:]), float(items[0]["id"].split("_")[1])
-    cands_path = sorted((rec / "detect").glob(f"ball_{seg0}_{start:g}_*.json"))[0]
+    tag = os.environ.get("OSB_BALL_TAG", "")  # e.g. "win" for ballwin.py's candidates
+    cands_path = sorted((rec / "detect").glob(f"ball_{seg0}_{start:g}_*{tag}.json"))[0]
+    print(f"candidates: {cands_path.name}")
     data = json.loads(cands_path.read_text())
     manifest = json.loads((rec / "manifest.json").read_text())
     report = json.loads((rec / "phase0" / "report.json").read_text())
