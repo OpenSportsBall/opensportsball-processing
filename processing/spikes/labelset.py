@@ -10,6 +10,7 @@
 
     uv run processing/spikes/labelset.py footage/rec3 [count] [seed]
     uv run processing/spikes/labelset.py footage/rec3 pano
+    uv run processing/spikes/labelset.py footage/rec3 clip <name> <segment> <start s> <seconds> [step s]
     uv run processing/spikes/labelset.py footage/rec3 pairs
 
 Picks `count` random moments across all segments of the recording, and
@@ -85,7 +86,7 @@ PANO_STEP = 6                # panorama -> frame lookup every this many pixels
 FRAME_STEP = 40              # frame -> panorama lookup every this many pixels
 
 
-def panoramas(rec: Path) -> None:
+def panoramas(rec: Path, out: Path | None = None) -> None:
     """Stitched panoramas for every item, and the lookup tables the page
     uses to go between a panorama click and the item's own frame."""
     import follow
@@ -95,7 +96,7 @@ def panoramas(rec: Path) -> None:
     devs = {d["role"]: d for d in manifest["devices"]}
     flip = [report["upsideDown"]["main"], report["upsideDown"]["secondary"]]
     cm, cs = follow.setup_cameras(rec, report, devs, flip)
-    out = rec / "labels"
+    out = out or rec / "labels"
     (out / "pano").mkdir(exist_ok=True)
     W = int((PANO_YAW[1] - PANO_YAW[0]) / PANO_DEG)
     H = int((PANO_PITCH[1] - PANO_PITCH[0]) / PANO_DEG)
@@ -139,6 +140,8 @@ def panoramas(rec: Path) -> None:
     items = json.loads((out / "items.json").read_text())
     for k, it in enumerate(items):
         path = out / "pano" / f"{it['id']}.jpg"
+        if it.get("kind") == "pair" and "clipT" in it:  # clip sets: use the clip's own segment time
+            pass
         if path.exists():
             continue
         seg, t = it["segment"], it["t"]
@@ -199,6 +202,71 @@ def pairs(rec: Path) -> None:
     panoramas(rec)
 
 
+def clip(rec: Path, name: str, seg0: int, start: float, seconds: float, step: float) -> None:
+    """A set of both-phone moments every `step` s along a clip (clip times
+    as in follow.py: from `start` s into `seg0`, running on into the next
+    segments), in <recording>/labels_<name>/, for ball ground truth along
+    the clip. Suggestions come from ballclip.py's candidates for the clip
+    when they exist (the fine-tuned detector, with balljudge.py's score),
+    else the stock detector."""
+    import playeval
+
+    manifest = json.loads((rec / "manifest.json").read_text())
+    report = json.loads((rec / "phase0" / "report.json").read_text())
+    devs = {d["role"]: d for d in manifest["devices"]}
+    flip = {"main": report["upsideDown"]["main"], "secondary": report["upsideDown"]["secondary"]}
+    out = rec / f"labels_{name}"
+    (out / "images").mkdir(parents=True, exist_ok=True)
+    cands_path = rec / "detect" / f"ball_{seg0}_{start:g}_{seconds:g}.json"
+    clip_cands = json.loads(cands_path.read_text()) if cands_path.exists() else None
+    model = None if clip_cands else __import__("rfdetr").RFDETRMedium()
+    items = []
+    for clip_t in np.arange(0.0, seconds, step):
+        seg, t = playeval.segment_time(devs, seg0, start + clip_t)
+        # A phone's file can end just before a segment switch: step back a little.
+        for role in ("secondary", "main"):
+            off = 0.0 if role == "main" else report["segments"][seg]["offsetS"]
+            while t + off > devs[role]["segments"][seg]["durationMs"] / 1000 - 1.5:
+                t, clip_t = t - 0.2, clip_t - 0.2
+        base = f"c{seg0}_{start:g}_t{clip_t:06.2f}"
+        halves = {}
+        for role in ("secondary", "main"):
+            iid = f"{base}_{role}"
+            off = 0.0 if role == "main" else report["segments"][seg]["offsetS"]
+            frames = []
+            for back in range(8):  # the decoder returns nothing right at a file's end: step back
+                frames = phase0.frames_at(rec / devs[role]["segments"][seg]["objectKey"], t + off - 0.25 * back,
+                                          1, 30, 3840, flip[role])
+                if frames:
+                    break
+            if not frames:
+                raise SystemExit(f"no frame for {role} segment {seg} at {t + off:.2f} s (clip {clip_t:.1f} s)")
+            if back:
+                print(f"{iid}: stepped back {0.25 * back:.2f} s at the end of the file", flush=True)
+            img = frames[0]
+            cv2.imwrite(str(out / "images" / f"{iid}.jpg"), img, [cv2.IMWRITE_JPEG_QUALITY, 92])
+            if clip_cands and int(round(clip_t * clip_cands["fps"])) < len(clip_cands["frames"]):
+                k = int(round(clip_t * clip_cands["fps"]))
+                phone = 0 if role == "main" else 1
+                cs = [{"x": round((d["box"][0] + d["box"][2]) / 2, 1), "y": round((d["box"][1] + d["box"][3]) / 2, 1),
+                       "conf": d["conf"], "judge": d.get("judge")}
+                      for d in clip_cands["frames"][k]["detections"] if d["phone"] == phone]
+                cs = sorted(cs, key=lambda c: -(c["conf"] * (c["judge"] if c["judge"] is not None else 1)))[:MAX_SUGGESTIONS]
+            else:
+                if model is None:
+                    model = __import__("rfdetr").RFDETRMedium()
+                cs = candidates(model, img)
+            halves[role] = {"id": iid, "phone": role, "image": f"images/{iid}.jpg", "width": img.shape[1],
+                            "height": img.shape[0], "candidates": cs}
+        items.append({"id": base, "kind": "pair", "segment": seg, "t": round(t, 3), "clipT": float(clip_t),
+                      "frames": [halves["secondary"], halves["main"]]})
+        if len(items) % 10 == 0:
+            print(f"{len(items)} moments", flush=True)
+    (out / "items.json").write_text(json.dumps(items, indent=1))
+    print(f"{len(items)} moments in {out}")
+    panoramas(rec, out)
+
+
 def main(rec: Path, count: int, seed: int) -> None:
     import rfdetr
 
@@ -245,6 +313,9 @@ if __name__ == "__main__":
         panoramas(Path(sys.argv[1]))
     elif len(sys.argv) > 2 and sys.argv[2] == "pairs":
         pairs(Path(sys.argv[1]))
+    elif len(sys.argv) > 6 and sys.argv[2] == "clip":
+        clip(Path(sys.argv[1]), sys.argv[3], int(sys.argv[4]), float(sys.argv[5]), float(sys.argv[6]),
+             float(sys.argv[7]) if len(sys.argv) > 7 else 2.0)
     else:
         main(Path(sys.argv[1]), int(sys.argv[2]) if len(sys.argv) > 2 else 300,
              int(sys.argv[3]) if len(sys.argv) > 3 else 1)

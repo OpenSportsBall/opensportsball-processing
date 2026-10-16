@@ -60,8 +60,9 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
     dev = gpu.device()
     model = rfdetr.RFDETRMedium(pretrain_weights=str(ckpt))
     W, H = follow.SRC_W, follow.SRC_H
-    streams = [follow.prefetch(follow.frame_stream(f, start + o, seconds, W, fps=fps))
-               for f, o in zip(files, offsets)]
+    # Through follow.game_stream, so a clip may run on into the next segments.
+    streams = [follow.prefetch(follow.game_stream(rec, devs, report, ph, seg, start, seconds, W, fps=fps))
+               for ph in (0, 1)]
     frames_out, t0 = [], time.time()
     for i, (fa, fb) in enumerate(zip(*streams)):
         found = []

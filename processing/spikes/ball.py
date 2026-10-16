@@ -44,6 +44,7 @@ STATIC_RADIUS = 1.5       # metres
 STATIC_MIN_S = 4.0        # a spot seen over this long without moving is static
 NEAR_PLAYER_M = 6.0       # the match ball is usually this close to someone
 BRIDGE_S = 1.0            # interpolate gaps up to this long
+MIN_HITS = 3              # a track shorter than this scores nothing
 MIN_JUDGE = 0.0           # candidates scored below this by balljudge.py are ignored (0: judge not used)
 BODY_FRAC = 0.8           # candidates in the top 80% of a person's box are kit, hands, knees
 
@@ -156,7 +157,7 @@ def link(balls, fps):
 def score(t: Track, people) -> float:
     """Long, moving, confident and among players scores high."""
     n = len(t.hits)
-    if n < 3:
+    if n < MIN_HITS:
         return 0.0
     pos = np.array([h[1] for h in t.hits])
     travel = np.hypot(*(pos.max(0) - pos.min(0)))
