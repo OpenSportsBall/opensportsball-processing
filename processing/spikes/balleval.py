@@ -37,8 +37,9 @@ import ball as B  # noqa: E402
 import follow  # noqa: E402
 import pitch as P  # noqa: E402
 
-HIT_M = 3.0          # a hit: within this plus HIT_PER_M x the ball's distance from the camera ...
-HIT_PER_M = 0.05     # ... (placing a far ball on the pitch is uncertain in depth)
+import os
+HIT_M = float(os.environ.get("OSB_HIT_M", 3.0))        # a hit: within this plus HIT_PER_M x the ball's distance ...
+HIT_PER_M = float(os.environ.get("OSB_HIT_PER_M", 0.05))  # ... from the camera (a far ball's depth on the pitch is uncertain)
 
 
 def setup(rec: Path, name: str):
@@ -90,13 +91,12 @@ def setup(rec: Path, name: str):
             j = min(len(dets) - 1, int(round(i * follow.FPS / data["fps"])))
             pts = [pose.to_pitch(np.degrees(yw), np.degrees(feet)) for yw, _, _, feet in dets[j]]
             people[i] = np.array([p for p in pts if not np.isnan(p[0])]).reshape(-1, 2)
-    return data, moments, people, cam_xz
+    return data, moments, people, cam_xz, pose
 
 
-def track(data, people):
+def track(data, people, pose):
     fps, n = data["fps"], len(data["frames"])
-    cands = [[d for d in f["detections"] if d["onPitch"] and d.get("judge", 1.0) >= B.MIN_JUDGE]
-             for f in data["frames"]]
+    cands = [[d for d in f["detections"] if B.usable(d, pose)] for f in data["frames"]]
     spots = B.static_spots(cands, fps)
     keep = [[d for d in fr if all(np.hypot(*(np.array(d["xz"]) - s)) > B.STATIC_RADIUS for s in spots)]
             for fr in cands]
@@ -124,7 +124,7 @@ def score(est, moments, cam_xz):
 
 
 def main(rec: Path, name: str, runs: list[str]) -> None:
-    data, moments, people, cam_xz = setup(rec, name)
+    data, moments, people, cam_xz, pose = setup(rec, name)
     n_ball = sum(s == "ball" and xz is not None for _, _, s, xz in moments)
     print(f"{name}: {len(moments)} labelled moments, {n_ball} with the match ball on the pitch")
     defaults = {}
@@ -138,7 +138,7 @@ def main(rec: Path, name: str, runs: list[str]) -> None:
             setattr(importlib.import_module(mod), attr, float(val))
         import io, contextlib
         with contextlib.redirect_stdout(io.StringIO()):
-            est = track(data, people)
+            est = track(data, people, pose)
         f, w, m, ne, nn, cov = score(est, moments, cam_xz)
         print(f"{run or 'default':55s} found {f:2d}/{n_ball} ({100 * f / n_ball:3.0f}%)  wrong {w:2d}  missed {m:2d}"
               f"  | estimate at {ne}/{nn} 'none' moments | coverage {100 * cov:3.0f}%")

@@ -627,8 +627,7 @@ def ball_track(rec: Path, start: float, T: int, pos, pose) -> np.ndarray:
     n = len(data["frames"])
     # Players on the pitch at the candidates' frame rate (for track scoring).
     people = [pos[min(T - 1, int(round(k * FPS / bf)))] for k in range(n)]
-    cands = [[d for d in f["detections"] if d["onPitch"] and d.get("judge", 1.0) >= B.MIN_JUDGE]
-             for f in data["frames"]]
+    cands = [[d for d in f["detections"] if B.usable(d, pose)] for f in data["frames"]]
     spots = B.static_spots(cands, bf)
     keep = [[d for d in fr if all(np.hypot(*(np.array(d["xz"]) - s_)) > B.STATIC_RADIUS for s_ in spots)]
             for fr in cands]

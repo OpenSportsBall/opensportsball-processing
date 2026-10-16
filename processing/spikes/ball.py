@@ -39,13 +39,15 @@ import pitch as P  # noqa: E402
 
 MAX_SPEED = 35.0          # m/s, a hard shot
 GATE_M = 2.0              # association slack on top of speed x dt, metres
-MAX_MISSED_S = 0.3        # a track survives this long without a detection
+MAX_MISSED_S = 0.6        # a track survives this long without a detection (balleval.py on the clip sets)
 STATIC_RADIUS = 1.5       # metres
-STATIC_MIN_S = 4.0        # a spot seen over this long without moving is static
+STATIC_MIN_S = 30.0       # a spot seen over this long without moving is static (a ball placed for a goal
+                          # kick sits still for 10 s or more; 4 s removed it)
 NEAR_PLAYER_M = 6.0       # the match ball is usually this close to someone
 BRIDGE_S = 1.0            # interpolate gaps up to this long
-MIN_HITS = 3              # a track shorter than this scores nothing
-MIN_JUDGE = 0.0           # candidates scored below this by balljudge.py are ignored (0: judge not used)
+PITCH_MARGIN_M = 1.0      # candidates this far outside the lines still count (the ball rolls over them)
+MIN_HITS = 2              # a track shorter than this scores nothing
+MIN_JUDGE = 0.3           # candidates scored below this by balljudge.py are ignored (0: judge not used)
 BODY_FRAC = 0.8           # candidates in the top 80% of a person's box are kit, hands, knees
 
 
@@ -62,6 +64,14 @@ def on_body(ball: dict, people: list[dict]) -> bool:
         if x1 <= bx <= x2 and y1 <= by <= y1 + BODY_FRAC * (y2 - y1):
             return True
     return False
+
+
+def usable(d: dict, pose) -> bool:
+    """A candidate placed on the pitch, within PITCH_MARGIN_M of the lines,
+    and not judged low (balljudge.py)."""
+    if d["xz"] is None or d.get("judge", 1.0) < MIN_JUDGE:
+        return False
+    return abs(d["xz"][0]) <= pose.L / 2 + PITCH_MARGIN_M and abs(d["xz"][1]) <= pose.W / 2 + PITCH_MARGIN_M
 
 
 def load(rec: Path):
