@@ -16,10 +16,11 @@ The clip may run on into the following segments (game_stream).
 features: comma-separated, e.g. goalkick,goalframe (see play_targets).
 "ball" needs ballclip.py's candidates for the same segment, start and length.
 Best so far on the night game, scored against reviewed must-see boxes
-(playbench.py, 13 moments): "play goalkick,goalframe,unsure,ball,goalin"
-captures 9/13 at a 54 deg median width; without the ball ("A",
-goalkick,goalframe,unsure) 4/13. Tried and not adopted: lead, nowalk,
-fastboost, weak, allnear, flow, lone, gk2, ballhold (docs/BACKLOG.md).
+(playbench.py, 13 moments): "play goalkick,goalframe,unsure,ball,goalin,ballhold"
+with ballwin.py's candidates and the 50 deg zoom floor captures 11/13 at a
+64 deg median width; without the ball ("A", goalkick,goalframe,unsure)
+4/13. Tried and not adopted: lead, nowalk, fastboost, weak, allnear, flow,
+lone, gk2, netevent (docs/BACKLOG.md).
 Goal positions come from `pitch.py <recording> goals` when it has run.
 
 1. Geometry: the panorama stitcher's cameras (focal length, principal
@@ -81,7 +82,7 @@ SRC_W, SRC_H = 3840, 2160
 OUT_W, OUT_H = 1920, 1080
 PANO_DEG_PER_PX = 0.08  # pass A panorama resolution
 WARMUP_S = 20           # background model warm-up before the excerpt
-MIN_HFOV, MAX_HFOV = 30.0, 70.0
+MIN_HFOV, MAX_HFOV = 50.0, 70.0  # below ~55 deg a 1080p view upsamples the 4K source (26 px/deg at a phone's centre)
 MARGIN_DEG = 4.0        # framing margin on each side of the players
 SMOOTH_S = 1.5          # Gaussian sigma for the path
 MAX_PAN_DEG_S = 20.0    # pan speed cap
@@ -590,8 +591,11 @@ GOAL_MIN_PLAYERS = 4     # ... at least this many
 GOAL_MAX_HFOV = 75.0     # the union must fit in this
 GOAL_RECENT_S = 10.0     # if it doesn't fit, prefer the goal end if play was there this recently
 UNSURE_HFOV = ((1, 55.0), (2, 42.0))
-BALL_HOLD_S = 4.0        # ballhold: in a lull, the ball seen this recently is where play stopped ...
-BALL_STILL_M = 2.0       # ... and only if it moved less than this in its last second (placed for a restart)
+NET_HOLD_S = 3.0         # netevent: keep that goal in frame this long after its net moved
+NET_MIN = 0.05           # ... net change (share of the goal mouth) at least this, and 4 sigma above its usual level
+BALL_HOLD_S = 2.0        # ballhold: in a lull, the ball seen this recently is where play stopped ...
+BALL_STILL_M = 2.0       # ... and only if it moved less than this in its last second (placed for a restart) ...
+BALL_HOLD_STILL = 0.0    # ... when this is 1 (0: hold on any recently seen ball)
 BALL_HOLD_NEAR_M = 35.0  # ... frame it with the players within this (the restart's taker and group)
 INSIDE_M = 0.0           # players this far outside the lines still count (throw-in takers stand outside)
 LONE_SPEED = 5.0         # lone: a runner faster than this, away from the hotspot, may have the ball ...
@@ -619,8 +623,10 @@ def ball_track(rec: Path, start: float, T: int, pos, pose) -> np.ndarray:
     near the lines."""
     import ball as B
 
-    tag = os.environ.get("OSB_BALL_TAG", "")  # e.g. "win" for ballwin.py's candidates
+    tag = os.environ.get("OSB_BALL_TAG", "")  # "" prefers ballwin.py's candidates (.win.json) when present
     paths = sorted((rec / "detect").glob(f"ball_*_{start:g}_*{tag}.json"))
+    if not tag:
+        paths = sorted(paths, key=lambda p_: (not p_.name.endswith(".win.json"), p_.name))
     if not paths:
         raise SystemExit(f"ball: no ballclip.py candidates for start {start:g} s in {rec / 'detect'}")
     data = json.loads(paths[0].read_text())
@@ -690,7 +696,9 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
     hotspot along the nearby runners' mean velocity), "lone" (a fast runner
     away from the hotspot may have the ball: include them if it fits),
     "goalin" (hotspot within GOAL_IN_M of a goal keeps the goal mouth in
-    frame), "ballhold" (in a lull, stay on where the ball was last seen,
+    frame), "netevent" (flowcands.py's goal-net change: after the net
+    moves, keep that goal in frame for NET_HOLD_S), "ballhold" (in a lull,
+    stay on where the ball was last seen,
     with the players around it) and "gk2" (goal kicks
     end when the hotspot leaves that end or the taker pattern is gone, and
     don't repeat at the same end for GK_COOLDOWN_S).
@@ -853,7 +861,7 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
                         k_b = max(0, f - int(BALL_HOLD_S * FPS)) + back[-1]
                         b = ball_at[k_b]
                         k_a = max(0, k_b - int(FPS))
-                        still = has_ball[k_a] and np.hypot(*(b - ball_at[k_a])) < BALL_STILL_M
+                        still = (not BALL_HOLD_STILL) or (has_ball[k_a] and np.hypot(*(b - ball_at[k_a])) < BALL_STILL_M)
                     if still:
                         grp = pos[f][np.hypot(*(pos[f] - b).T) < BALL_HOLD_NEAR_M] if len(pos[f]) else np.zeros((0, 2))
                         fr = span(np.vstack([b[None], grp]), LONE_MAX_HFOV)
@@ -971,19 +979,43 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
                     follow -= 1
         print(f"goalkick: {n_kicks} restart(s), {held} frames framed on taker and group")
 
-    if "goalframe" in features:
+    net_side = np.zeros(T, int)  # netevent: goal side whose net moved recently (0: none)
+    if "netevent" in features:
+        paths = sorted((rec / "detect").glob(f"net_*_{start:g}_*.json"))
+        if paths:
+            nd = json.loads(paths[0].read_text())
+            arr, nfps = np.array(nd["net"]), nd["fps"]
+            for col, side in ((0, -1), (1, 1)):
+                s_ = arr[:, col]
+                if s_.max() <= 0:
+                    continue
+                thr = max(NET_MIN, float(np.median(s_) + 4 * np.std(s_[s_ < np.percentile(s_, 90)])))
+                hits = np.where(s_ > thr)[0]
+                for h in hits:
+                    a = int(h / nfps * FPS)
+                    net_side[a:min(T, a + int(NET_HOLD_S * FPS))] = side
+            print(f"netevent: {int((net_side != 0).sum())} frames after a net moved")
+        else:
+            print("netevent: no net_*.json for this clip (flowcands.py)")
+    if "goalframe" in features or "netevent" in features:
         flag = np.zeros(T, bool)
         frame_for = {}
         for i in range(T):
-            if len(pos[i]) < 4 or np.isnan(spots[i, 0]) or has_ball[i]:
+            if len(pos[i]) < 4 or np.isnan(spots[i, 0]):
+                continue
+            if has_ball[i] and net_side[i] == 0:
                 continue
             for side in (-1, 1):
                 mouth = goal_at[side]
-                if side * (mouth[0] - spots[i, 0]) <= GOAL_ZONE_M + 5:
+                if net_side[i] == side:
+                    pass  # the net moved: show this goal whatever the hotspot is doing
+                elif "goalframe" not in features or side * (mouth[0] - spots[i, 0]) <= GOAL_ZONE_M + 5:
                     continue  # the hotspot is already at this end
                 g = pos[i][side * (mouth[0] - pos[i][:, 0]) <= GOAL_ZONE_M]
-                if len(g) < GOAL_MIN_PLAYERS:
+                if len(g) < GOAL_MIN_PLAYERS and net_side[i] != side:
                     continue
+                if not len(g):
+                    g = mouth[None]
                 cl = pos[i][np.hypot(*(pos[i] - spots[i]).T) < 2 * HOT_BANDWIDTH_M]
                 pts = np.vstack([cl, g, mouth[None]])
                 fr = span(pts, GOAL_MAX_HFOV)
