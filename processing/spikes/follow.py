@@ -85,6 +85,8 @@ WARMUP_S = 20           # background model warm-up before the excerpt
 MIN_HFOV, MAX_HFOV = 50.0, 70.0  # below ~55 deg a 1080p view upsamples the 4K source (26 px/deg at a phone's centre)
 MARGIN_DEG = 4.0        # framing margin on each side of the players
 SMOOTH_S = 1.5          # Gaussian sigma for the path
+EDGE_MARGIN_DEG = 2.0   # the view never crosses the canvas's left/right edge (less this: lens fall-off) ...
+EDGE_MIN_HFOV = 40.0    # ... it stops there and zooms in instead, down to this (the phones' edges have more px/deg)
 MAX_PAN_DEG_S = 20.0    # pan speed cap
 SEAM_FEATHER_DEG = 0.3  # detail blend width either side of the seam
 TONE_FEATHER_DEG = 6.0  # brightness/colour blend width across the seam
@@ -1106,6 +1108,24 @@ def plan_path(rec: Path, out: Path, seg: int, start: float, dets, extent, aim: s
     vmax = np.radians(MAX_PAN_DEG_S) / FPS
     for i in range(1, T):
         yaw[i] = yaw[i - 1] + np.clip(yaw[i] - yaw[i - 1], -vmax, vmax)
+    # Never show past the canvas's left or right edge: the pan stops at the
+    # edge and the view narrows so the edge stays put (the aim point stays
+    # in view), down to EDGE_MIN_HFOV.
+    lo, hi = y0 + np.radians(EDGE_MARGIN_DEG), y1 - np.radians(EDGE_MARGIN_DEG)
+    floor = np.radians(EDGE_MIN_HFOV)
+    n_edge = 0
+    for i in range(T):
+        half = hfov[i] / 2
+        if yaw[i] - half < lo:
+            w = max(floor, min(hfov[i], 2 * (yaw[i] - lo)))
+            hfov[i], yaw[i] = w, lo + w / 2
+            n_edge += 1
+        elif yaw[i] + half > hi:
+            w = max(floor, min(hfov[i], 2 * (hi - yaw[i])))
+            hfov[i], yaw[i] = w, hi - w / 2
+            n_edge += 1
+    if n_edge:
+        print(f"edges: view held at the canvas edge in {n_edge} frames ({100 * n_edge / T:.0f}%)")
     # Keep the view inside what the phones saw vertically.
     vfov = 2 * np.arctan(np.tan(hfov / 2) * OUT_H / OUT_W)
     pitch = np.clip(pitch, p0 + vfov / 2, p1 - vfov / 2)
