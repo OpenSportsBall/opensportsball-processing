@@ -41,11 +41,25 @@ HERE = Path(__file__).parent
 CKPT = "balltrain/checkpoint_best_total.pth"
 
 
-def run(cmd: list[str], log: Path, env=None) -> int:
+def run(cmd: list[str], log: Path, done_file: Path | None = None, grace_s: float = 180.0) -> int:
+    """Runs `cmd`, logging to `log`. If `done_file` appears and the process
+    then lingers for `grace_s` (teardown hangs have happened), it is killed
+    and counted as done."""
     with log.open("a") as f:
         f.write(f"\n$ {' '.join(cmd)}\n")
         f.flush()
-        return subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, env=env).returncode
+        proc = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT)
+        seen = None
+        while proc.poll() is None:
+            time.sleep(5)
+            if done_file is not None and done_file.exists():
+                seen = seen or time.time()
+                if time.time() - seen > grace_s:
+                    f.write(f"\n[fullgame] {done_file.name} written but the process lingered {grace_s:.0f} s: killed\n")
+                    proc.kill()
+                    proc.wait()
+                    return 0
+        return proc.returncode
 
 
 def main() -> None:
@@ -87,7 +101,9 @@ def main() -> None:
                 continue
             t0 = time.time()
             rc = run(["uv", "run", "-q", str(HERE / "ballwin.py"), str(rec), "0", f"{start:g}", f"{seconds:g}",
-                      str(rec / CKPT), "10"], out / "logs" / f"ball_{k:02d}.log")
+                      str(rec / CKPT), "10"], out / "logs" / f"ball_{k:02d}.log", done_file=cands(start, seconds))
+            if rc and cands(start, seconds).exists():
+                rc = 0  # the candidates are there; whatever happened after doesn't matter
             print(f"ball chunk {k}: {'ok' if rc == 0 else f'FAILED rc={rc}'} in {(time.time() - t0) / 60:.1f} min", flush=True)
             if rc:
                 failed.append(("ball", k))
@@ -117,8 +133,8 @@ def main() -> None:
     tf = threading.Thread(target=follow_worker)
     t0 = time.time()
     tb.start(); tf.start(); tb.join(); tf.join()
-    if failed or not all(piece(k).exists() for k in range(len(chunks))):
-        print(f"not all pieces made ({failed}); fix and rerun to resume", flush=True)
+    if not all(piece(k).exists() for k in range(len(chunks))):
+        print(f"not all pieces made (failures: {failed}); fix and rerun to resume", flush=True)
         sys.exit(1)
 
     # Concatenate the pieces, then mux Main's audio (its segments are back to back).

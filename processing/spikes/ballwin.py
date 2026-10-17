@@ -183,7 +183,8 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
     path.write_text(json.dumps({"segment": seg, "fps": fps, "model": str(ckpt), "mode": "window", "frames": frames_out}))
     n = len(frames_out)
     print(f"{n} frame pairs in {(time.time() - t0) / 60:.1f} min; {tiles_total / n:.1f} tiles per frame pair"
-          f" vs {2 * len(detect.tiles(H, W))} for full scans; {n_full} full scans -> {path.name}")
+          f" vs {2 * len(detect.tiles(H, W))} for full scans; {n_full} full scans -> {path.name}", flush=True)
+    os._exit(0)  # the output is written; interpreter teardown (MPS, decoder threads) has hung for hours
 
 
 if __name__ == "__main__":
