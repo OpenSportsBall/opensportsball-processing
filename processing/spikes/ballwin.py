@@ -26,6 +26,7 @@ prints the tiles per frame against a full scan.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -43,9 +44,9 @@ import pitch as P  # noqa: E402
 
 FLOOR = 0.1
 MERGE_DEG = 0.4         # the same ball seen by both phones
-FULL_EVERY_S = 2.0      # a full scan this often regardless
+FULL_EVERY_S = float(os.environ.get("OSB_FULL_EVERY_S", 2.0))   # a full scan this often regardless
 LOST_S = 1.0            # ... and once the ball has been lost this long, every LOST_SCAN_S
-LOST_SCAN_S = 0.5
+LOST_SCAN_S = float(os.environ.get("OSB_LOST_SCAN_S", 0.5))
 ZOOM_BELOW_PX = 10.0    # 2x zoom window when the expected ball diameter is under this
 ACCEPT_CONF = 0.3       # a detection at least this sure, and judged at least ACCEPT_JUDGE, updates the track ...
 ACCEPT_JUDGE = 0.3
@@ -177,7 +178,8 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
             el = time.time() - t0
             print(f"{i + 1}/{int(seconds * fps)} frames, {el / 60:.1f} min, {tiles_total / (i + 1):.1f} tiles/frame"
                   f" ({n_full} full scans)", flush=True)
-    path = rec / "detect" / f"ball_{seg}_{start:g}_{seconds:g}.win.json"
+    tag = os.environ.get("OSB_WIN_TAG", "win")  # output name; e.g. "win4" for a cadence experiment
+    path = rec / "detect" / f"ball_{seg}_{start:g}_{seconds:g}.{tag}.json"
     path.write_text(json.dumps({"segment": seg, "fps": fps, "model": str(ckpt), "mode": "window", "frames": frames_out}))
     n = len(frames_out)
     print(f"{n} frame pairs in {(time.time() - t0) / 60:.1f} min; {tiles_total / n:.1f} tiles per frame pair"
