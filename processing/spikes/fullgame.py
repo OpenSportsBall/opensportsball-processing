@@ -20,6 +20,10 @@ run can be resumed. At the end the pieces are concatenated and Main's
 audio is muxed in: <recording>/<out>/game.mp4.
 
 Logs: <recording>/<out>/logs/.
+
+Keep the Mac awake for the run: it idle-sleeps otherwise (the first run
+lost a night to that). `caffeinate -i -w <pid of this script's python>`,
+or start it as `caffeinate -i uv run ...`.
 """
 
 from __future__ import annotations
