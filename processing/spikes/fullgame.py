@@ -105,13 +105,14 @@ def main() -> None:
 
     def ball_worker():
         for k, (start, seconds) in enumerate(chunks):
-            if piece(k).exists() or cands(start, seconds).exists():
+            if piece(k).exists():
                 continue
-            t0 = time.time()
-            rc = run(["uv", "run", "-q", str(HERE / "ballwin.py"), str(rec), "0", f"{start:g}", f"{seconds:g}",
-                      str(rec / CKPT), "10"], out / "logs" / f"ball_{k:02d}.log", done_file=cands(start, seconds))
-            if rc and cands(start, seconds).exists():
-                rc = 0  # the candidates are there; whatever happened after doesn't matter
+            t0, rc = time.time(), 0
+            if not cands(start, seconds).exists():  # the candidates may be there from an earlier run
+                rc = run(["uv", "run", "-q", str(HERE / "ballwin.py"), str(rec), "0", f"{start:g}", f"{seconds:g}",
+                          str(rec / CKPT), "10"], out / "logs" / f"ball_{k:02d}.log", done_file=cands(start, seconds))
+                if rc and cands(start, seconds).exists():
+                    rc = 0  # the candidates are there; whatever happened after doesn't matter
             if rc == 0 and a.teams and not roles_file(start, seconds).exists():
                 rc = run(["uv", "run", "-q", str(HERE / "roles.py"), str(rec), "0", f"{start:g}", f"{seconds:g}",
                           a.teams, f"{a.roles_fps:g}"], out / "logs" / f"roles_{k:02d}.log", done_file=roles_file(start, seconds))
