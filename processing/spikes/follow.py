@@ -593,6 +593,16 @@ GOAL_MIN_PLAYERS = 4     # ... at least this many
 GOAL_MAX_HFOV = 75.0     # the union must fit in this
 GOAL_RECENT_S = 10.0     # if it doesn't fit, prefer the goal end if play was there this recently
 UNSURE_HFOV = ((1, 55.0), (2, 42.0))
+KO_CENTRE_M = 4.0        # kickoff: a confident ball candidate within this of the centre spot ...
+KO_MIN_S = 3.0           # ... for this long (median-filtered over 1 s) with at most KO_RUNNERS running, ...
+KO_RUNNERS = 3
+KO_WRONG_HALF = 4        # ... and, when roles are known, at most this many players beyond 3 m into the other half
+KO_MIN_SIDED = 3
+KO_RELEASE_RUNNERS = 4   # the hold ends when this many run, or the hotspot leaves the centre by KO_RELEASE_M
+KO_RELEASE_M = 20.0
+KO_GONE_S = 2.0          # the ball must have left the centre for this long before the hold can end
+KO_NO_GK_S = 8.0         # no goal kick during a kick-off hold or this long after it (the hotspot means nothing then)
+KO_HFOV = 60.0           # the view at a kick-off: the centre circle and both teams' fronts
 ROLE_MATCH_M = 2.5       # roles: a roles.py person this close to a pass A blob gives it the role
 ROLE_KEEPER_BALL_M = 6.0 # ... a goal kick: the keeper in their area with the ball (or nobody else) within this
 NET_HOLD_S = 3.0         # netevent: keep that goal in frame this long after its net moved
@@ -675,6 +685,29 @@ def ball_track(rec: Path, start: float, T: int, pos, pose) -> np.ndarray:
     return out
 
 
+def ball_near_point(rec: Path, start: float, T: int, point, radius_m: float) -> np.ndarray:
+    """Per follow frame: a confident, judged ball candidate (the clip's
+    ballclip/ballwin file, as ball_track reads it) within radius_m of
+    `point` on the pitch. Raw candidates, not the chain: a ball parked
+    for a kick-off is exactly what the tracker's static filter removes."""
+    tag = os.environ.get("OSB_BALL_TAG", "")
+    paths = sorted((rec / "detect").glob(f"ball_*_{start:g}_*{tag}.json"))
+    if not tag:
+        paths = sorted(paths, key=lambda p_: (not p_.name.endswith(".win.json"), p_.name))
+    out = np.zeros(T, bool)
+    if not paths:
+        return out
+    data = json.loads(paths[0].read_text())
+    bf, frames = data["fps"], data["frames"]
+    for i in range(T):
+        k = int(i * bf / FPS)
+        if k >= len(frames):
+            break
+        out[i] = any(d["onPitch"] and d["conf"] >= 0.3 and d.get("judge", 1.0) >= 0.3
+                     and np.hypot(*(np.array(d["xz"]) - point)) <= radius_m for d in frames[k]["detections"])
+    return out
+
+
 def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = ()):
     """Per-frame aim (yaw, pitch) and width from player motion: blob feet
     placed on the pitch, tracked (play.py), aim at the hotspot of running
@@ -702,7 +735,9 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
     "goalin" (hotspot within GOAL_IN_M of a goal keeps the goal mouth in
     frame), "roles" (roles.py's people: referees are dropped from the
     players, a keeper in their area with the ball triggers the goal-kick
-    framing), "netevent" (flowcands.py's goal-net change: after the net
+    framing), "kickoff" (the ball parked at the centre spot with hardly
+    anyone running, and with roles both sides in their own halves, is a
+    kick-off: hold the centre circle until play moves), "netevent" (flowcands.py's goal-net change: after the net
     moves, keep that goal in frame for NET_HOLD_S), "ballhold" (in a lull,
     stay on where the ball was last seen,
     with the players around it) and "gk2" (goal kicks
@@ -731,6 +766,7 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
         else:
             print("roles: no roles_*.json for this clip (roles.py)")
     keepers_at = [[] for _ in dets]
+    sided_at = [None] * len(dets)  # (A positions, B positions) from roles.py, for the kick-off rule
     n_ref = 0
     inside = []
     for i, fd in enumerate(dets):
@@ -744,6 +780,8 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
             ppl = roles_frames[k]["people"]
             refs = [np.array(q["xz"]) for q in ppl if q["role"] == "referee"]
             keepers_at[i] = [np.array(q["xz"]) for q in ppl if q["role"] == "keeper"]
+            sided_at[i] = (np.array([q["xz"] for q in ppl if q["role"] == "A"]).reshape(-1, 2),
+                           np.array([q["xz"] for q in ppl if q["role"] == "B"]).reshape(-1, 2))
             if refs:
                 kept = [p_ for p_ in xz if all(np.hypot(*(np.array(p_) - r)) > ROLE_MATCH_M for r in refs)]
                 n_ref += len(xz) - len(kept)
@@ -946,13 +984,64 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
         sp = sp[~np.isnan(sp[:, 0])]
         return bool(np.any(np.hypot(*(sp - goal_at[side]).T) <= metres)) if len(sp) else False
 
+    if "kickoff" in features:
+        # A kick-off (the start of a half, or after a goal): the ball parked at
+        # the centre spot with hardly anyone running, and, with roles known,
+        # both sides (nearly) in their own halves. Hold the centre circle from
+        # then until play has moved on.
+        parked = ball_near_point(rec, start, T, np.zeros(2), KO_CENTRE_M)
+        parked = median_filter(parked.astype(np.uint8), int(FPS) | 1) > 0
+        sorted_halves = np.ones(T, bool)
+        if roles_frames is not None:
+            for i in range(T):
+                if sided_at[i] is None:
+                    continue
+                A_, B_ = sided_at[i]
+                if len(A_) < KO_MIN_SIDED or len(B_) < KO_MIN_SIDED:
+                    continue
+                wrong = min((A_[:, 0] > 3).sum() + (B_[:, 0] < -3).sum(), (A_[:, 0] < -3).sum() + (B_[:, 0] > 3).sum())
+                sorted_halves[i] = wrong <= KO_WRONG_HALF
+            sorted_halves = median_filter(sorted_halves.astype(np.uint8), int(2 * FPS) | 1) > 0
+        ko = parked & (running <= KO_RUNNERS) & sorted_halves
+        centre = finish(np.radians(pose.angles(np.array([[0.0, 0.0]]))[0]), np.radians(KO_HFOV), KO_HFOV)
+        n_ko, i = 0, 0
+        while i < T:
+            if not ko[i]:
+                i += 1
+                continue
+            j = i
+            while j < T and ko[j]:
+                j += 1
+            if (j - i) / FPS >= KO_MIN_S:
+                # Hold while the ball stays parked (players jogging into position
+                # aren't play), then until play has moved off the centre.
+                e = j
+                gone = 0
+                while e < T:
+                    gone = 0 if parked[e] else gone + 1
+                    if gone > KO_GONE_S * FPS and (running[e] >= KO_RELEASE_RUNNERS
+                                       or (not np.isnan(spots[e, 0]) and np.hypot(*spots[e]) >= KO_RELEASE_M)):
+                        break
+                    e += 1
+                for f in range(i, e):
+                    tyaw[f], tpitch[f], thfov[f] = centre
+                    mode[f] = "kickoff"
+                n_ko += 1
+                i = e
+            else:
+                i = j
+        print(f"kickoff: {n_ko} kick-off(s), {int(sum(m_ == 'kickoff' for m_ in mode))} frames held on the centre"
+              f" (ball parked at the centre in {int(parked.sum())} frames)")
     if "goalkick" in features:
         pen_depth = pose.k * P.PEN_DEPTH + GK_ZONE_EXTRA_M
         pen_z = pose.k * P.PEN_HALF + GK_ZONE_EXTRA_M
         flag = np.zeros(T, bool)
         frame_for = {}
+        last_ko = -10 ** 9
         for i in range(T):
-            if len(pos[i]) < 4:
+            if mode[i] == "kickoff":
+                last_ko = i
+            if len(pos[i]) < 4 or i - last_ko < KO_NO_GK_S * FPS:
                 continue
             speed = np.hypot(*vel[i].T)
             for j, (x, z) in enumerate(pos[i]):
@@ -962,11 +1051,11 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
                     continue
                 others = np.delete(pos[i], j, axis=0)
                 d = np.hypot(*(others - pos[i][j]).T)
-                # A known keeper in their area with the ball at hand (or alone) is a goal kick
-                # whatever the group is doing; otherwise the lone-still-player pattern.
+                # A known keeper in their area with the ball at hand is a goal kick whatever
+                # the group is doing (a keeper alone is not: they are alone at every
+                # kick-off); otherwise the lone-still-player pattern.
                 is_keeper = any(np.hypot(*(kp - pos[i][j])) <= ROLE_MATCH_M for kp in keepers_at[i])
-                keeper_kick = is_keeper and (has_ball[i] and np.hypot(*(ball_at[i] - pos[i][j])) <= ROLE_KEEPER_BALL_M
-                                             or d.min() >= GK_ALONE_M)
+                keeper_kick = is_keeper and has_ball[i] and np.hypot(*(ball_at[i] - pos[i][j])) <= ROLE_KEEPER_BALL_M
                 if not keeper_kick:
                     if d.min() < GK_ALONE_M or np.median(d) < GK_GROUP_M:
                         continue
