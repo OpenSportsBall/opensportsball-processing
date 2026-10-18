@@ -68,7 +68,8 @@ def main() -> None:
     ap.add_argument("--chunk", type=float, default=600.0)
     ap.add_argument("--max-chunks", type=int, default=0)
     ap.add_argument("--out", default="fullgame")
-    ap.add_argument("--features", default="goalkick,goalframe,unsure,ball,goalin,ballhold,roles")
+    ap.add_argument("--features", default="goalkick,goalframe,unsure,ball,goalin,ballhold,roles,kickoff")
+    ap.add_argument("--roles-fps", type=float, default=4.0, help="roles.py rate (people move slowly; 4 is plenty)")
     ap.add_argument("--teams", default="", help="teams.py set for roles.py (the people stage); empty: no roles")
     a = ap.parse_args()
     rec = a.rec
@@ -113,7 +114,7 @@ def main() -> None:
                 rc = 0  # the candidates are there; whatever happened after doesn't matter
             if rc == 0 and a.teams and not roles_file(start, seconds).exists():
                 rc = run(["uv", "run", "-q", str(HERE / "roles.py"), str(rec), "0", f"{start:g}", f"{seconds:g}",
-                          a.teams, "10"], out / "logs" / f"roles_{k:02d}.log", done_file=roles_file(start, seconds))
+                          a.teams, f"{a.roles_fps:g}"], out / "logs" / f"roles_{k:02d}.log", done_file=roles_file(start, seconds))
                 if rc and roles_file(start, seconds).exists():
                     rc = 0
             print(f"ball chunk {k}: {'ok' if rc == 0 else f'FAILED rc={rc}'} in {(time.time() - t0) / 60:.1f} min", flush=True)
