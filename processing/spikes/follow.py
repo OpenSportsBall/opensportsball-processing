@@ -588,6 +588,7 @@ GK_FOLLOW_S = 2.0        # keep the framing this long after play resumes (the ki
 GK_RESUME_RUNNERS = 3    # play has resumed when this many run...
 GK_RESUME_S = 0.5        # ... for this long
 GK_MAX_S = 12.0          # a restart framing lasts at most this long
+GK_BALL_FAR_M = 25.0     # a tracked ball this far from that goal neither starts nor keeps a goal-kick framing
 GOAL_ZONE_M = 20.0       # goalframe: players within this of a goal line
 GOAL_MIN_PLAYERS = 4     # ... at least this many
 GOAL_MAX_HFOV = 75.0     # the union must fit in this
@@ -1056,6 +1057,8 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
                 # kick-off); otherwise the lone-still-player pattern.
                 is_keeper = any(np.hypot(*(kp - pos[i][j])) <= ROLE_MATCH_M for kp in keepers_at[i])
                 keeper_kick = is_keeper and has_ball[i] and np.hypot(*(ball_at[i] - pos[i][j])) <= ROLE_KEEPER_BALL_M
+                if has_ball[i] and np.hypot(*(ball_at[i] - goal_at[side])) > GK_BALL_FAR_M:
+                    continue  # the ball is known and nowhere near this goal
                 if not keeper_kick:
                     if d.min() < GK_ALONE_M or np.median(d) < GK_GROUP_M:
                         continue
@@ -1088,7 +1091,8 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
                     last_fr, last_seen = fr, i
                     n_kicks += 1
                     state, since, side_now = True, i, side
-            stop = state and ((resumed[i] and i - since > FPS) or i - since > GK_MAX_S * FPS)
+            stop = state and ((resumed[i] and i - since > FPS) or i - since > GK_MAX_S * FPS
+                              or (has_ball[i] and np.hypot(*(ball_at[i] - goal_at[side_now])) > GK_BALL_FAR_M))
             if state and gk2 and not stop:
                 sp = spots[i]
                 far = not np.isnan(sp[0]) and np.hypot(*(sp - goal_at[side_now])) > GK_LEAVE_M
