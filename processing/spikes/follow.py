@@ -593,6 +593,8 @@ GOAL_MIN_PLAYERS = 4     # ... at least this many
 GOAL_MAX_HFOV = 75.0     # the union must fit in this
 GOAL_RECENT_S = 10.0     # if it doesn't fit, prefer the goal end if play was there this recently
 UNSURE_HFOV = ((1, 55.0), (2, 42.0))
+ROLE_MATCH_M = 2.5       # roles: a roles.py person this close to a pass A blob gives it the role
+ROLE_KEEPER_BALL_M = 6.0 # ... a goal kick: the keeper in their area with the ball (or nobody else) within this
 NET_HOLD_S = 3.0         # netevent: keep that goal in frame this long after its net moved
 NET_MIN = 0.05           # ... net change (share of the goal mouth) at least this, and 4 sigma above its usual level
 BALL_HOLD_S = 2.0        # ballhold: in a lull, the ball seen this recently is where play stopped ...
@@ -698,7 +700,9 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
     hotspot along the nearby runners' mean velocity), "lone" (a fast runner
     away from the hotspot may have the ball: include them if it fits),
     "goalin" (hotspot within GOAL_IN_M of a goal keeps the goal mouth in
-    frame), "netevent" (flowcands.py's goal-net change: after the net
+    frame), "roles" (roles.py's people: referees are dropped from the
+    players, a keeper in their area with the ball triggers the goal-kick
+    framing), "netevent" (flowcands.py's goal-net change: after the net
     moves, keep that goal in frame for NET_HOLD_S), "ballhold" (in a lull,
     stay on where the ball was last seen,
     with the players around it) and "gk2" (goal kicks
@@ -715,14 +719,38 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
     # Aim only from people inside the lines, and not where people stand
     # around all game long (subs, bench, spectators by the touchline).
     hl, hw = pose.L / 2, pose.W / 2
+    # roles: roles.py's people (side, keeper, referee) at the candidate rate,
+    # matched to pass A blobs by position; referees are dropped before
+    # tracking, keepers are remembered for the goal-kick rule.
+    roles_frames = None
+    if "roles" in features:
+        rp = sorted((rec / "detect").glob(f"roles_*_{start:g}_*.json"))
+        if rp:
+            rd = json.loads(rp[0].read_text())
+            roles_frames, roles_fps = rd["frames"], rd["fps"]
+        else:
+            print("roles: no roles_*.json for this clip (roles.py)")
+    keepers_at = [[] for _ in dets]
+    n_ref = 0
     inside = []
-    for fd in dets:
+    for i, fd in enumerate(dets):
         xz = []
         for yw, _, _, feet in fd:
             x, z = pose.to_pitch(np.degrees(yw), np.degrees(feet))
             if not np.isnan(x) and abs(x) <= hl + INSIDE_M and abs(z) <= hw + INSIDE_M:
                 xz.append((float(x), float(z)))
+        if roles_frames is not None:
+            k = min(len(roles_frames) - 1, int(round(i / FPS * roles_fps)))
+            ppl = roles_frames[k]["people"]
+            refs = [np.array(q["xz"]) for q in ppl if q["role"] == "referee"]
+            keepers_at[i] = [np.array(q["xz"]) for q in ppl if q["role"] == "keeper"]
+            if refs:
+                kept = [p_ for p_ in xz if all(np.hypot(*(np.array(p_) - r)) > ROLE_MATCH_M for r in refs)]
+                n_ref += len(xz) - len(kept)
+                xz = kept
         inside.append(xz)
+    if roles_frames is not None:
+        print(f"roles: {n_ref} referee detections dropped; keeper seen in {sum(bool(k_) for k_ in keepers_at)} frames")
     loiter = loiter_cells(inside, pose)
     frames, dropped = [], 0
     for xz in inside:
@@ -934,10 +962,16 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
                     continue
                 others = np.delete(pos[i], j, axis=0)
                 d = np.hypot(*(others - pos[i][j]).T)
-                if d.min() < GK_ALONE_M or np.median(d) < GK_GROUP_M:
-                    continue
-                if not near_goal_recently(i, side, GK_RECENT_S, GK_NEAR_GOAL_M):
-                    continue
+                # A known keeper in their area with the ball at hand (or alone) is a goal kick
+                # whatever the group is doing; otherwise the lone-still-player pattern.
+                is_keeper = any(np.hypot(*(kp - pos[i][j])) <= ROLE_MATCH_M for kp in keepers_at[i])
+                keeper_kick = is_keeper and (has_ball[i] and np.hypot(*(ball_at[i] - pos[i][j])) <= ROLE_KEEPER_BALL_M
+                                             or d.min() >= GK_ALONE_M)
+                if not keeper_kick:
+                    if d.min() < GK_ALONE_M or np.median(d) < GK_GROUP_M:
+                        continue
+                    if not near_goal_recently(i, side, GK_RECENT_S, GK_NEAR_GOAL_M):
+                        continue
                 fr = span(np.vstack([pos[i][j][None], others]), RESTART_MAX_HFOV)
                 if fr is None:  # too wide: taker and the group's middle
                     aim, spread = target((pos[i][j] + np.median(others, axis=0)) / 2,
