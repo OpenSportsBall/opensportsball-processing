@@ -16,10 +16,10 @@ The clip may run on into the following segments (game_stream).
 features: comma-separated, e.g. goalkick,goalframe (see play_targets).
 "ball" needs ballclip.py's candidates for the same segment, start and length.
 Best so far on the night game, scored against reviewed must-see boxes
-(playbench.py, 13 moments): "play goalkick,goalframe,unsure,ball,goalin,ballhold"
-with ballwin.py's candidates and the 50 deg zoom floor captures 11/13 at a
-64 deg median width; without the ball ("A", goalkick,goalframe,unsure)
-4/13. Tried and not adopted: lead, nowalk, fastboost, weak, allnear, flow,
+(playbench.py, 13 moments): "play goalkick,goalframe,unsure,ball,goalin,ballhold,roles"
+with ballwin.py's candidates, roles.py's people and the 50 deg zoom floor
+captures 12/13 at a 66 deg median width; without the ball ("A",
+goalkick,goalframe,unsure) 4/13. Tried and not adopted: lead, nowalk, fastboost, weak, allnear, flow,
 lone, gk2, netevent (docs/BACKLOG.md).
 Goal positions come from `pitch.py <recording> goals` when it has run.
 

@@ -68,7 +68,8 @@ def main() -> None:
     ap.add_argument("--chunk", type=float, default=600.0)
     ap.add_argument("--max-chunks", type=int, default=0)
     ap.add_argument("--out", default="fullgame")
-    ap.add_argument("--features", default="goalkick,goalframe,unsure,ball,goalin,ballhold")
+    ap.add_argument("--features", default="goalkick,goalframe,unsure,ball,goalin,ballhold,roles")
+    ap.add_argument("--teams", default="", help="teams.py set for roles.py (the people stage); empty: no roles")
     a = ap.parse_args()
     rec = a.rec
     manifest = json.loads((rec / "manifest.json").read_text())
@@ -93,6 +94,12 @@ def main() -> None:
     def cands(start, seconds):
         return rec / "detect" / f"ball_0_{start:g}_{seconds:g}.win.json"
 
+    def roles_file(start, seconds):
+        return rec / "detect" / f"roles_0_{start:g}_{seconds:g}.json"
+
+    if "roles" in a.features and not a.teams:
+        sys.exit("--teams <set> is needed for the roles feature (teams.py), or drop roles from --features")
+
     failed = []
 
     def ball_worker():
@@ -104,6 +111,11 @@ def main() -> None:
                       str(rec / CKPT), "10"], out / "logs" / f"ball_{k:02d}.log", done_file=cands(start, seconds))
             if rc and cands(start, seconds).exists():
                 rc = 0  # the candidates are there; whatever happened after doesn't matter
+            if rc == 0 and a.teams and not roles_file(start, seconds).exists():
+                rc = run(["uv", "run", "-q", str(HERE / "roles.py"), str(rec), "0", f"{start:g}", f"{seconds:g}",
+                          a.teams, "10"], out / "logs" / f"roles_{k:02d}.log", done_file=roles_file(start, seconds))
+                if rc and roles_file(start, seconds).exists():
+                    rc = 0
             print(f"ball chunk {k}: {'ok' if rc == 0 else f'FAILED rc={rc}'} in {(time.time() - t0) / 60:.1f} min", flush=True)
             if rc:
                 failed.append(("ball", k))
@@ -112,7 +124,7 @@ def main() -> None:
         for k, (start, seconds) in enumerate(chunks):
             if piece(k).exists():
                 continue
-            while not cands(start, seconds).exists():
+            while not cands(start, seconds).exists() or (a.teams and not roles_file(start, seconds).exists()):
                 if ("ball", k) in failed:
                     print(f"follow chunk {k}: skipped, no candidates", flush=True)
                     break
