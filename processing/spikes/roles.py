@@ -86,7 +86,7 @@ def main(rec: Path, seg: int, start: float, seconds: float, tset: str, fps: floa
                 bgr = cv2.rotate(bgr, cv2.ROTATE_180)
             small = cv2.resize(bgr, (HALF, HALF * 9 // 16), interpolation=cv2.INTER_AREA)
             rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
-            boxes = teams.person_boxes(model, rgb)
+            boxes = teams.person_boxes(model, rgb, band_top=detect.BAND_TOP // 2)
             band = bgr[760::16, ::16].reshape(-1, 3)
             hsv = cv2.cvtColor(band.reshape(-1, 1, 3), cv2.COLOR_BGR2HSV).reshape(-1, 3)
             g = band[(hsv[:, 0] > 30) & (hsv[:, 0] < 95) & (hsv[:, 1] > 40)]

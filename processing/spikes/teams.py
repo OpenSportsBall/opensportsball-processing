@@ -52,9 +52,14 @@ KIT_MAX_SPREAD = 15.0      # ... and tight in chroma (Lab a, b spread within the
 
 
 
-def person_boxes(model, rgb: np.ndarray) -> np.ndarray:
+def person_boxes(model, rgb: np.ndarray, band_top: int = detect.BAND_TOP) -> np.ndarray:
+    """Stock RF-DETR people on 640 px tiles of `rgb` from row `band_top`
+    down (detect.py's band is for a 2160-tall frame; pass half of it for a
+    half-resolution frame)."""
     h, w = rgb.shape[:2]
-    tl = detect.tiles(h, w)
+    ys = list(range(band_top, h - detect.TILE, 530)) + [h - detect.TILE]
+    xs = list(range(0, w - detect.TILE, detect.STRIDE)) + [w - detect.TILE]
+    tl = [(x, y) for y in ys for x in xs]
     res = model.predict([rgb[y:y + detect.TILE, x:x + detect.TILE] for x, y in tl], threshold=PERSON_THRESH)
     rows = [np.r_[box + [x, y, x, y], sc] for (x, y), det in zip(tl, res)
             for box, c, sc in zip(det.xyxy, det.class_id, det.confidence) if c == detect.PERSON]
