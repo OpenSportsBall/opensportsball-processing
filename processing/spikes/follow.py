@@ -1168,6 +1168,19 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
               + (f": {e['restart']} in {e['restartFrames']} frames" if e["restart"] else ": held"))
     (rec / "follow" / "lulls.json").write_text(json.dumps(
         {"events": events, "running": running.tolist(), "startS": start, "fps": FPS}))
+    # A readable log of which rule drove the camera: one line per change.
+    def clock(t):
+        return f"{int(t // 60):3d}:{t % 60:04.1f}"
+    lines = [f"# camera log: {clock(start)} - {clock(start + T / FPS)}; columns: time, rule, aim yaw deg, width deg, ball tracked, hotspot xz"]
+    for i in range(T):
+        if i == 0 or mode[i] != mode[i - 1]:
+            j = i
+            while j < T and mode[j] == mode[i]:
+                j += 1
+            hot = "-" if np.isnan(spots[i, 0]) else f"({spots[i, 0]:.0f}, {spots[i, 1]:.0f})"
+            lines.append(f"{clock(start + i / FPS)}  {mode[i]:9s}  {(j - i) / FPS:5.1f} s  aim {np.degrees(tyaw[i]):6.1f}"
+                         f"  width {np.degrees(thfov[i]):3.0f}  ball {'yes' if has_ball[i] else 'no ':3s}  hot {hot}")
+    (rec / "follow" / "camlog.txt").write_text("\n".join(lines) + "\n")
     # Per-frame players and aim, for diagnosing what the camera followed.
     (rec / "follow" / "play_debug.json").write_text(json.dumps({"startS": start, "fps": FPS, "frames": [
         {"pos": np.round(pos[i], 1).tolist(), "vel": np.round(vel[i], 1).tolist(),

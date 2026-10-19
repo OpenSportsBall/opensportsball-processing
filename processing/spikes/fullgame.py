@@ -140,6 +140,9 @@ def main() -> None:
                 src = rec / "follow" / f"follow_{tag}.mp4"
                 if rc == 0 and src.exists():
                     src.rename(piece(k))
+                    cl = rec / "follow" / "camlog.txt"
+                    if cl.exists():
+                        cl.rename(out / "logs" / f"camlog_{k:02d}.txt")
                     print(f"follow chunk {k}: ok in {(time.time() - t0) / 60:.1f} min -> {piece(k).name}", flush=True)
                 else:
                     failed.append(("follow", k))
@@ -153,6 +156,10 @@ def main() -> None:
         print(f"not all pieces made (failures: {failed}); fix and rerun to resume", flush=True)
         sys.exit(1)
 
+    # The camera log for the whole game: the chunks' logs in order.
+    logs = sorted((out / "logs").glob("camlog_*.txt"))
+    if logs:
+        (out / "camlog.txt").write_text("".join(l.read_text() for l in logs))
     # Concatenate the pieces, then mux Main's audio (its segments are back to back).
     lst = out / "pieces.txt"
     lst.write_text("".join(f"file '{piece(k).resolve()}'\n" for k in range(len(chunks))))
