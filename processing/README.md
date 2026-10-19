@@ -16,5 +16,6 @@ Install one with an extra: `pip install -e '.[rfdetr]'` or
 `pip install -e '.[ultralytics]'`.
 
 Phase 0 spikes in `spikes/` are the working pipeline today (follow cam,
-pitch map, ball tracking); how they are measured is in
-`docs/TESTING-PROCESSING.md`, and what was tried in `docs/BACKLOG.md`.
+pitch map, ball tracking). What was tried and what happened is summarised
+in `docs/FINDINGS.md`; how it is measured is in
+`docs/TESTING-PROCESSING.md`; the dated detail is in `docs/BACKLOG.md`.
