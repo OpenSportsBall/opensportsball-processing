@@ -11,11 +11,12 @@
 
 <set> is a labels_<set> made by `labelset.py clip` and labelled on the
 page. The clip's candidates (ballclip.py, with balljudge.py scores if
-run) go through ball.py's tracker as follow.py's "ball" feature does;
-at each labelled moment the estimate is compared with the label placed
-on the pitch. OSB_BALL_PATH=1 links with ballpath.py's offline path
-instead (same candidates and filters), as follow.py does under the same
-variable. Each extra argument is a tracker setting to override
+run) go through ball.py's filters and ballpath.py's offline path as
+follow.py's "ball" feature does; at each labelled moment the estimate is
+compared with the label placed on the pitch. OSB_BALL_CHAIN=1 links with
+ball.py's online chain instead (same candidates and filters), as
+follow.py does under the same variable. Each extra argument is a tracker
+setting to override
 ("ball.MAX_MISSED_S=1.0,ball.MIN_JUDGE=0.5" or "ballpath.NONE_COST=3"),
 one run per argument, so settings can be swept in one call.
 
@@ -131,12 +132,12 @@ def track(data, people, pose):
     spots = B.static_spots(cands, fps, pose=pose)
     keep = [[d for d in fr if all(np.hypot(*(np.array(d["xz"]) - s)) > B.STATIC_RADIUS for s in spots)]
             for fr in cands]
-    if os.environ.get("OSB_BALL_PATH"):  # ballpath.py's offline path instead of the online chain
-        import ballpath
-        est, _ = ballpath.track(keep, people, n, fps)
+    if os.environ.get("OSB_BALL_CHAIN"):  # ball.py's online chain instead of the offline path
+        tracks = B.link(keep, fps)
+        est, src, _ = B.choose(tracks, people, n, fps)
         return est
-    tracks = B.link(keep, fps)
-    est, src, _ = B.choose(tracks, people, n, fps)
+    import ballpath
+    est, _ = ballpath.track(keep, people, n, fps)
     return est
 
 

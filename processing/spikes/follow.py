@@ -16,9 +16,9 @@ The clip may run on into the following segments (game_stream).
 features: comma-separated, e.g. goalkick,goalframe (see play_targets).
 "ball" needs ballclip.py's candidates for the same segment, start and length.
 Best so far on the night game, scored against reviewed must-see boxes
-(playbench.py, 13 moments): "play goalkick,goalframe,unsure,ball,goalin,ballhold,roles,kickoff"
+(playbench.py, 12 moments since 2026-10-19; 13 before): "play goalkick,goalframe,unsure,ball,goalin,ballhold,roles,kickoff"
 with ballwin.py's candidates, roles.py's people and the 50 deg zoom floor
-captures 12/13 at a 66 deg median width; without the ball ("A",
+captures 11/12 (12/13) at a 63 deg median width; without the ball ("A",
 goalkick,goalframe,unsure) 4/13. Tried and not adopted: lead, nowalk, fastboost, weak, allnear, flow,
 lone, gk2, netevent (docs/BACKLOG.md).
 Goal positions come from `pitch.py <recording> goals` when it has run.
@@ -636,11 +636,10 @@ LEAD_S = 1.0             # lead: aim where the hotspot will be this much later (
 def ball_track(rec: Path, start: float, T: int, pos, pose, loiter=None) -> np.ndarray:
     """Per follow frame, the match ball on the pitch (x, z) or NaN: the
     fine-tuned detector's candidates for this clip (ballclip.py / ballwin.py)
-    through ball.py's tracker (static spots dropped, tracks linked under a
-    speed limit, one physically consistent chain chosen, gaps up to 1 s
-    bridged), resampled to FPS. OSB_BALL_PATH=1 links with ballpath.py's
-    offline path instead (more of the ball at the labelled moments, but it
-    cost two play boxes on 2026-10-19, so the chain stays the default). Kept
+    through ball.py's filters (usable, static spots dropped) and ballpath.py's
+    offline minimum-cost path (the default since 2026-10-19), resampled to
+    FPS. OSB_BALL_CHAIN=1 links with ball.py's online chain instead (tracks
+    under a speed limit, one chain chosen, gaps up to 1 s bridged). Kept
     only in stretches of at least BALL_MIN_RUN_S, and near the lines."""
     import ball as B
 
@@ -659,14 +658,14 @@ def ball_track(rec: Path, start: float, T: int, pos, pose, loiter=None) -> np.nd
     spots = B.static_spots(cands, bf, loiter, LOITER_CELL_M, pose)
     keep = [[d for d in fr if all(np.hypot(*(np.array(d["xz"]) - s_)) > B.STATIC_RADIUS for s_ in spots)]
             for fr in cands]
-    if os.environ.get("OSB_BALL_PATH"):  # ballpath.py's offline path instead of the online chain
-        import ballpath
-        est, src = ballpath.track(keep, people, n, bf)
-        how = f"{len({s_[0] for s_ in src if s_ is not None})} runs; path"
-    else:
+    if os.environ.get("OSB_BALL_CHAIN"):  # ball.py's online chain instead of the offline path
         tracks = B.link(keep, bf)
         est, src, _ = B.choose(tracks, people, n, bf)
         how = f"{len(tracks)} tracks; chain"
+    else:
+        import ballpath
+        est, src = ballpath.track(keep, people, n, bf)
+        how = f"{len({s_[0] for s_ in src if s_ is not None})} runs; path"
     out = np.full((T, 2), np.nan)
     hl, hw = pose.L / 2 + BALL_OFF_PITCH_M, pose.W / 2 + BALL_OFF_PITCH_M
     for i in range(T):

@@ -55,9 +55,12 @@ box it shows at that frame.
 Sets: `footage/rec3/playeval/<set>/` with `pano/`, `items.json`,
 `boxes.json` (panorama degrees, so boxes don't depend on any render) and
 `paths/<variant>.json` plus `<variant>_debug.json` (per-frame mode, aim,
-hotspot, ball). Two sets, 13 reviewed moments: `seg9-60` (segment 9 from
+hotspot, ball). Two sets, 12 reviewed moments: `seg9-60` (segment 9 from
 60 s, the first test clip) and `seg3-225` (segment 3 from 225 s, crossing
-into segment 4).
+into segment 4). Until 2026-10-19 there were 13: the seg 9 box at 1:57
+(the keeper's goal-kick framing, 1.5 s before the kick) was removed
+because a camera that follows the ball into the corner there is right;
+figures quoted as "/13" were measured with it.
 
 `playbench.py` caches follow.py's pass A (player detections) per clip in
 `footage/rec3/follow/passA_<seg>_<start>_<seconds>.json`, so a variant
@@ -88,8 +91,8 @@ With `roles` and `kickoff` (2026-10-18/19) the same configuration
 captures 12/13 (the seg 9 goal kick found through the keeper's role),
 missing only seg 3's opening seconds (95%).
 
-Ball source, same run (2026-10-19, `OSB_BALL_PATH=1` against the chain,
-ballwin candidates):
+Ball source, same run (2026-10-19, the path against the chain,
+ballwin candidates; 13 moments as the set then was):
 
 | Configuration | Ball source | Captured | Mean coverage | Width (median) |
 |---|---|---|---|---|
@@ -102,8 +105,15 @@ The path aims at the ball in 39% / 70% of the clips against the chain's
 27% / 65%, but loses two seg 9 boxes: 1:57 (67%; the path tracks a slow
 ball in the left corner at 1:54-1:56, 25 m from the goal, and the
 `goalkick` rule drops the keeper's framing a second before the kick) and
-0:13 (95%; the same targets, a slightly different smoothed camera). So
-the chain stays `follow.py`'s default.
+0:13 (95%; the same targets, a slightly different smoothed camera).
+
+With the 1:57 box removed and the 0:13 box redrawn to the clearance
+itself (yaw -0.1 to 13.9, leaving out the two players at the old left
+edge; 2026-10-19, 12 moments), same run: A2 + `roles,kickoff` captures
+11/12 with either ball source (mean coverage 100%), the chain at a 63 deg
+median width and 60 deg at the captures, the path at 62 and 55. Both miss
+only seg 3's opening seconds (95%). On that the path became the default
+ball source (`OSB_BALL_CHAIN=1` for the chain).
 
 Add moments by appending clip times to `playeval.py make` for an existing
 set (it keeps the others) or making a new set from another stretch of the
@@ -120,7 +130,7 @@ the play boxes.
 | Build a clip set | `uv run processing/spikes/labelset.py footage/rec3 clip <name> <segment> <start s> <seconds> [step s]` |
 | Label it | preview `ball-labels-seg9` / `ball-labels-seg3` (`processing/spikes/label/server.py footage/rec3/labels_<name> [port]`) |
 | Score the tracker (ball.py's online chain, the default) | `uv run processing/spikes/balleval.py footage/rec3 <name> ["NAME=value,..." ...]` |
-| Score the offline path tracker instead | `OSB_BALL_PATH=1 uv run processing/spikes/balleval.py footage/rec3 <name> ["ballpath.NAME=value,..." ...]` |
+| Score ball.py's online chain instead | `OSB_BALL_CHAIN=1 uv run processing/spikes/balleval.py footage/rec3 <name> ["NAME=value,..." ...]` |
 | Write `ball.json` with the path tracker | `uv run processing/spikes/ballpath.py footage/rec3 footage/rec3/detect/ball_<seg>_<start>_<seconds>[.win].json [out.json]` |
 | Score detectors per frame | `uv run processing/spikes/ballheat.py footage/rec3 <name> [wasb] [tracknetv2] [tracknetv3]` |
 | Measure an old set's label-time offsets | `uv run processing/spikes/ballheat.py footage/rec3 <name> dt` (writes `dtS` per frame into `items.json`) |
@@ -160,11 +170,10 @@ stock and fine-tuned detectors on the random label set's held-back frames.
 `ballpath.py` links the same filtered candidates as one minimum-cost path
 over the whole clip (offline Viterbi; angular motion within a phone's
 view, metric between phones, a "no ball" node per frame, edges up to 1 s
-back) instead of ball.py's greedy online chain. `OSB_BALL_PATH=1` selects
-it in `balleval.py` and `follow.py` (the same variable in both; unset,
-both use the chain, which stays the default: the path finds more of the
-ball at the labelled moments but cost two play boxes, section 2), and
-its costs sweep like the chain's (`"ballpath.NONE_COST=3"`).
+back) instead of ball.py's greedy online chain, and is the default ball
+linker in `balleval.py` and `follow.py` since 2026-10-19 (`OSB_BALL_CHAIN=1`
+gives the chain in both; the play boxes in section 2 decided it). Its
+costs sweep like the chain's (`"ballpath.NONE_COST=3"`).
 
 `ballheat.py` scores detectors per labelled frame instead of through the
 tracker: a hit is a candidate within 12 px or 1.5 ball diameters of the

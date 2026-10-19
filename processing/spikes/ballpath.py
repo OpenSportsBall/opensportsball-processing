@@ -14,9 +14,10 @@ chain.
 Reads a ballclip.py / ballwin.py candidate file, filters it exactly as
 ball.py does (usable, static_spots) and writes ball.json in ball.py's
 per-frame format (default <recording>/ball/ball.json). balleval.py and
-follow.py use this tracker in place of ball.py's link + choose when
-OSB_BALL_PATH=1 is set, so the two are compared on the same candidates
-with the same filters: only the linking differs. It finds the ball at
+follow.py use this tracker in place of ball.py's link + choose (the
+default since 2026-10-19; OSB_BALL_CHAIN=1 gives the chain back), so the
+two are compared on the same candidates with the same filters: only the
+linking differs. It finds the ball at
 more labelled moments than the chain but cost two of 13 play boxes
 (docs/TESTING-PROCESSING.md section 2), so the chain stays the default.
 
