@@ -42,7 +42,10 @@ GATE_M = 2.0              # association slack on top of speed x dt, metres
 MAX_MISSED_S = 0.6        # a track survives this long without a detection (balleval.py on the clip sets)
 STATIC_RADIUS = 1.5       # metres
 STATIC_MIN_S = 30.0       # a spot seen over this long without moving is static (a ball placed for a goal
-                          # kick sits still for 10 s or more; 4 s removed it)
+                          # kick sits still for 10 s or more; 4 s removed it) ...
+STATIC_MIN_HITS = 10      # ... seen at least this often (a bench ball is only seen when a scan passes)
+STATIC_LOITER_S = 8.0     # in a loiter cell (bench, spectators) a ball still this long with STATIC_LOITER_HITS
+STATIC_LOITER_HITS = 3    # sightings is a spare ball (a thrower's ball moves within seconds)
 NEAR_PLAYER_M = 6.0       # the match ball is usually this close to someone
 BRIDGE_S = 1.0            # interpolate gaps up to this long
 PITCH_MARGIN_M = 3.0      # candidates this far outside the lines still count (balls at the corners and touchlines)
@@ -92,7 +95,7 @@ def load(rec: Path):
     return fps, frames, balls, people
 
 
-def static_spots(balls, fps):
+def static_spots(balls, fps, loiter=None, cell_m: float = 4.0):
     """Places with candidates spread over STATIC_MIN_S seconds that never
     left STATIC_RADIUS: grid the pitch, keep cells whose first and last
     sighting are far apart in time and whose sightings fill the span."""
@@ -108,7 +111,9 @@ def static_spots(balls, fps):
         near = np.hypot(a[:, 1] - a[k, 1], a[:, 2] - a[k, 2]) < STATIC_RADIUS
         t = a[near, 0]
         span = (t.max() - t.min()) / fps
-        if span >= STATIC_MIN_S and len(np.unique(t)) >= 0.3 * span * fps:
+        in_loiter = bool(loiter) and (int(np.floor(a[k, 1] / cell_m)), int(np.floor(a[k, 2] / cell_m))) in loiter
+        min_s, min_hits = (STATIC_LOITER_S, STATIC_LOITER_HITS) if in_loiter else (STATIC_MIN_S, STATIC_MIN_HITS)
+        if span >= min_s and len(np.unique(t)) >= min_hits:
             spots.append(a[near, 1:].mean(0))
             used |= near
     return spots

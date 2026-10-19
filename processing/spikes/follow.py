@@ -589,6 +589,10 @@ GK_RESUME_RUNNERS = 3    # play has resumed when this many run...
 GK_RESUME_S = 0.5        # ... for this long
 GK_MAX_S = 12.0          # a restart framing lasts at most this long
 GK_BALL_FAR_M = 25.0     # a tracked ball this far from that goal neither starts nor keeps a goal-kick framing
+GK_HOT_FAR_M = 35.0      # ... nor does a hotspot this far from it with GK_HOT_FAR_RUNNERS running (play is elsewhere)
+GK_HOT_FAR_RUNNERS = 2   # (running averaged over 1 s)
+GK_RAW_CONF = 0.5        # a raw ball candidate at least this sure, > GK_BALL_FAR_M from a goal with none within ...
+GK_RAW_WINDOW_S = 1.0    # ... in the last this many seconds: no goal kick at that goal (unless a keeper has the ball)
 GOAL_ZONE_M = 20.0       # goalframe: players within this of a goal line
 GOAL_MIN_PLAYERS = 4     # ... at least this many
 GOAL_MAX_HFOV = 75.0     # the union must fit in this
@@ -629,7 +633,7 @@ BALL_OFF_PITCH_M = 3.0   # ... and within this of the lines (a lofted ball proje
 LEAD_S = 1.0             # lead: aim where the hotspot will be this much later (processing is offline)
 
 
-def ball_track(rec: Path, start: float, T: int, pos, pose) -> np.ndarray:
+def ball_track(rec: Path, start: float, T: int, pos, pose, loiter=None) -> np.ndarray:
     """Per follow frame, the match ball on the pitch (x, z) or NaN: the
     fine-tuned detector's candidates for this clip (ballclip.py) through
     ball.py's tracker (static spots dropped, tracks linked under a speed
@@ -650,7 +654,7 @@ def ball_track(rec: Path, start: float, T: int, pos, pose) -> np.ndarray:
     # Players on the pitch at the candidates' frame rate (for track scoring).
     people = [pos[min(T - 1, int(round(k * FPS / bf)))] for k in range(n)]
     cands = [[d for d in f["detections"] if B.usable(d, pose)] for f in data["frames"]]
-    spots = B.static_spots(cands, bf)
+    spots = B.static_spots(cands, bf, loiter, LOITER_CELL_M)
     keep = [[d for d in fr if all(np.hypot(*(np.array(d["xz"]) - s_)) > B.STATIC_RADIUS for s_ in spots)]
             for fr in cands]
     tracks = B.link(keep, bf)
@@ -706,6 +710,32 @@ def ball_near_point(rec: Path, start: float, T: int, point, radius_m: float) -> 
             break
         out[i] = any(d["onPitch"] and d["conf"] >= 0.3 and d.get("judge", 1.0) >= 0.3
                      and np.hypot(*(np.array(d["xz"]) - point)) <= radius_m for d in frames[k]["detections"])
+    return out
+
+
+def ball_seen_far_from(rec: Path, start: float, T: int, point, far_m: float, min_conf: float, window_s: float) -> np.ndarray:
+    """Per follow frame: within the last window_s, a raw candidate at least
+    min_conf sure (judged >= 0.3, on the pitch) more than far_m from
+    `point`, and none within far_m of it."""
+    tag = os.environ.get("OSB_BALL_TAG", "")
+    paths = sorted((rec / "detect").glob(f"ball_*_{start:g}_*{tag}.json"))
+    if not tag:
+        paths = sorted(paths, key=lambda p_: (not p_.name.endswith(".win.json"), p_.name))
+    out = np.zeros(T, bool)
+    if not paths:
+        return out
+    data = json.loads(paths[0].read_text())
+    bf, frames = data["fps"], data["frames"]
+    far = np.zeros(len(frames), bool)
+    for k, f in enumerate(frames):
+        good = [d for d in f["detections"] if d["onPitch"] and d["conf"] >= min_conf and d.get("judge", 1.0) >= 0.3]
+        dist = [np.hypot(*(np.array(d["xz"]) - point)) for d in good]
+        far[k] = bool(dist) and min(dist) > far_m
+    w = int(window_s * bf)
+    for i in range(T):
+        k = int(i * bf / FPS)
+        if k < len(frames):
+            out[i] = far[max(0, k - w):k + 1].any()
     return out
 
 
@@ -841,7 +871,7 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
     mode = ["hotspot"] * T  # which rule set each frame's aim (play_debug.json)
     running = np.array([(np.hypot(*v.T) > play.RUN_SPEED).sum() if len(v) else 0 for v in vel])
     spots = hotspots(pos, vel, FPS, features)
-    ball_at = ball_track(rec, start, T, pos, pose) if "ball" in features else np.full((T, 2), np.nan)
+    ball_at = ball_track(rec, start, T, pos, pose, loiter) if "ball" in features else np.full((T, 2), np.nan)
     has_ball = ~np.isnan(ball_at[:, 0])
     lead = int(LEAD_S * FPS) if "lead" in features else 0
     last = (0.5 * (y0 + y1), 0.5 * (p0 + p1), np.radians(MAX_HFOV))
@@ -1034,6 +1064,11 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
         print(f"kickoff: {n_ko} kick-off(s), {int(sum(m_ == 'kickoff' for m_ in mode))} frames held on the centre"
               f" (ball parked at the centre in {int(parked.sum())} frames)")
     if "goalkick" in features:
+        run_1s = np.convolve(running, np.ones(int(FPS)) / int(FPS), mode="same")
+        # Raw ball candidates (not the chain: it often fails to link them)
+        # that place the ball far from each goal.
+        raw_far = {side: ball_seen_far_from(rec, start, T, goal_at[side], GK_BALL_FAR_M, GK_RAW_CONF, GK_RAW_WINDOW_S)
+                   for side in (-1, 1)}
         pen_depth = pose.k * P.PEN_DEPTH + GK_ZONE_EXTRA_M
         pen_z = pose.k * P.PEN_HALF + GK_ZONE_EXTRA_M
         flag = np.zeros(T, bool)
@@ -1059,6 +1094,11 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
                 keeper_kick = is_keeper and has_ball[i] and np.hypot(*(ball_at[i] - pos[i][j])) <= ROLE_KEEPER_BALL_M
                 if has_ball[i] and np.hypot(*(ball_at[i] - goal_at[side])) > GK_BALL_FAR_M:
                     continue  # the ball is known and nowhere near this goal
+                if not keeper_kick and raw_far[side][i]:
+                    continue  # the detector just saw the ball far from this goal
+                if (not keeper_kick and not np.isnan(spots[i, 0]) and run_1s[i] >= GK_HOT_FAR_RUNNERS
+                        and np.hypot(*(spots[i] - goal_at[side])) > GK_HOT_FAR_M):
+                    continue  # play is clearly elsewhere
                 if not keeper_kick:
                     if d.min() < GK_ALONE_M or np.median(d) < GK_GROUP_M:
                         continue

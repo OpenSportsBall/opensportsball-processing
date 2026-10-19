@@ -50,8 +50,12 @@ LOST_SCAN_S = float(os.environ.get("OSB_LOST_SCAN_S", 0.5))
 ZOOM_BELOW_PX = 10.0    # 2x zoom window when the expected ball diameter is under this
 ACCEPT_CONF = 0.3       # a detection at least this sure, and judged at least ACCEPT_JUDGE, updates the track ...
 ACCEPT_JUDGE = 0.3
+ACCEPT_JUMP_CONF = 0.6
 GATE_M = 3.0            # ... if within this + MAX_SPEED x dt of the prediction
 MAX_SPEED = 35.0
+V_MAX = 20.0            # the online track's velocity is capped at this (a false jump gave it 33 m/s once) ...
+V_DECAY = 0.85          # ... and shrinks by this per frame while the ball is unseen
+JUMP_MAX_M = 15.0       # a candidate further than this from the last sighting needs ACCEPT_JUMP_CONF
 WIN = 640
 ZOOM_CROP = 320
 
@@ -109,7 +113,11 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
         lost = (i - last_seen) / fps
         since_full = (i - last_full) / fps
         full = since_full >= FULL_EVERY_S or ((ball_xz is None or lost >= LOST_S) and since_full >= LOST_SCAN_S)
-        pred = ball_xz + ball_v * ((i - last_seen) / fps) if ball_xz is not None else None
+        if ball_xz is not None:
+            pred = ball_xz + ball_v * min((i - last_seen) / fps, LOST_S)  # beyond LOST_S: stay near the last sighting
+            pred = np.clip(pred, [-pose.L / 2 - 3, -pose.W / 2 - 3], [pose.L / 2 + 3, pose.W / 2 + 3])
+        else:
+            pred = None
         found = []
         for phone, (buf, fl) in enumerate(((fa, flip[0]), (fb, flip[1]))):
             img = detect.nv12_to_rgb(*gpu.upload_nv12(buf, W, H, dev))
@@ -165,14 +173,26 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
                 gate = GATE_M + MAX_SPEED * (i - last_seen) / fps
                 if np.hypot(*(np.array(d["xz"]) - pred)) > gate:
                     continue
+                if np.hypot(*(np.array(d["xz"]) - ball_xz)) > JUMP_MAX_M and d["conf"] < ACCEPT_JUMP_CONF:
+                    continue  # a big jump needs a sure detection
             if best is None or d["conf"] * d["judge"] > best["conf"] * best["judge"]:
                 best = d
+        if os.environ.get("OSB_WIN_DEBUG") and (best is not None or any(d["onPitch"] and d["conf"] >= ACCEPT_CONF for d in merged)):
+            print(f"t={start + t:.1f} pred={None if pred is None else np.round(pred, 1)} lost={lost:.1f}"
+                  f" gate={None if pred is None else round(GATE_M + MAX_SPEED * (i - last_seen) / fps, 1)}"
+                  f" cands={[(round(d['xz'][0]), round(d['xz'][1]), d['conf'], d['judge']) for d in merged if d['onPitch'] and d['conf'] >= ACCEPT_CONF]}"
+                  f" accepted={None if best is None else best['xz']}", flush=True)
         if best is not None:
             xz = np.array(best["xz"])
             if ball_xz is not None and i > last_seen:
                 v = (xz - ball_xz) * fps / (i - last_seen)
                 ball_v = 0.5 * ball_v + 0.5 * v
+                n_v = np.hypot(*ball_v)
+                if n_v > V_MAX:
+                    ball_v *= V_MAX / n_v
             ball_xz, last_seen = xz, i
+        else:
+            ball_v = ball_v * V_DECAY
         frames_out.append({"t": round(start + t, 3), "detections": merged})
         if (i + 1) % 100 == 0:
             el = time.time() - t0
