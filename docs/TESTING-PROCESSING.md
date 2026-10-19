@@ -99,6 +99,8 @@ the play boxes.
 | Build a clip set | `uv run processing/spikes/labelset.py footage/rec3 clip <name> <segment> <start s> <seconds> [step s]` |
 | Label it | preview `ball-labels-seg9` / `ball-labels-seg3` (`processing/spikes/label/server.py footage/rec3/labels_<name> [port]`) |
 | Score the tracker | `uv run processing/spikes/balleval.py footage/rec3 <name> ["NAME=value,..." ...]` |
+| Score detectors per frame | `uv run processing/spikes/ballheat.py footage/rec3 <name> [wasb] [tracknetv2] [tracknetv3]` |
+| Measure an old set's label-time offsets | `uv run processing/spikes/ballheat.py footage/rec3 <name> dt` (writes `dtS` per frame into `items.json`) |
 
 Sets: `footage/rec3/labels_<name>/` (`items.json`, `images/`, `pano/`,
 `labels.json` with every ball marked and the match ball flagged). Two sets
@@ -110,6 +112,15 @@ A hit is an estimate within 3 m + 5% of the ball's distance from the camera
 (placing a far ball on the pitch is uncertain in depth; `OSB_HIT_M`,
 `OSB_HIT_PER_M` to vary). Moments labelled "none" (ball not visible) and
 "unsure" are not counted as wrong.
+
+Label times: each frame in `items.json` carries `dtS`, its image's offset
+from the moment's time (`t`, `clipT`). Sets made before 2026-10-18 were
+grabbed with a plain seek, which returns a frame 0.2-0.9 s late (seg 9 main
++0.38 s, secondary +0.66; seg 3 main +0.86, secondary +0.17); `ballheat.py
+<name> dt` measured it per frame by matching the image and wrote it.
+`labelset.py` now decodes with a preroll (`phase0.frame_at`), so new sets
+carry dtS 0. `balleval.py` reads the tracker at `clipT + dtS` of the phone
+whose image was labelled; `OSB_NOMINAL=1` reproduces the old comparison.
 
 Candidate sources, all in `footage/rec3/detect/ball_<seg>_<start>_<seconds>.<tag>.json`:
 
@@ -123,13 +134,37 @@ Every candidate carries a `judge` score from `balljudge.py` (a 48 px crop
 classifier; `data`, `train`, `eval`, `clip`). `ballcompare.py` compares the
 stock and fine-tuned detectors on the random label set's held-back frames.
 
-Results at the labelled moments (tracker defaults as of 2026-10-17):
+`ballheat.py` scores detectors per labelled frame instead of through the
+tracker: a hit is a candidate within 12 px or 1.5 ball diameters of the
+label, at a given score threshold, against candidates per frame. It runs
+the multi-frame heatmap models (WASB, TrackNetV2, TrackNetV3; code and
+weights under `datasets/`, see its docstring) on 512x288 tiles of each
+phone's frame at native, 2x and 4x downscale, and prints the same measure
+for the RF-DETR candidate files. Candidates are cached in
+`labels_<name>/heat_<model>.json`.
 
-| Candidates | seg 9 found | seg 3 found | wrong |
+Results at the labelled moments (tracker defaults as of 2026-10-17; seg 9
+has 37 moments with the match ball on the pitch, seg 3 53). Rows marked
+"nominal" compare at the stored time, as every run before 2026-10-18 did
+(the 2026-10-16 figures were 54% / 62%, wrong 1 / 8 with full scans); the
+others at the label image's time:
+
+| Candidates | Label time | seg 9 found | seg 3 found | wrong | missed |
+|---|---|---|---|---|---|
+| tracker before tuning (4 s static filter, 3 hits, no judge) | nominal | 32% | 26% | 9 / 12 | |
+| tuned defaults, full-scan candidates | nominal | 18/37 (49%) | 33/53 (62%) | 1 / 8 | 18 / 12 |
+| tuned defaults, `win` candidates | nominal | 18/37 (49%) | 31/53 (58%) | 4 / 8 | 15 / 14 |
+| tuned defaults, full-scan candidates | corrected | 17/37 (46%) | 37/53 (70%) | 0 / 2 | 20 / 14 |
+| tuned defaults, `win` candidates | corrected | 17/37 (46%) | 35/53 (66%) | 1 / 1 | 19 / 17 |
+
+Detectors per labelled frame (`ballheat.py`, 2026-10-18; balls in play on a
+phone: 48 on seg 9, 58 on seg 3):
+
+| Detector | seg 9 found | seg 3 found | candidates / frame |
 |---|---|---|---|
-| tracker before tuning (4 s static filter, 3 hits, no judge) | 32% | 26% | 9 / 12 |
-| tuned defaults, full-scan candidates | 54% | 62% | 1 / 8 |
-| tuned defaults, `win` candidates | 49-51% | 58% | 2-4 / 7-8 |
+| fine-tuned RF-DETR, conf >= 0.1 | 27% | 60% | 1.0 / 0.9 |
+| WASB (football weights), score >= 0.05, judge >= 0.3 | 29% | 60% | 1.4 / 1.7 |
+| union of the two | 44% | 78% | 2.4 / 2.6 |
 
 The candidate ceiling (a usable candidate near the ball at all) is ~62% of
 moments; the misses are mostly balls under 8 px, 43-100+ m away. Witnesses
