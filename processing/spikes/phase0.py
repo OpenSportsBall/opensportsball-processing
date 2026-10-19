@@ -79,6 +79,32 @@ def frames_at(path: Path, start: float, count: int, fps: float,
                 .reshape(n, height, width, 3))
 
 
+FRAME_PREROLL_S = 1.5  # decode this long before the asked time (see frame_at)
+
+
+def frame_at(path: Path, t: float, width: int, rotate180: bool = False,
+             preroll: float = FRAME_PREROLL_S) -> np.ndarray | None:
+    """The BGR frame at file time `t`.
+
+    Right after a seek the decoder's first frames are missing (up to ~0.9 s
+    in these recordings, depending on where the seek falls between
+    keyframes) and the fps filter fills the gap by repeating the first real
+    frame, so frames_at(path, t, 1, ...)[0] is a frame up to 0.9 s *later*
+    than asked, with no sign of it. Decoding from `preroll` s earlier puts
+    the asked time past that run. None when the file ends before `t`, or
+    when every frame of the window is the one repeated frame (the preroll
+    was too short: try a longer one)."""
+    pre = min(preroll, t)
+    n = int(round(pre * 30)) + 1
+    frames = frames_at(path, t - pre, n, 30, width, rotate180)
+    if len(frames) < n:
+        return None
+    small = [cv2.resize(f[..., 1], (480, 270), interpolation=cv2.INTER_AREA).astype(np.int16) for f in frames]
+    if not any(np.abs(small[i] - small[i - 1]).mean() > 0.05 for i in range(1, n)):
+        return None
+    return frames[-1]
+
+
 # -------------------------------------------------------------------- sync
 
 def gcc_phat(a: np.ndarray, b: np.ndarray, max_lag: int) -> tuple[float, float]:

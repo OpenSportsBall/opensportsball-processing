@@ -21,6 +21,13 @@ Per run: found (estimate within HIT_M of the labelled ball), wrong
 (estimate elsewhere), missed (no estimate); coverage over the clip; and
 estimates at moments labelled "none" (ball not visible: usually in the
 keeper's hands or in flight, so not counted as wrong).
+
+A moment's estimate is read at the time of the label image that placed
+the ball: a frame's "dtS" in items.json (its offset from the nominal
+clipT; the two phones of one moment differ, so the offset of the phone
+whose image was labelled is used). OSB_NOMINAL=1 ignores the offsets, as
+runs before 2026-10-18 did. OSB_BALL_TAG picks the candidate file ("" is
+ballclip.py's full scan, "win" ballwin.py's windows).
 """
 
 from __future__ import annotations
@@ -28,6 +35,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -38,9 +46,18 @@ import ball as B  # noqa: E402
 import follow  # noqa: E402
 import pitch as P  # noqa: E402
 
-import os
 HIT_M = float(os.environ.get("OSB_HIT_M", 3.0))        # a hit: within this plus HIT_PER_M x the ball's distance ...
 HIT_PER_M = float(os.environ.get("OSB_HIT_PER_M", 0.05))  # ... from the camera (a far ball's depth on the pitch is uncertain)
+NOMINAL = bool(os.environ.get("OSB_NOMINAL"))          # compare at the nominal label time, ignoring the frames' dtS
+
+
+def cands_file(rec: Path, seg0: int, start: float, tag: str) -> Path:
+    """The clip's candidate file with exactly this tag: ball_<seg>_<start>_<seconds>[.<tag>].json."""
+    pat = re.compile(rf"ball_{seg0}_{start:g}_[\d.]+?{re.escape('.' + tag) if tag else ''}\.json$")
+    paths = sorted(p for p in (rec / "detect").glob(f"ball_{seg0}_{start:g}_*.json") if pat.fullmatch(p.name))
+    if not paths:
+        raise SystemExit(f"no candidate file ball_{seg0}_{start:g}_*{'.' + tag if tag else ''}.json in {rec / 'detect'}")
+    return paths[0]
 
 
 def setup(rec: Path, name: str):
@@ -48,8 +65,7 @@ def setup(rec: Path, name: str):
     items = json.loads((lab / "items.json").read_text())
     labels = json.loads((lab / "labels.json").read_text())
     seg0, start = int(items[0]["id"].split("_")[0][1:]), float(items[0]["id"].split("_")[1])
-    tag = os.environ.get("OSB_BALL_TAG", "")  # e.g. "win" for ballwin.py's candidates
-    cands_path = sorted((rec / "detect").glob(f"ball_{seg0}_{start:g}_*{tag}.json"))[0]
+    cands_path = cands_file(rec, seg0, start, os.environ.get("OSB_BALL_TAG", ""))
     print(f"candidates: {cands_path.name}")
     data = json.loads(cands_path.read_text())
     manifest = json.loads((rec / "manifest.json").read_text())
@@ -67,23 +83,33 @@ def setup(rec: Path, name: str):
         pit = np.degrees(np.arctan2(d[1], np.hypot(d[0], d[2])))
         return pose.to_pitch(yaw, pit)
 
-    # Labelled moments: the match ball on the pitch, or the status.
-    moments = []
+    # Labelled moments: the match ball on the pitch, or the status; each at
+    # the time of the label image it came from (clipT + that frame's dtS).
+    moments, dts = [], []
     for it in items:
-        k = int(round(it["clipT"] * data["fps"]))
-        xz, status = None, None
+        xz, status, dt = None, None, 0.0
         for f in it["frames"]:
             v = labels.get(f["id"])
             if not v:
                 continue
-            status = status or v["status"]
+            if status is None:
+                status, dt = v["status"], f.get("dtS", 0.0)
             for b in v.get("balls", []):
                 if b["inPlay"] and xz is None:
                     x, z = on_pitch(f["phone"], b["x"], b["y"])
                     xz = None if np.isnan(x) else np.array([x, z])
-                    status = "ball"
+                    status, dt = "ball", f.get("dtS", 0.0)
         if status:
+            dts.append(dt)
+            k = int(round((it["clipT"] + (0.0 if NOMINAL else dt)) * data["fps"]))
             moments.append((it["clipT"], k, status, xz))
+    n_dt = sum(f.get("dtS") is not None for it in items for f in it["frames"])
+    n_fr = sum(len(it["frames"]) for it in items)
+    if n_dt < n_fr:
+        print(f"only {n_dt}/{n_fr} frames carry dtS (label time offset): the rest are compared at the nominal time"
+              f" (ballheat.py <set> dt measures it)")
+    when = "nominal clipT (OSB_NOMINAL)" if NOMINAL else "clipT + the labelled frame's dtS"
+    print(f"label times: {when}, offsets {np.mean(dts):+.2f} s mean, {np.min(dts):+.2f} to {np.max(dts):+.2f}")
     # Players per candidate frame, for the tracker's "near a player" score.
     seconds = len(data["frames"]) / data["fps"]
     cache = follow.passa_cache(rec / "follow", seg0, start, seconds)
@@ -100,7 +126,7 @@ def setup(rec: Path, name: str):
 def track(data, people, pose):
     fps, n = data["fps"], len(data["frames"])
     cands = [[d for d in f["detections"] if B.usable(d, pose)] for f in data["frames"]]
-    spots = B.static_spots(cands, fps)
+    spots = B.static_spots(cands, fps, pose=pose)
     keep = [[d for d in fr if all(np.hypot(*(np.array(d["xz"]) - s)) > B.STATIC_RADIUS for s in spots)]
             for fr in cands]
     tracks = B.link(keep, fps)

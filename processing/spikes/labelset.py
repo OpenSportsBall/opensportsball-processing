@@ -30,6 +30,15 @@ frames (kind "pair"), so the ball is clicked once on the panorama and
 labelled in whichever phone sees it. Each half keeps the single-frame id
 scheme (<moment>_main, <moment>_secondary), so labels made before or during
 the conversion stay attached. Labelled items are left as they are.
+
+Every frame is grabbed at its item's time ("t", plus the audio offset for
+the secondary phone) through `grab`, which decodes with a preroll; a plain
+seek (phase0.frames_at) returns a frame up to 0.9 s later than asked. A
+frame's "dtS" is its image's offset from that time: 0.0 for sets made
+since 2026-10-18; the earlier clip sets carry the offset ballheat.py
+measured. The random set (labels/) was grabbed the old way and has no
+dtS: its labels sit on its images, so nothing reads its times except
+motion.py, which seeks the same way and so lands on the same frame.
 """
 
 from __future__ import annotations
@@ -48,6 +57,21 @@ import phase0  # noqa: E402
 
 SUGGEST_THRESH = 0.1
 MAX_SUGGESTIONS = 5
+
+
+def grab(path: Path, t: float, flip: bool, width: int = 3840) -> np.ndarray | None:
+    """The frame at file time `t`, upright. Decoded with a preroll
+    (phase0.frame_at): a plain seek returns a frame up to 0.9 s late. Near
+    a file's end the decoder returns nothing, so the time steps back in
+    0.25 s steps (up to 2 s); None when there is still no frame."""
+    for back in range(9):
+        for pre in (phase0.FRAME_PREROLL_S, 3.0):
+            img = phase0.frame_at(path, t - 0.25 * back, width, flip, pre)
+            if img is not None:
+                if back:
+                    print(f"{path.name} {t:.2f} s: stepped back {0.25 * back:.2f} s at the end of the file", flush=True)
+                return img
+    return None
 
 
 def candidates(model, bgr: np.ndarray):
@@ -140,14 +164,15 @@ def panoramas(rec: Path, out: Path | None = None) -> None:
     items = json.loads((out / "items.json").read_text())
     for k, it in enumerate(items):
         path = out / "pano" / f"{it['id']}.jpg"
-        if it.get("kind") == "pair" and "clipT" in it:  # clip sets: use the clip's own segment time
-            pass
         if path.exists():
             continue
         seg, t = it["segment"], it["t"]
-        a = phase0.frames_at(rec / devs["main"]["segments"][seg]["objectKey"], t, 1, 30, src_w, flip[0])[0]
-        b = phase0.frames_at(rec / devs["secondary"]["segments"][seg]["objectKey"],
-                             t + report["segments"][seg]["offsetS"], 1, 30, src_w, flip[1])[0]
+        a = grab(rec / devs["main"]["segments"][seg]["objectKey"], t, flip[0], src_w)
+        b = grab(rec / devs["secondary"]["segments"][seg]["objectKey"], t + report["segments"][seg]["offsetS"],
+                 flip[1], src_w)
+        if a is None or b is None:
+            print(f"{it['id']}: no frame for the panorama at {t:.2f} s, skipped", flush=True)
+            continue
         wa = cv2.remap(a, maps["main"][0], maps["main"][1], cv2.INTER_LINEAR)
         wb = cv2.remap(b, maps["secondary"][0], maps["secondary"][1], cv2.INTER_LINEAR)
         pano = np.where(use_main[..., None], wa, wb)
@@ -186,12 +211,16 @@ def pairs(rec: Path) -> None:
         oid = f"{base}_{other}"
         seg, t = it["segment"], it["t"]
         off = 0.0 if other == "main" else report["segments"][seg]["offsetS"]
-        img = phase0.frames_at(rec / devs[other]["segments"][seg]["objectKey"], t + off, 1, 30, 3840, flip[other])[0]
+        img = grab(rec / devs[other]["segments"][seg]["objectKey"], t + off, flip[other])
+        if img is None:
+            print(f"{oid}: no frame at {t + off:.2f} s, left as a single frame", flush=True)
+            new.append(it)
+            continue
         cv2.imwrite(str(out / "images" / f"{oid}.jpg"), img, [cv2.IMWRITE_JPEG_QUALITY, 92])
         if model is None:
             model = rfdetr.RFDETRMedium()
         halves[other] = {"id": oid, "phone": other, "image": f"images/{oid}.jpg", "width": img.shape[1],
-                         "height": img.shape[0], "candidates": candidates(model, img)}
+                         "height": img.shape[0], "candidates": candidates(model, img), "dtS": 0.0}
         new.append({"id": base, "kind": "pair", "segment": seg, "t": t,
                     "frames": [halves["secondary"], halves["main"]]})  # left to right, as in the panorama
         if len(new) % 25 == 0:
@@ -208,7 +237,10 @@ def clip(rec: Path, name: str, seg0: int, start: float, seconds: float, step: fl
     segments), in <recording>/labels_<name>/, for ball ground truth along
     the clip. Suggestions come from ballclip.py's candidates for the clip
     when they exist (the fine-tuned detector, with balljudge.py's score),
-    else the stock detector."""
+    else the stock detector. Frames are grabbed at the asked time (see
+    `grab`) and each carries "dtS": 0.0, its image's offset from the
+    moment's time; sets made before 2026-10-18 were grabbed up to 0.9 s
+    late and have their measured offset there (ballheat.py <set> dt)."""
     import playeval
 
     manifest = json.loads((rec / "manifest.json").read_text())
@@ -233,17 +265,9 @@ def clip(rec: Path, name: str, seg0: int, start: float, seconds: float, step: fl
         for role in ("secondary", "main"):
             iid = f"{base}_{role}"
             off = 0.0 if role == "main" else report["segments"][seg]["offsetS"]
-            frames = []
-            for back in range(8):  # the decoder returns nothing right at a file's end: step back
-                frames = phase0.frames_at(rec / devs[role]["segments"][seg]["objectKey"], t + off - 0.25 * back,
-                                          1, 30, 3840, flip[role])
-                if frames:
-                    break
-            if not frames:
+            img = grab(rec / devs[role]["segments"][seg]["objectKey"], t + off, flip[role])
+            if img is None:
                 raise SystemExit(f"no frame for {role} segment {seg} at {t + off:.2f} s (clip {clip_t:.1f} s)")
-            if back:
-                print(f"{iid}: stepped back {0.25 * back:.2f} s at the end of the file", flush=True)
-            img = frames[0]
             cv2.imwrite(str(out / "images" / f"{iid}.jpg"), img, [cv2.IMWRITE_JPEG_QUALITY, 92])
             if clip_cands and int(round(clip_t * clip_cands["fps"])) < len(clip_cands["frames"]):
                 k = int(round(clip_t * clip_cands["fps"]))
@@ -257,7 +281,7 @@ def clip(rec: Path, name: str, seg0: int, start: float, seconds: float, step: fl
                     model = __import__("rfdetr").RFDETRMedium()
                 cs = candidates(model, img)
             halves[role] = {"id": iid, "phone": role, "image": f"images/{iid}.jpg", "width": img.shape[1],
-                            "height": img.shape[0], "candidates": cs}
+                            "height": img.shape[0], "candidates": cs, "dtS": 0.0}
         items.append({"id": base, "kind": "pair", "segment": seg, "t": round(t, 3), "clipT": float(clip_t),
                       "frames": [halves["secondary"], halves["main"]]})
         if len(items) % 10 == 0:
@@ -296,10 +320,14 @@ def main(rec: Path, count: int, seed: int) -> None:
         if iid in done:
             continue
         off = 0.0 if role == "main" else report["segments"][seg]["offsetS"]
-        img = phase0.frames_at(rec / devs[role]["segments"][seg]["objectKey"], t + off, 1, 30, 3840, flip[role])[0]
+        img = grab(rec / devs[role]["segments"][seg]["objectKey"], t + off, flip[role])
+        if img is None:
+            print(f"{iid}: no frame at {t + off:.2f} s, skipped", flush=True)
+            continue
         cv2.imwrite(str(out / "images" / f"{iid}.jpg"), img, [cv2.IMWRITE_JPEG_QUALITY, 92])
         items.append({"id": iid, "image": f"images/{iid}.jpg", "segment": seg, "t": t, "phone": role,
-                      "width": img.shape[1], "height": img.shape[0], "candidates": candidates(model, img)})
+                      "width": img.shape[1], "height": img.shape[0], "candidates": candidates(model, img),
+                      "dtS": 0.0})
         if (k + 1) % 25 == 0 or k + 1 == len(picks):
             items_path.write_text(json.dumps(items, indent=1))
             print(f"{k + 1}/{len(picks)} frames", flush=True)
