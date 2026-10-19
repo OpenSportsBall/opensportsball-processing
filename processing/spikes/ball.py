@@ -44,8 +44,8 @@ STATIC_RADIUS = 1.5       # metres
 STATIC_MIN_S = 30.0       # a spot seen over this long without moving is static (a ball placed for a goal
                           # kick sits still for 10 s or more; 4 s removed it) ...
 STATIC_MIN_HITS = 10      # ... seen at least this often (a bench ball is only seen when a scan passes)
-STATIC_LOITER_S = 8.0     # in a loiter cell (bench, spectators) a ball still this long with STATIC_LOITER_HITS
-STATIC_LOITER_HITS = 3    # sightings is a spare ball (a thrower's ball moves within seconds)
+STATIC_LOITER_S = 8.0     # in a loiter cell (bench, spectators) or outside the lines, a ball still this long
+STATIC_LOITER_HITS = 3    # with this many sightings is a spare ball (a ball that went out comes back in seconds)
 NEAR_PLAYER_M = 6.0       # the match ball is usually this close to someone
 BRIDGE_S = 1.0            # interpolate gaps up to this long
 PITCH_MARGIN_M = 3.0      # candidates this far outside the lines still count (balls at the corners and touchlines)
@@ -95,7 +95,7 @@ def load(rec: Path):
     return fps, frames, balls, people
 
 
-def static_spots(balls, fps, loiter=None, cell_m: float = 4.0):
+def static_spots(balls, fps, loiter=None, cell_m: float = 4.0, pose=None):
     """Places with candidates spread over STATIC_MIN_S seconds that never
     left STATIC_RADIUS: grid the pitch, keep cells whose first and last
     sighting are far apart in time and whose sightings fill the span."""
@@ -112,6 +112,8 @@ def static_spots(balls, fps, loiter=None, cell_m: float = 4.0):
         t = a[near, 0]
         span = (t.max() - t.min()) / fps
         in_loiter = bool(loiter) and (int(np.floor(a[k, 1] / cell_m)), int(np.floor(a[k, 2] / cell_m))) in loiter
+        if pose is not None and (abs(a[k, 1]) > pose.L / 2 or abs(a[k, 2]) > pose.W / 2):
+            in_loiter = True  # outside the lines
         min_s, min_hits = (STATIC_LOITER_S, STATIC_LOITER_HITS) if in_loiter else (STATIC_MIN_S, STATIC_MIN_HITS)
         if span >= min_s and len(np.unique(t)) >= min_hits:
             spots.append(a[near, 1:].mean(0))
