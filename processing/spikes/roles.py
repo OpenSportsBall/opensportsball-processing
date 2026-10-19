@@ -126,7 +126,9 @@ def main(rec: Path, seg: int, start: float, seconds: float, tset: str, fps: floa
             print(f"{i + 1}/{int(seconds * fps)} frames, {(time.time() - t0) / 60:.1f} min, roles so far {dict(tally)}", flush=True)
     path = rec / "detect" / f"roles_{seg}_{start:g}_{seconds:g}.json"
     path.write_text(json.dumps({"segment": seg, "fps": fps, "teams": tset, "frames": frames_out}))
-    print(f"{len(frames_out)} frames in {(time.time() - t0) / 60:.1f} min; roles {dict(tally)} -> {path.name}")
+    print(f"{len(frames_out)} frames in {(time.time() - t0) / 60:.1f} min; roles {dict(tally)} -> {path.name}", flush=True)
+    import os
+    os._exit(0)  # the output is written; teardown has hung (decoder threads)
 
 
 if __name__ == "__main__":

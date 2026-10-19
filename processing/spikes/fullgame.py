@@ -79,7 +79,9 @@ def main() -> None:
     chunks = []
     t = 0.0
     while t < total - 1:
-        chunks.append((t, min(a.chunk, total - t)))
+        # The last chunk stops 1 s short of the recording's end: the decoder
+        # has hung at the very end of the final segment file.
+        chunks.append((t, min(a.chunk, total - t - 1.0)))
         t += a.chunk
     if a.max_chunks:
         chunks = chunks[:a.max_chunks]
