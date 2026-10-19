@@ -84,6 +84,27 @@ Misses: the seg 9 goal kick at 1:10 (ball in the keeper's hands, 76%) and
 seg 3's opening seconds (95%). Tried and not adopted: lead, nowalk,
 fastboost, weak, allnear, flow, lone, gk2, netevent (each in the backlog).
 
+With `roles` and `kickoff` (2026-10-18/19) the same configuration
+captures 12/13 (the seg 9 goal kick found through the keeper's role),
+missing only seg 3's opening seconds (95%).
+
+Ball source, same run (2026-10-19, `OSB_BALL_PATH=1` against the chain,
+ballwin candidates):
+
+| Configuration | Ball source | Captured | Mean coverage | Width (median) |
+|---|---|---|---|---|
+| A2 (`goalkick,goalframe,unsure,ball,goalin,ballhold`) | chain | 11/13 | 98% | 61 deg |
+| A2 | `ballpath.py` path | 9/13 | 96% | 61 deg |
+| A2 + `roles,kickoff` | chain | 12/13 | 100% | 63 deg |
+| A2 + `roles,kickoff` | `ballpath.py` path | 10/13 | 97% | 62 deg |
+
+The path aims at the ball in 39% / 70% of the clips against the chain's
+27% / 65%, but loses two seg 9 boxes: 1:57 (67%; the path tracks a slow
+ball in the left corner at 1:54-1:56, 25 m from the goal, and the
+`goalkick` rule drops the keeper's framing a second before the kick) and
+0:13 (95%; the same targets, a slightly different smoothed camera). So
+the chain stays `follow.py`'s default.
+
 Add moments by appending clip times to `playeval.py make` for an existing
 set (it keeps the others) or making a new set from another stretch of the
 game; `playbench.py` lists the clips in `CLIPS`.
@@ -98,7 +119,9 @@ the play boxes.
 |---|---|
 | Build a clip set | `uv run processing/spikes/labelset.py footage/rec3 clip <name> <segment> <start s> <seconds> [step s]` |
 | Label it | preview `ball-labels-seg9` / `ball-labels-seg3` (`processing/spikes/label/server.py footage/rec3/labels_<name> [port]`) |
-| Score the tracker | `uv run processing/spikes/balleval.py footage/rec3 <name> ["NAME=value,..." ...]` |
+| Score the tracker (ball.py's online chain, the default) | `uv run processing/spikes/balleval.py footage/rec3 <name> ["NAME=value,..." ...]` |
+| Score the offline path tracker instead | `OSB_BALL_PATH=1 uv run processing/spikes/balleval.py footage/rec3 <name> ["ballpath.NAME=value,..." ...]` |
+| Write `ball.json` with the path tracker | `uv run processing/spikes/ballpath.py footage/rec3 footage/rec3/detect/ball_<seg>_<start>_<seconds>[.win].json [out.json]` |
 | Score detectors per frame | `uv run processing/spikes/ballheat.py footage/rec3 <name> [wasb] [tracknetv2] [tracknetv3]` |
 | Measure an old set's label-time offsets | `uv run processing/spikes/ballheat.py footage/rec3 <name> dt` (writes `dtS` per frame into `items.json`) |
 
@@ -134,6 +157,15 @@ Every candidate carries a `judge` score from `balljudge.py` (a 48 px crop
 classifier; `data`, `train`, `eval`, `clip`). `ballcompare.py` compares the
 stock and fine-tuned detectors on the random label set's held-back frames.
 
+`ballpath.py` links the same filtered candidates as one minimum-cost path
+over the whole clip (offline Viterbi; angular motion within a phone's
+view, metric between phones, a "no ball" node per frame, edges up to 1 s
+back) instead of ball.py's greedy online chain. `OSB_BALL_PATH=1` selects
+it in `balleval.py` and `follow.py` (the same variable in both; unset,
+both use the chain, which stays the default: the path finds more of the
+ball at the labelled moments but cost two play boxes, section 2), and
+its costs sweep like the chain's (`"ballpath.NONE_COST=3"`).
+
 `ballheat.py` scores detectors per labelled frame instead of through the
 tracker: a hit is a candidate within 12 px or 1.5 ball diameters of the
 label, at a given score threshold, against candidates per frame. It runs
@@ -156,6 +188,16 @@ others at the label image's time:
 | tuned defaults, `win` candidates | nominal | 18/37 (49%) | 31/53 (58%) | 4 / 8 | 15 / 14 |
 | tuned defaults, full-scan candidates | corrected | 17/37 (46%) | 37/53 (70%) | 0 / 2 | 20 / 14 |
 | tuned defaults, `win` candidates | corrected | 17/37 (46%) | 35/53 (66%) | 1 / 1 | 19 / 17 |
+| tuned defaults, full-scan candidates, 2026-10-19 (outside-the-lines static filter) | corrected | 16/37 (43%) | 36/53 (68%) | 0 / 2 | 21 / 15 |
+| tuned defaults, `win` candidates, 2026-10-19 | corrected | 14/37 (38%) | 36/53 (68%) | 0 / 1 | 23 / 16 |
+| `ballpath.py` offline path, full-scan candidates | corrected | 21/37 (57%) | 38/53 (72%) | 2 / 2 | 14 / 13 |
+| `ballpath.py` offline path, `win` candidates | corrected | 18/37 (49%) | 39/53 (74%) | 2 / 4 | 17 / 10 |
+
+The 2026-10-19 chain rows follow commit 2a5560d (a ball resting outside
+the lines is a spare ball), which moved the chain by 1-3 moments; the
+path rows use the same candidates and filters, so they differ from those
+chain rows in the linking only. Coverage: chain 31 / 28 / 70 / 66%, path
+44 / 40 / 70 / 72%.
 
 Detectors per labelled frame (`ballheat.py`, 2026-10-18; balls in play on a
 phone: 48 on seg 9, 58 on seg 3):
@@ -167,7 +209,12 @@ phone: 48 on seg 9, 58 on seg 3):
 | union of the two | 44% | 78% | 2.4 / 2.6 |
 
 The candidate ceiling (a usable candidate near the ball at all) is ~62% of
-moments; the misses are mostly balls under 8 px, 43-100+ m away. Witnesses
+moments; the misses are mostly balls under 8 px, 43-100+ m away. On the
+filtered candidates the tracker sees, a candidate within the hit radius
+exists at the labelled frame at 15/37 and 31-32/53 moments, within 0.5 s
+of it at 27-28/37 and 41-42/53; the path tracker's misses are 9/37 and
+10/53 moments with no candidate within 0.5 s and the rest a lone
+candidate 1-5 frames off, so the remaining gap is detection. Witnesses
 from other motion (keeper bearings, motion blobs, net ripple, facing
 direction: `witness.py`, `flowcands.py`, `facing.py`) were scored the same
 way and none raises the found-rate; the backlog has their numbers.

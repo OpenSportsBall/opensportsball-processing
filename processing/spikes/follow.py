@@ -635,11 +635,13 @@ LEAD_S = 1.0             # lead: aim where the hotspot will be this much later (
 
 def ball_track(rec: Path, start: float, T: int, pos, pose, loiter=None) -> np.ndarray:
     """Per follow frame, the match ball on the pitch (x, z) or NaN: the
-    fine-tuned detector's candidates for this clip (ballclip.py) through
-    ball.py's tracker (static spots dropped, tracks linked under a speed
-    limit, one physically consistent chain chosen, gaps up to 1 s bridged),
-    resampled to FPS. Kept only in stretches of at least BALL_MIN_RUN_S, and
-    near the lines."""
+    fine-tuned detector's candidates for this clip (ballclip.py / ballwin.py)
+    through ball.py's tracker (static spots dropped, tracks linked under a
+    speed limit, one physically consistent chain chosen, gaps up to 1 s
+    bridged), resampled to FPS. OSB_BALL_PATH=1 links with ballpath.py's
+    offline path instead (more of the ball at the labelled moments, but it
+    cost two play boxes on 2026-10-19, so the chain stays the default). Kept
+    only in stretches of at least BALL_MIN_RUN_S, and near the lines."""
     import ball as B
 
     tag = os.environ.get("OSB_BALL_TAG", "")  # "" prefers ballwin.py's candidates (.win.json) when present
@@ -657,8 +659,14 @@ def ball_track(rec: Path, start: float, T: int, pos, pose, loiter=None) -> np.nd
     spots = B.static_spots(cands, bf, loiter, LOITER_CELL_M, pose)
     keep = [[d for d in fr if all(np.hypot(*(np.array(d["xz"]) - s_)) > B.STATIC_RADIUS for s_ in spots)]
             for fr in cands]
-    tracks = B.link(keep, bf)
-    est, src, _ = B.choose(tracks, people, n, bf)
+    if os.environ.get("OSB_BALL_PATH"):  # ballpath.py's offline path instead of the online chain
+        import ballpath
+        est, src = ballpath.track(keep, people, n, bf)
+        how = f"{len({s_[0] for s_ in src if s_ is not None})} runs; path"
+    else:
+        tracks = B.link(keep, bf)
+        est, src, _ = B.choose(tracks, people, n, bf)
+        how = f"{len(tracks)} tracks; chain"
     out = np.full((T, 2), np.nan)
     hl, hw = pose.L / 2 + BALL_OFF_PITCH_M, pose.W / 2 + BALL_OFF_PITCH_M
     for i in range(T):
@@ -684,8 +692,8 @@ def ball_track(rec: Path, start: float, T: int, pos, pose, loiter=None) -> np.nd
             out[i:j] = np.nan
         i = j
     n_det = sum(s_ is not None for s_ in src)
-    print(f"ball: {sum(map(len, cands))} on-pitch candidates, {len(spots)} static spots, {len(tracks)} tracks;"
-          f" chain detected in {n_det}/{n} frames; aim at the ball in"
+    print(f"ball: {sum(map(len, cands))} on-pitch candidates, {len(spots)} static spots, {how}"
+          f" detected in {n_det}/{n} frames; aim at the ball in"
           f" {100 * np.mean(~np.isnan(out[:, 0])):.0f}% of the clip")
     return out
 

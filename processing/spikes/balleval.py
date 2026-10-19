@@ -13,9 +13,11 @@
 page. The clip's candidates (ballclip.py, with balljudge.py scores if
 run) go through ball.py's tracker as follow.py's "ball" feature does;
 at each labelled moment the estimate is compared with the label placed
-on the pitch. Each extra argument is a tracker setting to override
-("ball.MAX_MISSED_S=1.0,ball.MIN_JUDGE=0.5"), one run per argument, so
-settings can be swept in one call.
+on the pitch. OSB_BALL_PATH=1 links with ballpath.py's offline path
+instead (same candidates and filters), as follow.py does under the same
+variable. Each extra argument is a tracker setting to override
+("ball.MAX_MISSED_S=1.0,ball.MIN_JUDGE=0.5" or "ballpath.NONE_COST=3"),
+one run per argument, so settings can be swept in one call.
 
 Per run: found (estimate within HIT_M of the labelled ball), wrong
 (estimate elsewhere), missed (no estimate); coverage over the clip; and
@@ -129,6 +131,10 @@ def track(data, people, pose):
     spots = B.static_spots(cands, fps, pose=pose)
     keep = [[d for d in fr if all(np.hypot(*(np.array(d["xz"]) - s)) > B.STATIC_RADIUS for s in spots)]
             for fr in cands]
+    if os.environ.get("OSB_BALL_PATH"):  # ballpath.py's offline path instead of the online chain
+        import ballpath
+        est, _ = ballpath.track(keep, people, n, fps)
+        return est
     tracks = B.link(keep, fps)
     est, src, _ = B.choose(tracks, people, n, fps)
     return est
@@ -158,13 +164,15 @@ def main(rec: Path, name: str, runs: list[str]) -> None:
     print(f"{name}: {len(moments)} labelled moments, {n_ball} with the match ball on the pitch")
     defaults = {}
     for run in runs or [""]:
-        for k, v in list(defaults.items()):  # restore
-            setattr(B, k, v)
+        for (mod, attr), v in list(defaults.items()):  # restore
+            setattr(importlib.import_module(mod), attr, v)
         for ov in filter(None, run.split(",")):
             nm, val = ov.split("=")
             mod, attr = nm.split(".") if "." in nm else ("ball", nm)
-            defaults.setdefault(attr, getattr(B, attr))
-            setattr(importlib.import_module(mod), attr, float(val))
+            m = importlib.import_module(mod)
+            cur = getattr(m, attr)
+            defaults.setdefault((mod, attr), cur)
+            setattr(m, attr, int(val) if isinstance(cur, int) else float(val))
         import io, contextlib
         with contextlib.redirect_stdout(io.StringIO()):
             est = track(data, people, pose)
