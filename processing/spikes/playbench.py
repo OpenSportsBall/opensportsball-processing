@@ -35,7 +35,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
 import playeval  # noqa: E402
 
-CLIPS = [("seg9-60", 9, 60.0, 120.0), ("seg3-225", 3, 225.0, 120.0)]
+CLIPS = [("seg9-60", 9, 60.0, 120.0), ("seg3-225", 3, 225.0, 120.0), ("seg0-0", 0, 0.0, 600.0)]
 A = "goalkick,goalframe,unsure"
 VARIANTS = {
     "A": A,
