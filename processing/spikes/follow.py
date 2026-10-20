@@ -600,7 +600,8 @@ GOAL_RECENT_S = 10.0     # if it doesn't fit, prefer the goal end if play was th
 UNSURE_HFOV = ((1, 55.0), (2, 42.0))
 SURGE_FRAC = 0.6         # surge: this share of the running players moving the same way along the pitch ...
 SURGE_MIN_RUN = 4        # ... with at least this many running: play is at the front of the surge
-SURGE_FRONT_M = 5.0      # the aim goes this far ahead of the frontmost runner
+SURGE_FRONT_N = 5        # frame the surge's forward-most players (keepers excluded), at least this many ...
+SURGE_FRONT_M = 5.0      # ... plus this much pitch ahead of the frontmost
 SIDE_ZONE_M = 10.0       # sideline: the hotspot within this of the near touchline ...
 SIDE_END_M = 25.0        # ... and this of a goal line: frame everyone in that corner with SIDE_PAD_DEG margin
 SIDE_PAD_DEG = 4.0
@@ -770,7 +771,8 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
     (aim where the hotspot will be LEAD_S later), "ball" (aim at the
     tracked ball where there is one, see ball_track; elsewhere as before),
     "surge" (most running players heading the same way along the pitch:
-    aim ahead of the frontmost), "sideline" (play in a near-touchline
+    frame the SURGE_FRONT_N forward-most players, keepers excluded, and a
+    little pitch ahead of them), "sideline" (play in a near-touchline
     corner: frame everyone in that corner, padded, instead of centring the
     hotspot), "nowalk" / "fastboost" (hotspot weights, see hot_weights), "weak"
     (when few players are tracked or the hotspot jumps around, the player
@@ -914,12 +916,17 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
                     for sgn in (1, -1):
                         same = (sgn * vx > 0.5 * sp[runners])  # mostly along the pitch, this way
                         if same.mean() >= SURGE_FRAC:
-                            front = pos[j][runners][same][:, 0]
-                            fx = front.max() if sgn > 0 else front.min()
-                            aim_at = np.array([np.clip(fx + sgn * SURGE_FRONT_M, -pose.L / 2, pose.L / 2),
-                                               np.median(pos[j][runners][same][:, 1])])
-                            near = np.hypot(*(pos[j] - aim_at).T) < 2 * HOT_BANDWIDTH_M
-                            who = pos[j][near] if near.sum() >= 2 else pos[j]
+                            # Everyone but the keepers, ordered along the surge; the front
+                            # SURGE_FRONT_N of them, plus a little pitch ahead, are the view.
+                            field = pos[j]
+                            if keepers_at[j]:
+                                keep_ = np.array([all(np.hypot(*(kp - p_)) > ROLE_MATCH_M for kp in keepers_at[j]) for p_ in field])
+                                field = field[keep_] if keep_.sum() >= 2 else field
+                            order = np.argsort(-sgn * field[:, 0])
+                            front = field[order[:int(SURGE_FRONT_N)]]
+                            ahead = np.array([np.clip(front[0, 0] + sgn * SURGE_FRONT_M, -pose.L / 2, pose.L / 2), front[0, 1]])
+                            who = np.vstack([front, ahead[None]])
+                            aim_at = who.mean(0)
                             mode[i] = "surge"
                             break
             if "flow" in features and run.sum() >= 2:
