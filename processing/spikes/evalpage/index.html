@@ -79,6 +79,8 @@ let drag = null, hover = null;
 const HANDLE = 8;
 
 const fmtT = t => `${Math.floor(t / 60)}:${(t % 60).toFixed(1).padStart(4, "0")}`;
+// Game time when the set's clip starts at the game's start (segment 0); else the clip time.
+const gameT = it => it.clipSegment === 0 ? it.clipStartS + it.clipT : null;
 const toPx = (yaw, pitch) => [(yaw - meta.yawDeg[0]) / meta.panoDeg, (pitch - meta.pitchDeg[0]) / meta.panoDeg];
 const toDeg = (px, py) => [meta.yawDeg[0] + px * meta.panoDeg, meta.pitchDeg[0] + py * meta.panoDeg];
 const scr = (px, py) => [(px - view.x) * view.s, (py - view.y) * view.s];
@@ -104,7 +106,8 @@ function renderList() {
     const [cls, txt] = status(it.id);
     const d = document.createElement("div");
     d.className = "item" + (k === cur ? " cur" : "");
-    d.innerHTML = `<span>${fmtT(it.clipT)} <span style="color:var(--muted)">seg ${it.segment}</span></span>` +
+    const g = gameT(it);
+    d.innerHTML = `<span>${g !== null ? fmtT(g) : fmtT(it.clipT)} <span style="color:var(--muted)">${g !== null ? "game" : "clip"} · seg ${it.segment}</span></span>` +
                   `<span class="tag ${cls}">${txt}</span>`;
     d.onclick = () => show(k);
     el.appendChild(d);
