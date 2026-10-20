@@ -57,7 +57,7 @@ import ball as B  # noqa: E402
 
 NONE_COST = 2.0       # per frame with no ball on the path; must exceed a real run's node + motion cost per frame
                       # (~0.3 + ~0.5) by a margin or short confident runs are dropped (1.0 lost the clip's opening track)
-GAP_PENALTY = 2.0     # to enter and again to leave "no ball" (1-3 are alike; 6+ loses found)
+GAP_PENALTY = 1.0     # to enter and again to leave "no ball" (1 picks up isolated sure sightings: +1 play box, fewer wrong; 6+ loses found)
 MOTION_DEG = 2.0      # same phone: per-frame angular step that costs 1 (linear; a pass at 50 m is 1-2 deg)
 MAX_DEG = 8.0         # ... gentle up to here (a shot across the near view), STEEP_DEG per degree beyond
 STEEP_DEG = 2.0

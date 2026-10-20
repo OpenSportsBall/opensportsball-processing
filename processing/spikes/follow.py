@@ -598,6 +598,12 @@ GOAL_MIN_PLAYERS = 4     # ... at least this many
 GOAL_MAX_HFOV = 75.0     # the union must fit in this
 GOAL_RECENT_S = 10.0     # if it doesn't fit, prefer the goal end if play was there this recently
 UNSURE_HFOV = ((1, 55.0), (2, 42.0))
+SURGE_FRAC = 0.6         # surge: this share of the running players moving the same way along the pitch ...
+SURGE_MIN_RUN = 4        # ... with at least this many running: play is at the front of the surge
+SURGE_FRONT_M = 5.0      # the aim goes this far ahead of the frontmost runner
+SIDE_ZONE_M = 10.0       # sideline: the hotspot within this of the near touchline ...
+SIDE_END_M = 25.0        # ... and this of a goal line: frame everyone in that corner with SIDE_PAD_DEG margin
+SIDE_PAD_DEG = 4.0
 KO_CENTRE_M = 4.0        # kickoff: a confident ball candidate within this of the centre spot ...
 KO_MIN_S = 3.0           # ... for this long (median-filtered over 1 s) with at most KO_RUNNERS running, ...
 KO_RUNNERS = 3
@@ -763,7 +769,10 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
     the hotspot: don't zoom in tight, the ball may be elsewhere), "lead"
     (aim where the hotspot will be LEAD_S later), "ball" (aim at the
     tracked ball where there is one, see ball_track; elsewhere as before),
-    "nowalk" / "fastboost" (hotspot weights, see hot_weights), "weak"
+    "surge" (most running players heading the same way along the pitch:
+    aim ahead of the frontmost), "sideline" (play in a near-touchline
+    corner: frame everyone in that corner, padded, instead of centring the
+    hotspot), "nowalk" / "fastboost" (hotspot weights, see hot_weights), "weak"
     (when few players are tracked or the hotspot jumps around, the player
     signal can't be trusted: frame all tracked players, wide, instead of
     the hotspot or a lull hold), "allnear" (always frame everyone near the
@@ -895,11 +904,42 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
             else:
                 who = pos[j][run] if run.sum() >= 2 else pos[j][near] if near.sum() >= 2 else pos[j]
             aim_at = spots[j]
+            if "surge" in features and len(vel[j]):
+                # Most of the running players heading the same way along the pitch:
+                # play is at the front of the surge, not at its densest point.
+                sp = np.hypot(*vel[j].T)
+                runners = sp > play.RUN_SPEED
+                if runners.sum() >= SURGE_MIN_RUN:
+                    vx = vel[j][runners, 0]
+                    for sgn in (1, -1):
+                        same = (sgn * vx > 0.5 * sp[runners])  # mostly along the pitch, this way
+                        if same.mean() >= SURGE_FRAC:
+                            front = pos[j][runners][same][:, 0]
+                            fx = front.max() if sgn > 0 else front.min()
+                            aim_at = np.array([np.clip(fx + sgn * SURGE_FRONT_M, -pose.L / 2, pose.L / 2),
+                                               np.median(pos[j][runners][same][:, 1])])
+                            near = np.hypot(*(pos[j] - aim_at).T) < 2 * HOT_BANDWIDTH_M
+                            who = pos[j][near] if near.sum() >= 2 else pos[j]
+                            mode[i] = "surge"
+                            break
             if "flow" in features and run.sum() >= 2:
                 v = vel[j][run].mean(0) * FLOW_S
                 n_v = np.hypot(*v)
                 aim_at = spots[j] + v * (min(n_v, FLOW_MAX_M) / max(n_v, 1e-9))
             last = finish(*target(aim_at, who))
+            if "sideline" in features and len(pos[j]):
+                # Play on a near sideline corner: frame everyone in that corner
+                # (padded) rather than centring on the hotspot.
+                hx, hz = aim_at
+                if hz < -(pose.W / 2 - SIDE_ZONE_M) and abs(hx) > pose.L / 2 - SIDE_END_M:
+                    sx = 1 if hx > 0 else -1
+                    corner = pos[j][(pos[j][:, 1] < -(pose.W / 2 - 2 * SIDE_ZONE_M)) & (sx * pos[j][:, 0] > pose.L / 2 - 2 * SIDE_END_M)]
+                    if len(corner) >= 2:
+                        ang = np.radians(pose.angles(corner))
+                        lo_, hi_ = ang[:, 0].min() - np.radians(SIDE_PAD_DEG), ang[:, 0].max() + np.radians(SIDE_PAD_DEG)
+                        centre = np.radians(pose.angles(np.mean(corner, axis=0)[None])[0])
+                        last = finish(np.array([(lo_ + hi_) / 2, centre[1]]), hi_ - lo_, MAX_HFOV)
+                        mode[i] = "sideline"
             # Things the hotspot framing may leave out, if they fit in view.
             extra = []
             if "lone" in features:
