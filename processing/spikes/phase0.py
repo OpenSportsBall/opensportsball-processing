@@ -50,7 +50,9 @@ def probe_start(path: Path, kind: str) -> float:
         ["ffprobe", "-v", "error", "-select_streams", f"{kind}:0",
          "-show_entries", "stream=start_time", "-of", "csv=p=0", str(path)],
         check=True, capture_output=True, text=True).stdout.strip()
-    return float(out or 0)
+    # A stream with side data (the Pixel 11 Pro's display matrix) gets a
+    # trailing empty CSV column: "0.039400,".
+    return float(out.split(",")[0] or 0)
 
 
 def load_audio(path: Path) -> np.ndarray:
