@@ -94,11 +94,11 @@ def background(rec: Path, seg: int, pano: Pano):
     return bg
 
 
-def turf(bg: np.ndarray) -> np.ndarray:
+def turf(bg: np.ndarray, hue_min: int = 30) -> np.ndarray:
     """The playing surface: the green region touching the bottom of the
     panorama, holes (lines, players) filled."""
     hsv = cv2.cvtColor(bg, cv2.COLOR_BGR2HSV)
-    green = ((hsv[..., 0] > 30) & (hsv[..., 0] < 95) & (hsv[..., 1] > 40)).astype(np.uint8)
+    green = ((hsv[..., 0] > hue_min) & (hsv[..., 0] < 95) & (hsv[..., 1] > 40)).astype(np.uint8)
     green = cv2.morphologyEx(green, cv2.MORPH_CLOSE, np.ones((41, 41), np.uint8))
     n, lab, stats, _ = cv2.connectedComponentsWithStats(green)
     keep = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
@@ -115,15 +115,20 @@ def turf(bg: np.ndarray) -> np.ndarray:
 def line_mask(bg: np.ndarray) -> np.ndarray:
     """White paint on the turf: brighter than its surroundings at some
     scale (lines are a few pixels wide far away, tens nearby) and
-    unsaturated (the blue, yellow and red markings belong to other sports)."""
+    unsaturated (the blue, yellow and red markings belong to other sports).
+    "Unsaturated" is S < 100, not lower: a line one or two pixels wide at
+    the far end blends with the grass around it, so its pixels stay fairly
+    saturated (the 2026-10-21 field's end markings were lost at S < 60). The
+    turf's hue bound is lower than turf()'s default because one phone's
+    colour cast can put distant grass at hue ~25-30 (that field's Main half)."""
     hsv = cv2.cvtColor(bg, cv2.COLOR_BGR2HSV)
     v = hsv[..., 2]
     tophat = np.zeros_like(v)
     for k in (15, 41, 101):
         se = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
         tophat = np.maximum(tophat, cv2.morphologyEx(v, cv2.MORPH_TOPHAT, se))
-    white = (tophat > 25) & (hsv[..., 1] < 60) & (v > 120)
-    field = cv2.dilate(turf(bg).astype(np.uint8), np.ones((9, 9), np.uint8)).astype(bool)
+    white = (tophat > 25) & (hsv[..., 1] < 100) & (v > 120)
+    field = cv2.dilate(turf(bg, hue_min=20).astype(np.uint8), np.ones((9, 9), np.uint8)).astype(bool)
     return ((white & field) * 255).astype(np.uint8)
 
 
