@@ -7,7 +7,7 @@
 # ///
 """Renders a whole game with the follow cam, in chunks, overnight.
 
-    uv run processing/spikes/fullgame.py footage/rec3 [--chunk 600] [--max-chunks N] [--out fullgame]
+    uv run processing/spikes/fullgame.py footage/rec3 [--start 0] [--chunk 600] [--max-chunks N] [--out fullgame]
                                                       [--features goalkick,goalframe,unsure,ball,goalin,ballhold]
 
 Each chunk of the game (on Main's clock from segment 0; the readers run
@@ -19,7 +19,8 @@ as the ball stage alone. A chunk whose piece exists is skipped, so the
 run can be resumed. At the end the pieces are concatenated and Main's
 audio is muxed in: <recording>/<out>/game.mp4.
 
-Logs: <recording>/<out>/logs/.
+Logs: <recording>/<out>/logs/, with each chunk's camera log and path
+(camlog_NN.txt, path_NN.json; score a path with playeval.py).
 
 Keep the Mac awake for the run: it idle-sleeps otherwise (the first run
 lost a night to that). `caffeinate -i -w <pid of this script's python>`,
@@ -67,6 +68,8 @@ def main() -> None:
     ap.add_argument("rec", type=Path)
     ap.add_argument("--chunk", type=float, default=600.0)
     ap.add_argument("--max-chunks", type=int, default=0)
+    ap.add_argument("--start", type=float, default=0.0,
+                    help="s on Main's clock to start from (skip a warm-up before kickoff); audio is cut to match")
     ap.add_argument("--out", default="fullgame")
     ap.add_argument("--features", default="goalkick,goalframe,unsure,ball,goalin,ballhold,roles,kickoff")
     ap.add_argument("--roles-fps", type=float, default=4.0, help="roles.py rate (people move slowly; 4 is plenty)")
@@ -77,7 +80,7 @@ def main() -> None:
     devs = {d["role"]: d for d in manifest["devices"]}
     total = sum(s["durationMs"] for s in devs["main"]["segments"]) / 1000
     chunks = []
-    t = 0.0
+    t = a.start
     while t < total - 1:
         # The last chunk stops 1 s short of the recording's end: the decoder
         # has hung at the very end of the final segment file.
@@ -143,6 +146,10 @@ def main() -> None:
                     cl = rec / "follow" / "camlog.txt"
                     if cl.exists():
                         cl.rename(out / "logs" / f"camlog_{k:02d}.txt")
+                    # The camera path, so the chunk can be scored (playeval.py score) without a rerun.
+                    pj = rec / "follow" / f"path_{tag}.json"
+                    if pj.exists():
+                        pj.rename(out / "logs" / f"path_{k:02d}.json")
                     print(f"follow chunk {k}: ok in {(time.time() - t0) / 60:.1f} min -> {piece(k).name}", flush=True)
                 else:
                     failed.append(("follow", k))
@@ -170,7 +177,7 @@ def main() -> None:
     alst.write_text("".join(f"file '{(rec / s['objectKey']).resolve()}'\n" for s in devs["main"]["segments"]))
     run(["ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(alst), "-vn", "-c:a", "copy",
          str(out / "audio.m4a")], log)
-    rc = run(["ffmpeg", "-v", "error", "-y", "-i", str(out / "video.mp4"), "-i", str(out / "audio.m4a"),
+    rc = run(["ffmpeg", "-v", "error", "-y", "-i", str(out / "video.mp4"), "-ss", f"{a.start:g}", "-i", str(out / "audio.m4a"),
               "-c", "copy", "-shortest", str(out / "game.mp4")], log)
     print(f"{'done' if rc == 0 else 'mux FAILED'}: {out / 'game.mp4'} in {(time.time() - t0) / 3600:.1f} h", flush=True)
 
