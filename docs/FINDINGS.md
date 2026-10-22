@@ -12,8 +12,9 @@ Status key: **adopted** (in the default configuration), **available**
 (promising, not finished).
 
 Measurements referred to below:
-- *play boxes*: 12 reviewed must-see moments on two 2-minute clips;
-  a moment is captured when >= 98% of its box is in the 1080p view.
+- *play boxes*: 26 reviewed must-see moments (12 on two 2-minute clips,
+  14 from the game's first 23 minutes); a moment is captured when >= 98%
+  of its box is in the 1080p view.
 - *ball labels*: the ball's position every 2 s along the same clips
   (37 and 53 moments with the ball on the pitch); the tracker is scored
   as found / wrong / missed per moment.
@@ -56,8 +57,11 @@ Measurements referred to below:
 | Zoom floor 50 deg (a 1080p view narrower than ~55 deg upsamples the 4K source; 65 deg is pixel-for-pixel at a phone's centre) | Sharper output, median width ~63 deg. | adopted |
 | Never show past the canvas's left or right edge: stop there and zoom in (to 40 deg; the phones' edges have the most pixels per degree) | Removes the black edge; a further margin for lens fall-off is still to be measured. | adopted, open |
 | Camera log (`camlog.txt`, one line per change of the driving rule) | Made the full-render reviews possible. | adopted |
+| surge: >= 60% of >= 4 running players heading the same way along the pitch; at first aim 5 m ahead of the frontmost, then frame the 5-7 forward-most non-keepers plus 5 m ahead | Fires in 19% of frames but moves the aim only ~4.5 deg at the median: the hotspot's running pool already sits near the front. Players only 13 -> 14/25; with the ball 19-20/25 (no gain; at N = 3-5 it pulls the view off moments the ball rule had). Can't catch a set piece (7:34): nobody runs. | available |
+| sideline: hotspot in a near-touchline corner, frame everyone in that corner with padding | Fires in 0.6% of frames: the hotspot drifts to the pack even when play is on the touchline (at the 10:02 throw-in it sat mid-pitch). Neutral; a wider zone costs coverage. The trigger would need the ball or the thrower. | available |
+| Front-of-field position (the forward-most players parked far from the hotspot, a set piece) | Seen at 7:34: the five forward-most players at the left goal line 40 m beyond the hotspot, with nobody running. Not built. | open |
 
-With the ball (section 4) and roles (section 6): **12/12 play boxes** at HEAD (one box was removed and one redrawn on review of the offline ball path; before that 12/13).
+With the ball (section 4) and roles (section 6): **21/26 play boxes** (2026-10-20). On the first 12 moments 11/12; the 14 from the full game added three misses (a set piece with no ball candidate at 7:34, a throw-in with the ball in hands at 10:02, a single ball sighting at 14:05) and two 95% near-misses.
 
 ## 4. Where is the ball?
 
@@ -80,6 +84,8 @@ Tracking:
 | Greedy online chain (`ball.py`: static-spot removal, linking under a speed limit, one physically consistent chain) | Tuned on the ball labels from 32% / 26% found to 54% / 62% (static filter 30 s, 2-hit tracks, judge >= 0.3, 0.6 s gap). | available (`OSB_BALL_CHAIN=1`) |
 | Static-spot rules: 30 s for a still ball; 8 s in bench cells or outside the lines | Removed the spare balls by the bench that the camera followed for 10 s at a time. | adopted |
 | Offline minimum-cost path (`ballpath.py`, Viterbi over candidates with an angular motion cost per phone) | Found 57% / 72-74% (chain 49-57% / 68-72%), coverage up to 44% / 72%; same play boxes; aims at the ball in 39% / 70% of the clips. | adopted (default) |
+| Path gap penalty 2 -> 1 (cheaper to enter and leave "no ball", so isolated confident sightings join the path) | Play boxes 19/25 -> 20/25 (19:36); ball labels the same found-rate with fewer wrong (seg 3: 4 -> 2). A cheaper no-ball cost (1.5) or no judge filter each lose a box. | adopted |
+| Longer ballhold (5-8 s) | Loses two boxes to stale holds. | dropped |
 | Label-time correction (the decoder's late first frame put label images 0.2-0.9 s after their stored time) | Most "wrong" estimates were the clock; with it the tracker shows 1 wrong per clip and the rest are gaps. | adopted |
 
 Ball witnesses from other motion (none moved the tracker's found-rate):

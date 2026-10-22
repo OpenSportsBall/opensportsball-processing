@@ -48,19 +48,29 @@ box it shows at that frame.
 | Step | Command |
 |---|---|
 | Panoramas at chosen clip times | `uv run processing/spikes/playeval.py make footage/rec3 <set> <segment> <start s> <clip t> ...` |
-| Draw and review boxes | preview `play-eval` / `play-eval-seg9` (`processing/spikes/evalpage/server.py <set dir> [port]`) |
+| Draw and review boxes | preview `play-eval`, `play-eval-seg9`, `play-eval-seg0`, `play-eval-seg0-600`, `play-eval-seg0-1200` (`processing/spikes/evalpage/server.py <set dir> [port]`); sets that start at the game's start list game time, the others clip time |
 | Score path files | `uv run processing/spikes/playeval.py score footage/rec3 <set> <path.json> ...` |
 | Bench many variants | `uv run processing/spikes/playbench.py footage/rec3 [variant ...]` |
 
 Sets: `footage/rec3/playeval/<set>/` with `pano/`, `items.json`,
 `boxes.json` (panorama degrees, so boxes don't depend on any render) and
 `paths/<variant>.json` plus `<variant>_debug.json` (per-frame mode, aim,
-hotspot, ball). Two sets, 12 reviewed moments: `seg9-60` (segment 9 from
-60 s, the first test clip) and `seg3-225` (segment 3 from 225 s, crossing
-into segment 4). Until 2026-10-19 there were 13: the seg 9 box at 1:57
-(the keeper's goal-kick framing, 1.5 s before the kick) was removed
+hotspot, ball). Five sets, 26 reviewed moments:
+
+| Set | Clip | Moments |
+|---|---|---|
+| `seg9-60` | segment 9 from 60 s, 120 s (the first test clip) | 7 |
+| `seg3-225` | segment 3 from 225 s, 120 s (crosses into segment 4) | 5 |
+| `seg0-0` | game 0:00-10:00 | 6:30, 7:22, 7:34, 7:51, 9:45 |
+| `seg0-600` | game 10:00-20:00 | 10:02, 12:09, 12:36, 13:37, 13:50, 14:05, 15:31, 19:36 |
+| `seg0-1200` | game 20:00-30:00 | 22:36 |
+
+The first two sets had 13 moments until 2026-10-19: the seg 9 box at
+1:57 (the keeper's goal-kick framing, 1.5 s before the kick) was removed
 because a camera that follows the ball into the corner there is right;
-figures quoted as "/13" were measured with it.
+figures quoted as "/13" were measured with it. The three `seg0` sets
+(2026-10-19/20) reuse the full-game chunks' ball candidates and roles
+(`detect/ball_0_<start>_600.win.json`, `roles_0_<start>_600.json`).
 
 `playbench.py` caches follow.py's pass A (player detections) per clip in
 `footage/rec3/follow/passA_<seg>_<start>_<seconds>.json`, so a variant
@@ -115,9 +125,26 @@ median width and 60 deg at the captures, the path at 62 and 55. Both miss
 only seg 3's opening seconds (95%). On that the path became the default
 ball source (`OSB_BALL_CHAIN=1` for the chain).
 
+On all 26 moments (2026-10-20, ball path with gap penalty 1):
+
+| Configuration | Captured | Mean coverage | Width (median) |
+|---|---|---|---|
+| A + `roles` (players only) | 13/25 | 70% | 53 deg |
+| A + `roles,surge` | 14/25 | 75% | 54 deg |
+| **A2 + `roles,kickoff`** (the default) | **21/26** | 89% | 54 deg |
+| default + `surge` (N = 7) or `sideline` | 20/25 | 88% | 55 deg |
+
+(The /25 rows were run before 7:22 was added; 7:22 is captured by the
+default.) Misses of the default: 7:34 (19%; play parked in the left
+penalty area, no ball candidate, almost nobody running), 10:02 (0%; a
+throw-in, the ball in the thrower's hands), 14:05 (0%; a single ball
+sighting), and two at 95%: 7:51 and the seg 3 clip's first seconds.
+
 Add moments by appending clip times to `playeval.py make` for an existing
 set (it keeps the others) or making a new set from another stretch of the
-game; `playbench.py` lists the clips in `CLIPS`.
+game; `playbench.py` lists the clips in `CLIPS`. A new set needs the
+stretch's pass A cache, ball candidates and roles (made from the video,
+see section 5); sets over the full-game chunks have them already.
 
 ## 3. Ball tracking: clip labels
 
@@ -234,13 +261,37 @@ way and none raises the found-rate; the backlog has their numbers.
 |---|---|
 | `footage/rec3/pitch/` | pitch map, goals, background panorama, overview map |
 | `footage/fixtures/pitch/` | mapping regression fixtures |
-| `footage/rec3/follow/` | renders, comparison videos, pass A caches, path files |
+| `footage/rec3/follow/` | pass A caches (`passA_*.json`), the last run's path files, `camlog.txt` and `play_debug.json` |
 | `footage/rec3/playeval/` | play-box sets and benched paths, `bench.json` |
 | `footage/rec3/labels/` | the random ball label set (detector training data) |
 | `footage/rec3/labels_<name>/` | clip ball label sets |
 | `footage/rec3/detect/` | ball candidate files by clip and tag, net series |
 | `footage/rec3/balldata/`, `balltrain/`, `balljudge/` | detector dataset and checkpoints, judge crops and models |
-| `footage/rec3/fullgame/` | whole-game render pieces and `game.mp4` (`fullgame.py`) |
+| `footage/rec3/fullgame2/` | the second whole-game run's logs: per-chunk `camlog_*.txt` and the runner's logs (the video was removed) |
 
 Preview servers are in `.claude/launch.json` (`ball-labels`, `ball-labels-seg9`,
-`ball-labels-seg3`, `play-eval`, `play-eval-seg9`); they listen on localhost only.
+`ball-labels-seg3`, `play-eval`, `play-eval-seg9`, `play-eval-seg0`,
+`play-eval-seg0-600`, `play-eval-seg0-1200`); they listen on localhost only.
+
+## 5. Without the game video
+
+The phones' segments and all renders were removed locally on 2026-10-21
+(the segments are in S3, checked byte-for-byte on 2026-10-19:
+`accounts/<account>/games/f68af87f.../recordings/78618588.../<device>/`).
+Everything in sections 1-4 still runs (checked after the removal: the
+play-box bench 21/26, the tracker 49% / 74% found, the pitch test 4/4),
+because the benches read only cached inputs.
+
+What still runs: any change to the planner (follow.py's rules, framing,
+features and constants), to the ball linker over the existing candidates
+(ball.py filters, ballpath.py costs), and to role logic over the existing
+roles files.
+
+What needs the video back: rendering anything to watch; new per-frame
+inputs (another player or ball detector, roles at another rate, new
+search windows); and new label sets or play boxes outside the cached
+stretches. Download only the segments covering the stretch (about 1.2 GB
+each per phone) into `footage/rec3/<device id>/` with the manifest's
+object keys, e.g.
+
+    aws s3 cp --profile sbv s3://<footage bucket>/accounts/.../recordings/78618588-.../<device id>/<device id>_003.mp4 footage/rec3/<device id>/
