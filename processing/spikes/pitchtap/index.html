@@ -1,0 +1,228 @@
+<!doctype html>
+<!-- SPDX-FileCopyrightText: 2026 The OpenSportsBall Authors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pitch keypoints</title>
+<style>
+  :root { --bg: #15171a; --panel: #1f2226; --line: #33373d; --text: #e8eaed; --muted: #9aa0a6;
+          --pt: #ffd400; --ok: #5bd17a; --skip: #f0a040; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif;
+         display: grid; grid-template-columns: minmax(200px, 310px) minmax(0, 1fr); height: 100vh; overflow: hidden; }
+  aside { background: var(--panel); border-right: 1px solid var(--line); padding: 14px; overflow-y: auto; min-width: 0; }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 14px 0 4px; }
+  .sub { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+  .item { padding: 7px 10px; border-radius: 6px; cursor: pointer; display: flex; justify-content: space-between;
+          gap: 8px; border: 1px solid transparent; }
+  .item:hover { background: #2a2e33; }
+  .item.cur { border-color: var(--pt); }
+  .tag { font-size: 11px; padding: 1px 6px; border-radius: 9px; white-space: nowrap; align-self: center; }
+  .tag.ok { background: #1f4d2c; color: var(--ok); }
+  .tag.skip { background: #4d3a1f; color: var(--skip); }
+  .tag.none { background: #333; color: var(--muted); }
+  #hint { margin-top: 12px; padding: 8px 10px; border-radius: 6px; background: #111316; min-height: 54px; }
+  #hint b { color: var(--pt); }
+  button { background: #2c3137; color: var(--text); border: 1px solid var(--line); border-radius: 6px;
+           padding: 7px 10px; font: inherit; cursor: pointer; }
+  button:hover { background: #363c43; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .help { color: var(--muted); font-size: 12px; margin-top: 16px; border-top: 1px solid var(--line); padding-top: 10px; }
+  .help b { color: var(--text); font-weight: 600; }
+  main { position: relative; overflow: hidden; }
+  @media (max-width: 700px) {
+    body { grid-template-columns: minmax(0, 1fr); grid-template-rows: 40vh minmax(0, 1fr); }
+    aside { border-right: 0; border-bottom: 1px solid var(--line); }
+  }
+  canvas { display: block; width: 100%; height: 100%; cursor: crosshair; }
+  #hud { position: absolute; left: 10px; bottom: 10px; background: rgba(0,0,0,.6); padding: 4px 8px;
+         border-radius: 4px; font-size: 12px; font-variant-numeric: tabular-nums; pointer-events: none; }
+  #saved { position: absolute; right: 10px; top: 10px; background: rgba(0,0,0,.6); padding: 4px 8px;
+           border-radius: 4px; font-size: 12px; opacity: 0; transition: opacity .3s; }
+</style>
+</head>
+<body>
+<aside>
+  <h1>Pitch keypoints</h1>
+  <div class="sub" id="rec"></div>
+  <div class="sub">Click exactly on each point. Zoom in close: a pixel here is a few centimetres at the far end.</div>
+  <div id="list"></div>
+  <div id="hint"></div>
+  <div class="row">
+    <button id="skip">Not visible</button>
+    <button id="clear">Clear point</button>
+    <button id="zoom">Zoom to point</button>
+    <button id="all">Whole panorama</button>
+  </div>
+  <div class="help">
+    <b>Click</b> places the selected point, then moves to the next.<br>
+    <b>Scroll</b> to zoom, <b>drag</b> to pan.<br>
+    <b>↑ ↓</b> previous / next point. <b>Backspace</b> clears it.<br>
+    Points save as you place them.
+  </div>
+</aside>
+<main>
+  <canvas id="cv"></canvas>
+  <div id="hud"></div>
+  <div id="saved">saved</div>
+</main>
+<script>
+const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
+let meta = null, taps = {}, cur = 0, img = null;
+let view = { s: 1, x: 0, y: 0 };      // screen = (pano px - x) * s
+let drag = null;
+
+const toPx = (yaw, pitch) => [(yaw - meta.yawDeg[0]) / meta.panoDeg, (pitch - meta.pitchDeg[0]) / meta.panoDeg];
+const toDeg = (px, py) => [meta.yawDeg[0] + px * meta.panoDeg, meta.pitchDeg[0] + py * meta.panoDeg];
+const scr = (px, py) => [(px - view.x) * view.s, (py - view.y) * view.s];
+const pano = (sx, sy) => [sx / view.s + view.x, sy / view.s + view.y];
+
+async function load() {
+  [meta, taps] = await Promise.all(["/meta", "/taps"].map(u => fetch(u).then(r => r.json())));
+  document.getElementById("rec").textContent = meta.recording;
+  img = new Image();
+  img.onload = () => { fitAll(); };
+  img.src = "/background.png";
+  const first = meta.points.findIndex(p => !taps[p.name]);
+  select(first < 0 ? 0 : first);
+}
+
+function select(k) {
+  cur = (k + meta.points.length) % meta.points.length;
+  renderList(); draw();
+}
+
+function renderList() {
+  const el = document.getElementById("list");
+  el.innerHTML = "";
+  let end = null;
+  meta.points.forEach((p, k) => {
+    if (p.end !== end) {
+      end = p.end;
+      const h = document.createElement("h2"); h.textContent = end === "centre" ? "centre" : `${end} end`; el.appendChild(h);
+    }
+    const t = taps[p.name];
+    const [cls, txt] = !t ? ["none", "—"] : t.skipped ? ["skip", "not visible"] : ["ok", "placed"];
+    const d = document.createElement("div");
+    d.className = "item" + (k === cur ? " cur" : "");
+    d.innerHTML = `<span>${p.name.replace(/^(left|right) /, "")}</span><span class="tag ${cls}">${txt}</span>`;
+    d.onclick = () => select(k);
+    el.appendChild(d);
+  });
+  const p = meta.points[cur];
+  document.getElementById("hint").innerHTML = `<b>${p.name}</b><br>${p.hint}`;
+}
+
+function resize() {
+  const r = cv.getBoundingClientRect();
+  cv.width = r.width * devicePixelRatio; cv.height = r.height * devicePixelRatio;
+  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  draw();
+}
+
+function fitRect(x0, y0, x1, y1) {
+  const r = cv.getBoundingClientRect();
+  view.s = Math.min(r.width / (x1 - x0), r.height / (y1 - y0));
+  view.x = (x0 + x1) / 2 - r.width / 2 / view.s;
+  view.y = (y0 + y1) / 2 - r.height / 2 / view.s;
+  draw();
+}
+function fitAll() { fitRect(0, 0, img.width, img.height); }
+function zoomTo(name) {
+  const t = taps[name];
+  if (!t || t.skipped) return;
+  const [x, y] = toPx(t.yaw, t.pitch);
+  fitRect(x - 60, y - 30, x + 60, y + 30);
+}
+
+function draw() {
+  const r = cv.getBoundingClientRect();
+  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, r.width, r.height);
+  if (!img || !img.complete || !meta) return;
+  ctx.imageSmoothingEnabled = view.s < 2;
+  ctx.drawImage(img, -view.x * view.s, -view.y * view.s, img.width * view.s, img.height * view.s);
+  meta.points.forEach((p, k) => {
+    const t = taps[p.name];
+    if (!t || t.skipped) return;
+    const [sx, sy] = scr(...toPx(t.yaw, t.pitch));
+    const sel = k === cur;
+    ctx.strokeStyle = sel ? "#ffd400" : "#5bd17a"; ctx.lineWidth = sel ? 2 : 1.5;
+    ctx.beginPath(); ctx.moveTo(sx - 9, sy); ctx.lineTo(sx - 3, sy); ctx.moveTo(sx + 3, sy); ctx.lineTo(sx + 9, sy);
+    ctx.moveTo(sx, sy - 9); ctx.lineTo(sx, sy - 3); ctx.moveTo(sx, sy + 3); ctx.lineTo(sx, sy + 9); ctx.stroke();
+    if (sel || view.s > 0.6) {
+      ctx.font = "12px system-ui"; ctx.fillStyle = ctx.strokeStyle;
+      ctx.fillText(p.name.replace(/^(left|right) /, ""), sx + 11, sy - 6);
+    }
+  });
+}
+
+let saveTimer = null;
+async function post(name, body) {
+  await fetch("/taps/" + encodeURIComponent(name), { method: "POST", body: JSON.stringify(body) });
+  const s = document.getElementById("saved");
+  s.style.opacity = 1; setTimeout(() => s.style.opacity = 0, 700);
+}
+
+cv.addEventListener("mousedown", e => { drag = { start: [e.offsetX, e.offsetY], last: [e.offsetX, e.offsetY], moved: false }; });
+window.addEventListener("mousemove", e => {
+  const r = cv.getBoundingClientRect();
+  const sx = e.clientX - r.left, sy = e.clientY - r.top;
+  if (meta && img && sx >= 0 && sy >= 0 && sx <= r.width && sy <= r.height) {
+    const [yaw, pitch] = toDeg(...pano(sx, sy));
+    document.getElementById("hud").textContent = `yaw ${yaw.toFixed(2)}°  pitch ${pitch.toFixed(2)}°  zoom ${view.s.toFixed(2)}×`;
+  }
+  if (!drag) return;
+  if (Math.hypot(sx - drag.start[0], sy - drag.start[1]) > 4) drag.moved = true;
+  if (drag.moved) {
+    view.x -= (sx - drag.last[0]) / view.s; view.y -= (sy - drag.last[1]) / view.s;
+    cv.style.cursor = "grabbing";
+  }
+  drag.last = [sx, sy];
+  draw();
+});
+window.addEventListener("mouseup", e => {
+  if (!drag) return;
+  const was = drag; drag = null; cv.style.cursor = "crosshair";
+  if (was.moved || e.target !== cv) return;
+  const [px, py] = pano(e.offsetX, e.offsetY);
+  if (px < 0 || py < 0 || px >= img.width || py >= img.height) return;  // off the panorama
+  const [yaw, pitch] = toDeg(px, py);
+  const name = meta.points[cur].name;
+  taps[name] = { yaw, pitch };
+  post(name, { yaw, pitch });
+  const next = meta.points.findIndex((p, k) => k > cur && !taps[p.name]);
+  select(next < 0 ? cur : next);
+});
+cv.addEventListener("wheel", e => {
+  e.preventDefault();
+  const [px, py] = pano(e.offsetX, e.offsetY);
+  const f = Math.exp(-e.deltaY * 0.0015);
+  view.s = Math.min(16, Math.max(0.05, view.s * f));
+  view.x = px - e.offsetX / view.s; view.y = py - e.offsetY / view.s;
+  draw();
+}, { passive: false });
+
+document.getElementById("skip").onclick = () => {
+  const name = meta.points[cur].name;
+  taps[name] = { skipped: true }; post(name, { skipped: true }); select(cur + 1);
+};
+document.getElementById("clear").onclick = () => {
+  const name = meta.points[cur].name;
+  delete taps[name]; post(name, { delete: true }); renderList(); draw();
+};
+document.getElementById("zoom").onclick = () => zoomTo(meta.points[cur].name);
+document.getElementById("all").onclick = () => fitAll();
+window.addEventListener("keydown", e => {
+  if (e.key === "ArrowDown") { e.preventDefault(); select(cur + 1); }
+  if (e.key === "ArrowUp") { e.preventDefault(); select(cur - 1); }
+  if (e.key === "Backspace") document.getElementById("clear").click();
+});
+window.addEventListener("resize", resize);
+resize();
+load();
+</script>
+</body>
+</html>

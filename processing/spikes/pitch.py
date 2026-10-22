@@ -11,6 +11,7 @@ Run after phase0.py and follow.py (cached cameras):
 
     uv run processing/spikes/pitch.py footage/rec3 <segment> [cx,cz,h,rot_deg,tilt_x,tilt_z,L,W,k]
     uv run processing/spikes/pitch.py footage/rec3 goals
+    uv run processing/spikes/pitch.py footage/rec4 taps     (after tapping keypoints in pitchtap/server.py)
     uv run processing/spikes/pitch.py footage/rec3 fixture footage/fixtures/pitch/<name>
 
 The phones sit at (nearly) one point and the pitch is flat, so one 3x3
@@ -671,6 +672,93 @@ def goals_main(rec: Path) -> None:
                 [cv2.IMWRITE_JPEG_QUALITY, 90])
 
 
+# Tapped keypoints (pitchtap/server.py): name -> pitch (x, z) for a pose, per end. Post bases are
+# only known to stand on the goal line (goals vary in width), so they are fitted to it, not to a point.
+TAP_PX = 3.0      # how well a tap is placed, panorama pixels
+TAP_WEIGHT = 3.0  # a tap's residual counts this much more than a line point's
+
+
+def tap_targets(pose: PitchPose) -> dict:
+    hl, hw, k = pose.L / 2, pose.W / 2, pose.k
+    out = {}
+    for s, e in ((-1, "left"), (1, "right")):
+        x0 = s * hl
+        out[f"{e} corner flag"] = (x0, -hw)
+        out[f"{e} 18-yard goal-line corner"] = (x0, -k * PEN_HALF)
+        out[f"{e} 18-yard front corner"] = (x0 - s * k * PEN_DEPTH, -k * PEN_HALF)
+        out[f"{e} 6-yard goal-line corner"] = (x0, -k * GOAL_HALF)
+        out[f"{e} 6-yard front corner"] = (x0 - s * k * GOAL_DEPTH, -k * GOAL_HALF)
+    return out
+
+
+def taps_main(rec: Path) -> None:
+    """Refit the pitch with the lines plus tapped keypoints (pitch/taps.json, from
+    pitchtap/server.py), starting from the current pitch.json. Writes pitch.json
+    ("fittedWith": "lines+taps"; the previous fit is kept as pitch_before_taps.json),
+    overlay_taps.jpg, and prints how far each tap ends up from its keypoint."""
+    from scipy.ndimage import map_coordinates
+    from scipy.optimize import least_squares
+
+    out = rec / "pitch"
+    pano = Pano()
+    bg = cv2.imread(str(out / "background.png"))
+    taps = {n: t for n, t in json.loads((out / "taps.json").read_text()).items() if not t.get("skipped")}
+    j = json.loads((out / "pitch.json").read_text())
+    (out / "pitch_before_taps.json").write_text(json.dumps(j, indent=1))
+    v = np.array([*j["cameraXZ"], j["heightM"], j["rotRad"], *j["tiltRad"], j["lengthM"], j["widthM"],
+                  j["markingScale"], *j.get("warpDeg", [0.0, 0.0])], float)
+    points = [n for n in taps if not n.endswith("post base")]
+    posts = [n for n in taps if n.endswith("post base")]
+    obs = {n: np.array(pano.to_px(np.array([taps[n]["yaw"]]), np.array([taps[n]["pitch"]]))).ravel() for n in taps}
+    print(f"{len(points)} tapped keypoints, {len(posts)} post bases")
+    mask = line_mask(bg)
+    dist = cv2.distanceTransform((mask == 0).astype(np.uint8), cv2.DIST_L2, 5)
+    free = [0, 1, 2, 3, 4, 5, 6, 7, 9, 10]
+
+    def tap_resid(pose):
+        tg = tap_targets(pose)
+        r = []
+        if points:
+            a = pose.angles(np.array([tg[n] for n in points]))
+            x, y = pano.to_px(a[:, 0], a[:, 1])
+            r.append((np.c_[x, y] - np.array([obs[n] for n in points])).ravel())
+        for n in posts:
+            s = -1 if n.startswith("left") else 1
+            zz = np.linspace(-pose.W / 2, pose.W / 2, 400)
+            a = pose.angles(np.c_[np.full_like(zz, s * pose.L / 2), zz])
+            x, y = pano.to_px(a[:, 0], a[:, 1])
+            r.append([np.min(np.hypot(x - obs[n][0], y - obs[n][1]))])
+        return np.concatenate(r) / TAP_PX if r else np.zeros(0)
+
+    for trunc in (40, 12, 6):
+        dt = cv2.GaussianBlur(np.minimum(dist, trunc), (0, 0), max(1.0, trunc / 6))
+
+        def resid(sub, v=v):
+            p = v.copy()
+            p[free] = sub
+            pose = PitchPose(p)
+            a = pose.angles(pitch_lines(pose.L, pose.W, pose.k))
+            x, y = pano.to_px(a[:, 0], a[:, 1])
+            ok = (x >= 0) & (x < pano.w - 1) & (y >= 0) & (y < pano.h - 1)
+            r = np.zeros(len(x))
+            r[ok] = map_coordinates(dt, [y[ok], x[ok]], order=1)
+            return np.concatenate([r / trunc, TAP_WEIGHT * tap_resid(pose)])
+
+        v[free] = least_squares(resid, v[free], loss="soft_l1", f_scale=0.3, x_scale=X_SCALE[free], diff_step=1e-3).x
+    pose = PitchPose(v)
+    res = TAP_PX * tap_resid(pose)
+    for n, e in zip(points + posts, np.r_[np.hypot(res[:2 * len(points):2], res[1:2 * len(points):2]),
+                                         np.abs(res[2 * len(points):])]):
+        print(f"  {n:30s} {e:5.1f} px from the fit")
+    print(f"pitch {pose.L:.1f} x {pose.W:.1f} m, camera {pose.h:.2f} m up, "
+          f"{-pose.cz - pose.W / 2:.2f} m behind the near touchline")
+    (out / "pitch.json").write_text(json.dumps({**pose_json(pose), "fittedWith": "lines+taps"}, indent=1))
+    img = draw(bg, pano, pose)
+    for n in taps:
+        cv2.drawMarker(img, tuple(int(c) for c in obs[n]), (255, 255, 0), cv2.MARKER_CROSS, 18, 2)
+    cv2.imwrite(str(out / "overlay_taps.jpg"), cv2.resize(img, (pano.w // 2, pano.h // 2)), [cv2.IMWRITE_JPEG_QUALITY, 90])
+
+
 def load_goals(rec: Path):
     path = rec / "pitch" / "goals.json"
     return [g for g in json.loads(path.read_text())["goals"] if g["valid"]] if path.exists() else None
@@ -774,6 +862,8 @@ def main(rec: Path, seg: int, start: list[float] | None = None) -> None:
 if __name__ == "__main__":
     if len(sys.argv) > 2 and sys.argv[2] == "goals":
         goals_main(Path(sys.argv[1]))
+    elif len(sys.argv) > 2 and sys.argv[2] == "taps":
+        taps_main(Path(sys.argv[1]))
     elif len(sys.argv) > 3 and sys.argv[2] == "fixture":
         save_fixture(Path(sys.argv[1]), Path(sys.argv[3]))
     else:
