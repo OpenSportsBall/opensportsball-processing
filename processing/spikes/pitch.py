@@ -9,7 +9,7 @@
 
 Run after phase0.py and follow.py (cached cameras):
 
-    uv run processing/spikes/pitch.py footage/rec3 <segment>
+    uv run processing/spikes/pitch.py footage/rec3 <segment> [cx,cz,h,rot_deg,tilt_x,tilt_z,L,W,k]
     uv run processing/spikes/pitch.py footage/rec3 goals
     uv run processing/spikes/pitch.py footage/rec3 fixture footage/fixtures/pitch/<name>
 
@@ -736,7 +736,7 @@ def save_fixture(rec: Path, dest: Path) -> None:
     print(f"fixture saved to {dest}: background.png, expected.json ({len(expected['keyPointsDeg'])} key points)")
 
 
-def main(rec: Path, seg: int) -> None:
+def main(rec: Path, seg: int, start: list[float] | None = None) -> None:
     out = rec / "pitch"
     out.mkdir(exist_ok=True)
     pano = Pano()
@@ -755,7 +755,7 @@ def main(rec: Path, seg: int) -> None:
     # painted centre circle spans ~32 deg and dips 2.5-5.3 deg, which puts
     # its centre ~31 m away with the camera ~1.9 m up; the near touchline
     # passes under the panorama, so it is within ~2 m of the camera.
-    v0 = START_POSE
+    v0 = start or START_POSE
     cv2.imwrite(str(out / "overlay_init.jpg"), cv2.resize(draw(bg, pano, PitchPose(v0)), (pano.w // 3, pano.h // 3)))
     pose = fit_pose(mask, pano, v0)
     cv2.imwrite(str(out / "overlay.jpg"), cv2.resize(draw(bg, pano, pose), (pano.w // 3, pano.h // 3)))
@@ -772,4 +772,10 @@ if __name__ == "__main__":
     elif len(sys.argv) > 3 and sys.argv[2] == "fixture":
         save_fixture(Path(sys.argv[1]), Path(sys.argv[3]))
     else:
-        main(Path(sys.argv[1]), int(sys.argv[2]))
+        # Optional third argument: a starting guess for another field, as
+        # comma-separated PitchPose parameters (cx,cz,h,rot_deg,tx,tz,L,W,k).
+        start = None
+        if len(sys.argv) > 3:
+            v = [float(x) for x in sys.argv[3].split(",")]
+            start = [*v[:3], float(np.radians(v[3])), *v[4:], *([0.0, 0.0] if len(v) < 11 else [])]
+        main(Path(sys.argv[1]), int(sys.argv[2]), start)
