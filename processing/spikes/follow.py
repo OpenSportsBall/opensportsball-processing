@@ -414,7 +414,10 @@ def setup_cameras(rec: Path, report: dict, devs: dict, flip: list[bool]) -> tupl
     fit_pairs = []
     for sg in sorted({round(x) for x in np.linspace(0, nseg - 1, 6)}):
         o = report["segments"][sg]["offsetS"]
+        dur = min(devs["main"]["segments"][sg]["durationMs"], devs["secondary"]["segments"][sg]["durationMs"]) / 1000
         for t in (40.0, 140.0):
+            if t + abs(o) + 1 > dur:  # the last segment can be short
+                continue
             fit_pairs.append((
                 phase0.frames_at(rec / devs["main"]["segments"][sg]["objectKey"], t, 1, FPS, REF_W, flip[0])[0],
                 phase0.frames_at(rec / devs["secondary"]["segments"][sg]["objectKey"], t + o, 1, FPS, REF_W,
