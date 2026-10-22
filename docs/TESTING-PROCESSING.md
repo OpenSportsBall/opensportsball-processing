@@ -39,6 +39,20 @@ length and width within 1 m, camera height within 0.2 m; 15 key points
 (corners, centre and penalty spots, post bases and tops) within 0.1 deg,
 the lines-only fit within 0.3 deg. One fixture so far: the night game.
 
+### Marked-field benchmark
+
+`footage/fixtures/pitch/night-2026-10-21/` (rec4, the 2026-10-21 night game) has every pitch marking
+traced on the paint and completed, the goal frames fitted to their posts, and 15 keypoints tapped by eye
+(`pitchtap/server.py`), in `benchmark.json`; `benchmark.png` shows it. Score a pitch fit against it:
+
+| Step | Command |
+|---|---|
+| Score fits | `uv run processing/spikes/pitchbench.py footage/fixtures/pitch/night-2026-10-21 <pitch.json> ... [--goals goals.json] [--all]` |
+| Tap keypoints on a recording's panorama | preview `pitch-tap-rec4` (`processing/spikes/pitchtap/server.py <recording> [port]`), then `uv run processing/spikes/pitch.py <recording> taps` |
+
+Fits must be made on the fixture's own `background.png` (its `cameras.json`). Baselines and how the
+benchmark was made are in the fixture's README and `baseline_scores.txt`.
+
 ## 2. Follow cam: must-see boxes
 
 A reviewer draws, on a full-resolution panorama of a moment, the part of the
@@ -261,7 +275,7 @@ way and none raises the found-rate; the backlog has their numbers.
 | Path | What |
 |---|---|
 | `footage/rec3/pitch/` | pitch map, goals, background panorama, overview map |
-| `footage/fixtures/pitch/` | mapping regression fixtures |
+| `footage/fixtures/pitch/` | mapping regression fixtures; `night-2026-10-21/` is the marked-field benchmark |
 | `footage/rec3/follow/` | pass A caches (`passA_*.json`), the last run's path files, `camlog.txt` and `play_debug.json` |
 | `footage/rec3/playeval/` | play-box sets and benched paths, `bench.json` |
 | `footage/rec3/labels/` | the random ball label set (detector training data) |
