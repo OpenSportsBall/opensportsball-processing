@@ -80,6 +80,13 @@ hotspot, ball). Five sets, 26 reviewed moments:
 | `seg0-600` | game 10:00-20:00 | 10:02, 12:09, 12:36, 13:37, 13:50, 14:05, 15:31, 19:36 |
 | `seg0-1200` | game 20:00-30:00 | 22:36 |
 
+rec4 (the 2026-10-21 night game) has one set so far, `footage/rec4cal/playeval/seg0-600` (game
+10:00-20:00: 16:37, 16:54, 16:57, 17:11, 17:25, 18:27; preview `play-eval-rec4cal-600`). Its panoramas
+and boxes are in the corrected camera model (factory focal lengths, levelled to gravity; `cameras.json`
+in the set), the same one as the pitch benchmark `night-2026-10-21`, so score only paths made with those
+cameras. `footage/rec4/playeval/seg0-600` holds the same boxes in the first camera model and is kept only
+to score the first full-game run.
+
 The first two sets had 13 moments until 2026-10-19: the seg 9 box at
 1:57 (the keeper's goal-kick framing, 1.5 s before the kick) was removed
 because a camera that follows the ball into the corner there is right;
