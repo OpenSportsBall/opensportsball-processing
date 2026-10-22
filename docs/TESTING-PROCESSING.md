@@ -51,6 +51,7 @@ box it shows at that frame.
 | Draw and review boxes | preview `play-eval`, `play-eval-seg9`, `play-eval-seg0`, `play-eval-seg0-600`, `play-eval-seg0-1200` (`processing/spikes/evalpage/server.py <set dir> [port]`); sets that start at the game's start list game time, the others clip time |
 | Score path files | `uv run processing/spikes/playeval.py score footage/rec3 <set> <path.json> ...` |
 | Bench many variants | `uv run processing/spikes/playbench.py footage/rec3 [variant ...]` |
+| See what the pipeline saw at moments of a full-game piece (ball candidates, people by role, camera rule) | `uv run processing/spikes/boxes.py footage/rec4 <piece> <mm:ss> ...` (piece time; writes `fullgame/boxes/`) |
 
 Sets: `footage/rec3/playeval/<set>/` with `pano/`, `items.json`,
 `boxes.json` (panorama degrees, so boxes don't depend on any render) and
