@@ -631,8 +631,8 @@ GOAL_RECENT_S = 10.0     # if it doesn't fit, prefer the goal end if play was th
 UNSURE_HFOV = ((1, 55.0), (2, 42.0))
 SURGE_FRAC = 0.6         # surge: this share of the running players moving the same way along the pitch ...
 SURGE_MIN_RUN = 4        # ... with at least this many running: play is at the front of the surge
-SURGE_FRONT_N = 5        # frame the surge's forward-most players (keepers excluded), at least this many ...
-SURGE_FRONT_M = 5.0      # ... plus this much pitch ahead of the frontmost
+SURGE_FRONT_M = 5.0      # frame the runners heading the surge's way (keepers excluded) plus this much pitch
+                         # ahead of the frontmost; too wide for MAX_HFOV: the rearmost are left out
 PEOPLE_VEL_S = 0.5       # peoplesurge: a person's velocity from roles.py frames this far before and after ...
 PEOPLE_MATCH_M = 4.0     # ... matched to the nearest person within this
 SIDE_ZONE_M = 10.0       # sideline: the hotspot within this of the near touchline ...
@@ -804,8 +804,8 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
     (aim where the hotspot will be LEAD_S later), "ball" (aim at the
     tracked ball where there is one, see ball_track; elsewhere as before),
     "surge" (most running players heading the same way along the pitch:
-    frame the SURGE_FRONT_N forward-most players, keepers excluded, and a
-    little pitch ahead of them), "peoplesurge" (surge on roles.py's people
+    frame the runners heading that way, keepers excluded, and a little
+    pitch ahead of the frontmost; the rearmost left out if too wide), "peoplesurge" (surge on roles.py's people
     instead of the tracks: needs "roles"; the people detector finds players
     the tracks miss, such as the far side, so the front of a break is
     seen), "sideline" (play in a near-touchline
@@ -961,6 +961,7 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
             else:
                 who = pos[j][run] if run.sum() >= 2 else pos[j][near] if near.sum() >= 2 else pos[j]
             aim_at = spots[j]
+            surge_view = None
             if people_pv is not None:
                 s_pos, s_vel = people_pv[min(len(people_pv) - 1, int(round(j / FPS * roles_fps)))]
                 s_keep = False  # roles.py's keepers are already left out
@@ -976,16 +977,20 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
                     for sgn in (1, -1):
                         same = (sgn * vx > 0.5 * sp[runners])  # mostly along the pitch, this way
                         if same.mean() >= SURGE_FRAC:
-                            # Everyone but the keepers, ordered along the surge; the front
-                            # SURGE_FRONT_N of them, plus a little pitch ahead, are the view.
-                            field = s_pos
+                            # The runners heading this way (not everyone: subs on the touchline
+                            # and a lone player upfield aren't the surge), front first, plus a
+                            # little pitch ahead; drop the rearmost until it fits.
+                            field = s_pos[runners][same]
                             if s_keep and keepers_at[j]:
                                 keep_ = np.array([all(np.hypot(*(kp - p_)) > ROLE_MATCH_M for kp in keepers_at[j]) for p_ in field])
-                                field = field[keep_] if keep_.sum() >= 2 else field
-                            order = np.argsort(-sgn * field[:, 0])
-                            front = field[order[:int(SURGE_FRONT_N)]]
-                            ahead = np.array([np.clip(front[0, 0] + sgn * SURGE_FRONT_M, -pose.L / 2, pose.L / 2), front[0, 1]])
-                            who = np.vstack([front, ahead[None]])
+                                field = field[keep_] if keep_.sum() >= 1 else field
+                            field = field[np.argsort(-sgn * field[:, 0])]
+                            ahead = np.array([np.clip(field[0, 0] + sgn * SURGE_FRONT_M, -pose.L / 2, pose.L / 2), field[0, 1]])
+                            for m_ in range(len(field), 0, -1):
+                                surge_view = span(np.vstack([ahead[None], field[:m_]]), MAX_HFOV)
+                                if surge_view is not None:
+                                    break
+                            who = np.vstack([ahead[None], field[:m_]])
                             aim_at = who.mean(0)
                             mode[i] = "surge"
                             break
@@ -993,7 +998,7 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
                 v = vel[j][run].mean(0) * FLOW_S
                 n_v = np.hypot(*v)
                 aim_at = spots[j] + v * (min(n_v, FLOW_MAX_M) / max(n_v, 1e-9))
-            last = finish(*target(aim_at, who))
+            last = surge_view if surge_view is not None else finish(*target(aim_at, who))
             if "sideline" in features and len(pos[j]):
                 # Play on a near sideline corner: frame everyone in that corner
                 # (padded) rather than centring on the hotspot.
