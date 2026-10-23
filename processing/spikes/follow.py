@@ -969,7 +969,8 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
             near = pos[i][np.hypot(*(pos[i] - b).T) < 2 * HOT_BANDWIDTH_M] if len(pos[i]) else np.zeros((0, 2))
             last = finish(*target(b, np.vstack([b[None], near])))
         tyaw[i], tpitch[i], thfov[i] = last
-        mode[i] = "ball" if has_ball[i] else "hotspot"
+        # Keep a "surge" or "sideline" set above (it chose this aim); only the ball overrides it.
+        mode[i] = "ball" if has_ball[i] else (mode[i] if mode[i] in ("surge", "sideline") else "hotspot")
     if "unsure" in features:
         # Few runners near the hotspot: the evidence is thin, so stay wide.
         n = np.convolve(near_runners, np.ones(int(FPS)) / int(FPS), mode="same")
