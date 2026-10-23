@@ -605,6 +605,8 @@ SURGE_FRAC = 0.6         # surge: this share of the running players moving the s
 SURGE_MIN_RUN = 4        # ... with at least this many running: play is at the front of the surge
 SURGE_FRONT_N = 5        # frame the surge's forward-most players (keepers excluded), at least this many ...
 SURGE_FRONT_M = 5.0      # ... plus this much pitch ahead of the frontmost
+PEOPLE_VEL_S = 0.5       # peoplesurge: a person's velocity from roles.py frames this far before and after ...
+PEOPLE_MATCH_M = 4.0     # ... matched to the nearest person within this
 SIDE_ZONE_M = 10.0       # sideline: the hotspot within this of the near touchline ...
 SIDE_END_M = 25.0        # ... and this of a goal line: frame everyone in that corner with SIDE_PAD_DEG margin
 SIDE_PAD_DEG = 4.0
@@ -775,7 +777,10 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
     tracked ball where there is one, see ball_track; elsewhere as before),
     "surge" (most running players heading the same way along the pitch:
     frame the SURGE_FRONT_N forward-most players, keepers excluded, and a
-    little pitch ahead of them), "sideline" (play in a near-touchline
+    little pitch ahead of them), "peoplesurge" (surge on roles.py's people
+    instead of the tracks: needs "roles"; the people detector finds players
+    the tracks miss, such as the far side, so the front of a break is
+    seen), "sideline" (play in a near-touchline
     corner: frame everyone in that corner, padded, instead of centring the
     hotspot), "nowalk" / "fastboost" (hotspot weights, see hot_weights), "weak"
     (when few players are tracked or the hotspot jumps around, the player
@@ -841,6 +846,26 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
         inside.append(xz)
     if roles_frames is not None:
         print(f"roles: {n_ref} referee detections dropped; keeper seen in {sum(bool(k_) for k_ in keepers_at)} frames")
+    # peoplesurge: per roles.py frame, the players (no referees or keepers) with a velocity from the
+    # nearest person PEOPLE_VEL_S before and after.
+    people_pv = None
+    if "peoplesurge" in features and roles_frames is not None:
+        r = max(1, int(round(PEOPLE_VEL_S * roles_fps)))
+        def pts(k_):
+            return np.array([q["xz"] for q in roles_frames[k_]["people"]
+                             if q["role"] not in ("referee", "keeper")]).reshape(-1, 2)
+        people_pv = []
+        for k_ in range(len(roles_frames)):
+            now_, a_, b_ = pts(k_), pts(max(0, k_ - r)), pts(min(len(roles_frames) - 1, k_ + r))
+            dt_ = (min(len(roles_frames) - 1, k_ + r) - max(0, k_ - r)) / roles_fps
+            P_, V_ = [], []
+            if len(a_) and len(b_) and dt_ > 0:
+                for x_ in now_:
+                    ia, ib = np.argmin(np.hypot(*(a_ - x_).T)), np.argmin(np.hypot(*(b_ - x_).T))
+                    if np.hypot(*(a_[ia] - x_)) < PEOPLE_MATCH_M and np.hypot(*(b_[ib] - x_)) < PEOPLE_MATCH_M:
+                        P_.append(x_); V_.append((b_[ib] - a_[ia]) / dt_)
+            people_pv.append((np.array(P_).reshape(-1, 2), np.array(V_).reshape(-1, 2)))
+        print(f"peoplesurge: {np.mean([len(p_) for p_, _ in people_pv]):.1f} players with a velocity per roles frame")
     loiter = loiter_cells(inside, pose)
     frames, dropped = [], 0
     for xz in inside:
@@ -909,20 +934,25 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
             else:
                 who = pos[j][run] if run.sum() >= 2 else pos[j][near] if near.sum() >= 2 else pos[j]
             aim_at = spots[j]
-            if "surge" in features and len(vel[j]):
+            if people_pv is not None:
+                s_pos, s_vel = people_pv[min(len(people_pv) - 1, int(round(j / FPS * roles_fps)))]
+                s_keep = False  # roles.py's keepers are already left out
+            else:
+                s_pos, s_vel, s_keep = pos[j], vel[j], True
+            if ("surge" in features or people_pv is not None) and len(s_vel):
                 # Most of the running players heading the same way along the pitch:
                 # play is at the front of the surge, not at its densest point.
-                sp = np.hypot(*vel[j].T)
+                sp = np.hypot(*s_vel.T)
                 runners = sp > play.RUN_SPEED
                 if runners.sum() >= SURGE_MIN_RUN:
-                    vx = vel[j][runners, 0]
+                    vx = s_vel[runners, 0]
                     for sgn in (1, -1):
                         same = (sgn * vx > 0.5 * sp[runners])  # mostly along the pitch, this way
                         if same.mean() >= SURGE_FRAC:
                             # Everyone but the keepers, ordered along the surge; the front
                             # SURGE_FRONT_N of them, plus a little pitch ahead, are the view.
-                            field = pos[j]
-                            if keepers_at[j]:
+                            field = s_pos
+                            if s_keep and keepers_at[j]:
                                 keep_ = np.array([all(np.hypot(*(kp - p_)) > ROLE_MATCH_M for kp in keepers_at[j]) for p_ in field])
                                 field = field[keep_] if keep_.sum() >= 2 else field
                             order = np.argsort(-sgn * field[:, 0])
