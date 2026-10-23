@@ -442,6 +442,8 @@ STILL_SPEED = 1.0        # m/s: a restart taker stands about still
 TAKER_ALONE_M = 12.0     # ... this far from everyone else (goal kicks, corners)
 THROW_ALONE_M = 4.0      # throw-ins happen closer to other players
 RESTART_MAX_HFOV = 95.0  # a restart may need a wider view: taker and receivers
+THROW_NEAR_PLAY_M = 20.0  # a throw-in taker stands this near (along the line) where play just was; a corner taker
+RESTART_BALL_S = 5.0      # ... at that end. Where play was: the ball seen this recently before the lull, else the held hotspot
 LOITER_SEG_M = 4.0       # stretches along each touchline and goal line, for finding where non-players stand:
 LOITER_IN_M = 0.5        # ... outside the line or less than this inside it
 LOITER_IN_FAR_M = 2.0    # ... on the far touchline (feet there are placed 1-2 m off in depth)
@@ -566,9 +568,12 @@ def loiter_cells(frames_xz, pose):
     return is_loiter
 
 
-def restart_taker(pos, vel, pose):
+def restart_taker(pos, vel, pose, play=None):
     """During a lull: a still player alone in a goal area, near a corner, or
-    on a touchline. Returns (kind, position) or None."""
+    on a touchline. With `play` (where play just was), a throw-in taker must
+    be within THROW_NEAR_PLAY_M of it along the line, a corner taker at its
+    end, and a goal-kick taker at its end with play within GK_NEAR_GOAL_M of
+    that goal line. Returns (kind, position) or None."""
     import pitch as P
 
     if len(pos) < 3:
@@ -584,10 +589,16 @@ def restart_taker(pos, vel, pose):
         others = np.delete(pos, j, axis=0)
         alone = np.hypot(*(others - pos[j]).T).min()
         if abs(x) >= goal_x and abs(z) <= goal_z and alone >= TAKER_ALONE_M:
+            if play is not None and (np.sign(x) != np.sign(play[0]) or hl - abs(play[0]) > GK_NEAR_GOAL_M):
+                continue  # an idle keeper: play wasn't near this goal
             kind = "goal kick"
         elif abs(x) >= hl - 4 and abs(z) >= hw - 4 and alone >= TAKER_ALONE_M:
+            if play is not None and np.sign(x) != np.sign(play[0]):
+                continue
             kind = "corner"
         elif abs(z) >= hw - 1.5 and alone >= THROW_ALONE_M:
+            if play is not None and abs(x - play[0]) > THROW_NEAR_PLAY_M:
+                continue
             kind = "throw-in"
         else:
             continue
@@ -1053,6 +1064,8 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
             else:
                 k = max(0, i - int(HOLD_BACK_S * FPS))
             held = (tyaw[k], tpitch[k], thfov[k])
+            seen = np.where(has_ball[max(0, i - int(RESTART_BALL_S * FPS)):i])[0]
+            play_at = ball_at[max(0, i - int(RESTART_BALL_S * FPS)) + seen[-1]] if len(seen) else spots[k]
             takers = 0
             for f in range(i, j):
                 if has_ball[f]:
@@ -1071,7 +1084,7 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
                         tyaw[f], tpitch[f], thfov[f] = fr if fr is not None else finish(*target(b, np.vstack([b[None], grp])))
                         mode[f] = "ballhold"
                         continue
-                tk = restart_taker(pos[f], vel[f], pose)
+                tk = restart_taker(pos[f], vel[f], pose, None if np.isnan(play_at[0]) else play_at)
                 if tk is not None:
                     kind, at = tk
                     others = pos[f][np.hypot(*(pos[f] - at).T) > 1.0]
