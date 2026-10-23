@@ -442,8 +442,9 @@ STILL_SPEED = 1.0        # m/s: a restart taker stands about still
 TAKER_ALONE_M = 12.0     # ... this far from everyone else (goal kicks, corners)
 THROW_ALONE_M = 4.0      # throw-ins happen closer to other players
 RESTART_MAX_HFOV = 95.0  # a restart may need a wider view: taker and receivers
-LOITER_CELL_M = 4.0      # occupancy grid for finding where non-players stand
-LOITER_EDGE_M = 4.0      # ... within this far of a touchline or goal line
+LOITER_SEG_M = 4.0       # stretches along each touchline and goal line, for finding where non-players stand:
+LOITER_IN_M = 0.5        # ... outside the line or less than this inside it
+LOITER_IN_FAR_M = 2.0    # ... on the far touchline (feet there are placed 1-2 m off in depth)
 LOITER_FRAC = 0.10       # ... occupied this often: subs, bench, spectators
 
 
@@ -531,22 +532,38 @@ def hotspots(pos, vel, fps, features=()):
     return spots
 
 
-def loiter_cells(frames_xz, pose):
-    """Grid cells near the pitch's edge that someone occupies in at least
-    LOITER_FRAC of the frames: where subs, the bench and spectators stand,
-    not where play goes. Returns a set of (ix, iz), dilated by one cell."""
+def loiter_band(x, z, pose):
+    """The line nearest (x, z) and the LOITER_SEG_M stretch of it, if (x, z)
+    is in that line's loiter band (outside it, or less than LOITER_IN_M inside;
+    LOITER_IN_FAR_M on the far touchline); else None."""
     hl, hw = pose.L / 2, pose.W / 2
-    counts: dict[tuple[int, int], int] = {}
+    inward = {"near": z + hw, "far": hw - z, "left": x + hl, "right": hl - x}
+    line = min(inward, key=inward.get)
+    if inward[line] >= (LOITER_IN_FAR_M if line == "far" else LOITER_IN_M):
+        return None
+    along = x if line in ("near", "far") else z
+    return line, int(np.floor(along / LOITER_SEG_M))
+
+
+def loiter_cells(frames_xz, pose):
+    """Stretches of the touchlines and goal lines whose loiter band someone
+    occupies in at least LOITER_FRAC of the frames: where subs, the bench and
+    spectators stand, not where play goes. Widened by one stretch either way
+    along the line (never inward). Returns is_loiter(x, z)."""
+    counts: dict[tuple[str, int], int] = {}
     for xz in frames_xz:
-        cells = {(int(np.floor(x / LOITER_CELL_M)), int(np.floor(z / LOITER_CELL_M))) for x, z in xz
-                 if abs(x) >= hl - LOITER_EDGE_M or abs(z) >= hw - LOITER_EDGE_M}
-        for c in cells:
+        for c in {loiter_band(x, z, pose) for x, z in xz} - {None}:
             counts[c] = counts.get(c, 0) + 1
     busy = {c for c, n in counts.items() if n >= LOITER_FRAC * len(frames_xz)}
     top = sorted(counts.items(), key=lambda kv: -kv[1])[:5]
-    print("loiter: busiest edge cells", [((a * LOITER_CELL_M, b * LOITER_CELL_M), round(n / len(frames_xz), 2))
-                                          for (a, b), n in top])
-    return {(a + da, b + db) for a, b in busy for da in (-1, 0, 1) for db in (-1, 0, 1)}
+    print("loiter: busiest stretches", [(line, seg * LOITER_SEG_M, round(n / len(frames_xz), 2))
+                                        for (line, seg), n in top])
+    stretches = {(line, seg + d) for line, seg in busy for d in (-1, 0, 1)}
+
+    def is_loiter(x, z):
+        return loiter_band(x, z, pose) in stretches
+    is_loiter.stretches = stretches
+    return is_loiter
 
 
 def restart_taker(pos, vel, pose):
@@ -667,7 +684,7 @@ def ball_track(rec: Path, start: float, T: int, pos, pose, loiter=None) -> np.nd
     # Players on the pitch at the candidates' frame rate (for track scoring).
     people = [pos[min(T - 1, int(round(k * FPS / bf)))] for k in range(n)]
     cands = [[d for d in f["detections"] if B.usable(d, pose)] for f in data["frames"]]
-    spots = B.static_spots(cands, bf, loiter, LOITER_CELL_M, pose)
+    spots = B.static_spots(cands, bf, loiter, pose)
     keep = [[d for d in fr if all(np.hypot(*(np.array(d["xz"]) - s_)) > B.STATIC_RADIUS for s_ in spots)]
             for fr in cands]
     if os.environ.get("OSB_BALL_CHAIN"):  # ball.py's online chain instead of the offline path
@@ -869,11 +886,10 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
     loiter = loiter_cells(inside, pose)
     frames, dropped = [], 0
     for xz in inside:
-        keep = [(x, z) for x, z in xz
-                if (int(np.floor(x / LOITER_CELL_M)), int(np.floor(z / LOITER_CELL_M))) not in loiter]
+        keep = [(x, z) for x, z in xz if not loiter(x, z)]
         dropped += len(xz) - len(keep)
         frames.append({"detections": [{"cls": "person", "onPitch": True, "xz": [x, z]} for x, z in keep]})
-    print(f"play: {sum(map(len, inside))} detections inside the lines; {len(loiter)} loiter cells"
+    print(f"play: {sum(map(len, inside))} detections inside the lines; {len(loiter.stretches)} loiter stretches"
           f" drop {dropped} ({100 * dropped / max(1, sum(map(len, inside))):.0f}%)")
     tracks = play.track_players(frames, FPS, TRACK_SMOOTH_S)
     pos, vel = play.per_frame(tracks, len(frames))

@@ -95,7 +95,7 @@ def load(rec: Path):
     return fps, frames, balls, people
 
 
-def static_spots(balls, fps, loiter=None, cell_m: float = 4.0, pose=None):
+def static_spots(balls, fps, loiter=None, pose=None):
     """Places with candidates spread over STATIC_MIN_S seconds that never
     left STATIC_RADIUS: grid the pitch, keep cells whose first and last
     sighting are far apart in time and whose sightings fill the span."""
@@ -111,7 +111,7 @@ def static_spots(balls, fps, loiter=None, cell_m: float = 4.0, pose=None):
         near = np.hypot(a[:, 1] - a[k, 1], a[:, 2] - a[k, 2]) < STATIC_RADIUS
         t = a[near, 0]
         span = (t.max() - t.min()) / fps
-        in_loiter = bool(loiter) and (int(np.floor(a[k, 1] / cell_m)), int(np.floor(a[k, 2] / cell_m))) in loiter
+        in_loiter = loiter is not None and loiter(a[k, 1], a[k, 2])  # follow.py's loiter_cells
         if pose is not None and (abs(a[k, 1]) > pose.L / 2 or abs(a[k, 2]) > pose.W / 2):
             in_loiter = True  # outside the lines
         min_s, min_hits = (STATIC_LOITER_S, STATIC_LOITER_HITS) if in_loiter else (STATIC_MIN_S, STATIC_MIN_HITS)
