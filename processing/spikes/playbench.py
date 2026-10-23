@@ -8,7 +8,11 @@
 """Runs follow-cam variants on the labelled clips and scores them against
 the reviewed must-see boxes (playeval.py).
 
-    uv run processing/spikes/playbench.py footage/rec3 [variant ...]
+    uv run processing/spikes/playbench.py footage/rec3 [footage/rec4cal ...] [variant ...]
+
+The clips are the must-see sets of each recording given: every
+<recording>/playeval/<set>/ with a clip.json ({"segment", "startS",
+"seconds"}: the follow.py clip its boxes are timed in).
 
 Each clip's player detections (follow.py pass A) are cached after the
 first run, so a variant plans its path in seconds. Paths are kept in
@@ -35,8 +39,18 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
 import playeval  # noqa: E402
 
-CLIPS = [("seg9-60", 9, 60.0, 120.0), ("seg3-225", 3, 225.0, 120.0), ("seg0-0", 0, 0.0, 600.0),
-         ("seg0-600", 0, 600.0, 600.0), ("seg0-1200", 0, 1200.0, 600.0)]
+
+
+def clips(rec: Path) -> list[tuple[str, int, float, float]]:
+    """(set, segment, start s, seconds) for each must-see set with a clip.json."""
+    out = []
+    for f in sorted((rec / "playeval").glob("*/clip.json")):
+        c = json.loads(f.read_text())
+        out.append((f.parent.name, int(c["segment"]), float(c["startS"]), float(c["seconds"])))
+    if not out:
+        raise SystemExit(f"no must-see sets with a clip.json in {rec / 'playeval'}")
+    return out
+
 A = "goalkick,goalframe,unsure"
 VARIANTS = {
     "A": A,
@@ -71,7 +85,7 @@ VARIANTS = {
 
 def run_variant(rec: Path, name: str, features: str) -> dict[str, Path]:
     paths = {}
-    for set_name, seg, start, seconds in CLIPS:
+    for set_name, seg, start, seconds in clips(rec):
         dest = rec / "playeval" / set_name / "paths" / f"{name}.json"
         dest.parent.mkdir(parents=True, exist_ok=True)
         env = dict(os.environ, OSB_NO_RENDER="1")
@@ -94,7 +108,7 @@ def run_variant(rec: Path, name: str, features: str) -> dict[str, Path]:
 def score_variant(rec: Path, name: str, paths: dict[str, Path]) -> dict:
     caps, covs, widths, cap_widths, per = 0, [], [], [], []
     n = 0
-    for set_name, *_ in CLIPS:
+    for set_name, *_ in clips(rec):
         out = rec / "playeval" / set_name
         items = json.loads((out / "items.json").read_text())
         boxes = json.loads((out / "boxes.json").read_text())
@@ -118,18 +132,28 @@ def score_variant(rec: Path, name: str, paths: dict[str, Path]) -> dict:
             "capWidth": float(np.median(cap_widths)) if cap_widths else float("nan"), "per": per}
 
 
-def main(rec: Path, names: list[str]) -> None:
+def main(recs: list[Path], names: list[str]) -> None:
     todo = {n: VARIANTS.get(n, n) for n in (names or VARIANTS)}
-    results = []
+    results = {rec: [] for rec in recs}
     for name, feats in todo.items():
-        paths = run_variant(rec, name, feats)
-        r = score_variant(rec, name, paths)
-        results.append(r)
-        print(f"{name:22s} captured {r['captured']:2d}/{r['n']}  mean cov {100 * r['meanCov']:3.0f}%"
-              f"  width median {r['medianWidth']:3.0f} / at captures {r['capWidth']:3.0f}   {' '.join(r['per'])}",
-              flush=True)
-    (rec / "playeval" / "bench.json").write_text(json.dumps(results, indent=1))
+        caps = n = 0
+        for rec in recs:
+            paths = run_variant(rec, name, feats)
+            r = score_variant(rec, name, paths)
+            results[rec].append(r)
+            caps, n = caps + r["captured"], n + r["n"]
+            print(f"{name:22s} {rec.name:8s} captured {r['captured']:2d}/{r['n']}  mean cov {100 * r['meanCov']:3.0f}%"
+                  f"  width median {r['medianWidth']:3.0f} / at captures {r['capWidth']:3.0f}   {' '.join(r['per'])}",
+                  flush=True)
+        if len(recs) > 1:
+            print(f"{name:22s} {'all':8s} captured {caps:2d}/{n}", flush=True)
+    for rec in recs:
+        (rec / "playeval" / "bench.json").write_text(json.dumps(results[rec], indent=1))
 
 
 if __name__ == "__main__":
-    main(Path(sys.argv[1]), sys.argv[2:])
+    args = sys.argv[1:]
+    recs = [Path(a) for a in args if (Path(a) / "playeval").is_dir()]
+    if not recs:
+        raise SystemExit(__doc__)
+    main(recs, [a for a in args if Path(a) not in recs])

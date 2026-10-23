@@ -64,13 +64,14 @@ box it shows at that frame.
 | Panoramas at chosen clip times | `uv run processing/spikes/playeval.py make footage/rec3 <set> <segment> <start s> <clip t> ...` |
 | Draw and review boxes | preview `play-eval`, `play-eval-seg9`, `play-eval-seg0`, `play-eval-seg0-600`, `play-eval-seg0-1200` (`processing/spikes/evalpage/server.py <set dir> [port]`); sets that start at the game's start list game time, the others clip time |
 | Score path files | `uv run processing/spikes/playeval.py score footage/rec3 <set> <path.json> ...` |
-| Bench many variants | `uv run processing/spikes/playbench.py footage/rec3 [variant ...]` |
+| Bench many variants | `uv run processing/spikes/playbench.py footage/rec3 footage/rec4cal [variant ...]` (any recordings; each set with a `clip.json`) |
 | See what the pipeline saw at moments of a full-game piece (ball candidates, people by role, camera rule) | `uv run processing/spikes/boxes.py footage/rec4 <piece> <mm:ss> ...` (piece time; writes `fullgame/boxes/`) |
 
-Sets: `footage/rec3/playeval/<set>/` with `pano/`, `items.json`,
+Sets: `footage/<recording>/playeval/<set>/` with `clip.json` (the follow.py clip its boxes are
+timed in: `segment`, `startS`, `seconds`; the bench runs every set that has one), `pano/`, `items.json`,
 `boxes.json` (panorama degrees, so boxes don't depend on any render) and
 `paths/<variant>.json` plus `<variant>_debug.json` (per-frame mode, aim,
-hotspot, ball). Five sets, 26 reviewed moments:
+hotspot, ball). rec3 has five sets, 26 reviewed moments:
 
 | Set | Clip | Moments |
 |---|---|---|
@@ -87,8 +88,16 @@ rec4 (the 2026-10-21 night game) has two sets, `footage/rec4cal/playeval/seg0-60
 half, kicked by a group in pink bibs. Their panoramas
 and boxes are in the corrected camera model (factory focal lengths, levelled to gravity; `cameras.json`
 in the set), the same one as the pitch benchmark `night-2026-10-21`, so score only paths made with those
-cameras. `footage/rec4/playeval/seg0-600` holds the same boxes in the first camera model and is kept only
-to score the first full-game run.
+cameras. Both have a `clip.json`, so `playbench.py footage/rec3 footage/rec4cal` benches all 41 moments
+together (the pass-A caches for both clips are in `footage/rec4cal/follow/`). `footage/rec4/playeval/seg0-600`
+holds the same boxes in the first camera model and is kept only to score the first full-game run (no
+`clip.json`: not benched).
+
+Bench of both recordings on 2026-10-23 (after the loiter-band, ball-jump, restart and surge changes):
+`goalkick,goalframe,unsure,ball,goalin,ballhold,roles,kickoff,peoplesurge` captures 29/41 (rec3 20/26,
+rec4 9/15: 10:00-20:00 4/6, 20:00-30:00 5/9); without `peoplesurge` 28/41 (20/26, 8/15). Sets are
+benched in name order, so a bench line's per-moment list runs seg0-0, seg0-1200, seg0-600, seg3-225,
+seg9-60.
 
 The first two sets had 13 moments until 2026-10-19: the seg 9 box at
 1:57 (the keeper's goal-kick framing, 1.5 s before the kick) was removed
@@ -98,8 +107,11 @@ figures quoted as "/13" were measured with it. The three `seg0` sets
 (`detect/ball_0_<start>_600.win.json`, `roles_0_<start>_600.json`).
 
 `playbench.py` caches follow.py's pass A (player detections) per clip in
-`footage/rec3/follow/passA_<seg>_<start>_<seconds>.json`, so a variant
-plans in seconds. Variants are follow.py feature strings; a feature
+`footage/<recording>/follow/passA_<seg>_<start>_<seconds>.json`, so a variant
+plans in seconds (the first run of a 10-minute clip takes ~30 min). It writes
+into the recording's `follow/`, as fullgame.py does: don't bench a recording
+while a full-game run on it is going (bench a mirror of symlinks with its own
+`follow/` instead). Variants are follow.py feature strings; a feature
 `NAME=value` overrides a constant for that run (`MIN_HFOV=50`,
 `ball.MIN_JUDGE=0`). `OSB_BALL_TAG` selects the ball candidate file
 (`win` for ballwin.py's; unset prefers it when present).
