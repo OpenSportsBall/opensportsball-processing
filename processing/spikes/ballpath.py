@@ -73,6 +73,8 @@ BRIDGE_S = 1.0        # frames skipped by an edge are interpolated when the skip
 HOLD_S = 0.0          # each run's end positions are held this long into the frames before and after it (0: off)
 SMOOTH_S = 0.0        # half-width of a triangular smoothing of the positions along a run (0: none)
 MAX_SPEED = B.MAX_SPEED
+JUMP_GAP_S = 3.0      # runs this close in time whose join would need more than MAX_SPEED are two balls:
+                      # the one farther from the players' median is dropped (a spare ball kicked around)
 
 
 def node_costs(cands, people):
@@ -190,6 +192,7 @@ def track(cands, people, n, fps):
             for m in range(a + 1, i):
                 w = (m - a) / (i - a)
                 est[m] = (1 - w) * est[a] + w * est[i]
+    drop_jumps(est, src, people, fps)
     if SMOOTH_S > 0:
         est = smooth(est, fps)
     if HOLD_S > 0:
@@ -203,6 +206,44 @@ def track(cands, people, n, fps):
                     held[m] = est[i]
         est = held
     return est, src
+
+
+def drop_jumps(est, src, people, fps):
+    """Two runs at most JUMP_GAP_S apart whose join would need more than
+    MAX_SPEED are different balls (the path re-enters from "no ball"
+    anywhere for GAP_PENALTY): drop the one farther from the players'
+    median over its frames, or the shorter one with no players. In place."""
+    runs, i, n = [], 0, len(est)
+    while i < n:
+        if est[i] is None:
+            i += 1
+            continue
+        j = i
+        while j < n and est[j] is not None:
+            j += 1
+        runs.append((i, j))
+        i = j
+
+    def off_play(r):
+        d = [np.hypot(*(est[m] - np.median(people[m], axis=0))) for m in range(*r) if len(people[m])]
+        return float(np.mean(d)) if d else None
+
+    kept = None
+    for r in runs:
+        if kept is not None:
+            gap = (r[0] - (kept[1] - 1)) / fps
+            if gap <= JUMP_GAP_S and np.hypot(*(est[r[0]] - est[kept[1] - 1])) > MAX_SPEED * gap:
+                da, db = off_play(kept), off_play(r)
+                if da is None or db is None:
+                    drop = r if r[1] - r[0] <= kept[1] - kept[0] else kept
+                else:
+                    drop = r if db >= da else kept
+                for m in range(*drop):
+                    est[m] = src[m] = None
+                if drop is kept:
+                    kept = r
+                continue
+        kept = r
 
 
 def smooth(est, fps):
