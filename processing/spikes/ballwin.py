@@ -4,7 +4,7 @@
 # /// script
 # requires-python = ">=3.11,<3.14"
 # dependencies = ["numpy>=1.26", "scipy>=1.13", "opencv-python-headless>=4.10", "torch>=2.4",
-#                 "rfdetr>=1.11"]
+#                 "rfdetr>=1.11", "pyyaml>=6"]
 # ///
 """Ball candidates for a clip with the detector run in search windows.
 
@@ -18,9 +18,17 @@ window (a 320 px crop upscaled) when the ball is expected to be small.
 A full scan runs every FULL_EVERY_S, or once the ball has been lost for
 LOST_S. Every candidate is scored by balljudge.py's crop judge inline.
 
+OSB_WIN_WASB=1 adds WASB (ballheat.py's multi-frame heatmap model) as a
+second source: the clip is decoded at 3x the rate so each frame has its
+neighbours, and WASB runs in fp16 on 512x288 tiles of the frame downscaled
+2x and 4x (WASB_SCALES; the far balls come from these) in every full scan,
+and otherwise on one window around the prediction (2x when the ball is
+expected small, else 4x). Heatmap peaks become candidates with the peak
+as their confidence, unless an RF-DETR box already holds the same ball.
+
 Writes <recording>/detect/ball_<segment>_<start>_<seconds>.win.json in
-ballclip.py's format (plus "src": scan / win / zoom per candidate) and
-prints the tiles per frame against a full scan.
+ballclip.py's format (plus "src": scan / win / zoom / wasb / wasbwin per
+candidate) and prints the tiles per frame against a full scan.
 """
 
 from __future__ import annotations
@@ -58,6 +66,79 @@ V_DECAY = 0.85          # ... and shrinks by this per frame while the ball is un
 JUMP_MAX_M = 15.0       # a candidate further than this from the last sighting needs ACCEPT_JUMP_CONF
 WIN = 640
 ZOOM_CROP = 320
+WASB = bool(os.environ.get("OSB_WIN_WASB"))
+WASB_SCALES = (2, 4)    # WASB's full scans: 512x288 tiles of the frame downscaled this much
+WASB_MIN = 0.05         # heatmap peaks above this are candidates (ballheat.py's PEAK_MIN) ...
+WASB_TOP = 30           # ... at most this many per phone and frame, the strongest
+WASB_SAME_DIAM = 1.5    # a peak within this many ball diameters (or 8 px) of an RF-DETR box is that ball
+
+
+class Wasb:
+    """WASB in fp16 on the GPU: three consecutive frames stacked as
+    channels in, the middle frame's heatmap out, per 512x288 tile of a
+    downscaled frame."""
+
+    def __init__(self, dev: torch.device):
+        import ballheat
+
+        self.model = ballheat.Heat("wasb", dev).model.half()
+        self.tile_grid, self.tw, self.th = ballheat.tile_grid, ballheat.IN_W, ballheat.IN_H
+        self.mean = torch.tensor(ballheat.MEAN, device=dev).view(1, 3, 1, 1)
+        self.std = torch.tensor(ballheat.STD, device=dev).view(1, 3, 1, 1)
+        ys, xs = torch.meshgrid(torch.arange(self.th, device=dev, dtype=torch.float32),
+                                torch.arange(self.tw, device=dev, dtype=torch.float32), indexing="ij")
+        self.xs, self.ys = xs, ys
+        self.tiles = 0
+
+    def scan_corners(self, h: int, w: int) -> list[tuple[int, int, int]]:
+        return [(x, y, s) for s in WASB_SCALES for x, y in self.tile_grid(h, w, s)]
+
+    def window_corner(self, h: int, w: int, px: tuple[float, float], s: int) -> tuple[int, int, int]:
+        x0 = int(np.clip(px[0] - self.tw * s / 2, 0, w - self.tw * s)) // s * s
+        y0 = int(np.clip(px[1] - self.th * s / 2, 0, h - self.th * s)) // s * s
+        return x0, y0, s
+
+    @torch.no_grad()
+    def __call__(self, frames: torch.Tensor, corners: list[tuple[int, int, int]]) -> list[list[float]]:
+        """frames (3, 3, H, W) RGB in [0, 1] (previous, this, next) ->
+        peaks [x, y, score, scale] in frame pixels, merged, strongest first."""
+        x = ((frames - self.mean) / self.std).half()
+        pyr = {s: F.avg_pool2d(x, s) for s in {c[2] for c in corners}}
+        batch = torch.stack([pyr[s][:, :, y // s:y // s + self.th, x0 // s:x0 // s + self.tw].reshape(9, self.th, self.tw)
+                             for x0, y, s in corners])
+        hm = torch.sigmoid(self.model(batch)[0][:, 1].float())
+        self.tiles += len(corners)
+        top = F.max_pool2d(hm[:, None], 5, 1, 2)[:, 0]
+        w3 = F.avg_pool2d(hm[:, None], 3, 1, 1)[:, 0]
+        cx = F.avg_pool2d((hm * self.xs)[:, None], 3, 1, 1)[:, 0] / w3.clamp_min(1e-6)
+        cy = F.avg_pool2d((hm * self.ys)[:, None], 3, 1, 1)[:, 0] / w3.clamp_min(1e-6)
+        k, iy, ix = ((hm == top) & (hm > WASB_MIN)).nonzero(as_tuple=True)
+        got = torch.stack([k.float(), cx[k, iy, ix], cy[k, iy, ix], hm[k, iy, ix]], 1).cpu().numpy()
+        cands = []
+        for t, u, v, score in got:
+            x0, y0, s = corners[int(t)]
+            cands.append([x0 + u * s + (s - 1) / 2, y0 + v * s + (s - 1) / 2, float(score), s])
+        kept = []
+        for c in sorted(cands, key=lambda c: -c[2]):
+            if not any(np.hypot(c[0] - q[0], c[1] - q[1]) < 8 * max(c[3], q[3]) for q in kept):
+                kept.append(c)
+            if len(kept) >= WASB_TOP:
+                break
+        return kept
+
+
+def triplets(stream):
+    """A frame stream at 3x the clip's rate -> (previous, this, next) around
+    every third frame (the clip's own frames; the first has no previous
+    and repeats itself)."""
+    prev = None
+    while True:
+        try:
+            a, b, c = next(stream), next(stream), next(stream)
+        except StopIteration:
+            return
+        yield (a if prev is None else prev, a, b)
+        prev = c
 
 
 def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: float) -> None:
@@ -78,8 +159,14 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
     dev = gpu.device()
     model = rfdetr.RFDETRMedium(pretrain_weights=str(ckpt))
     W, H = follow.SRC_W, follow.SRC_H
-    streams = [follow.prefetch(follow.game_stream(rec, devs, report, ph, seg, start, seconds, W, fps=fps))
-               for ph in (0, 1)]
+    wasb = Wasb(dev) if WASB else None
+    if wasb:
+        streams = [triplets(follow.prefetch(follow.game_stream(rec, devs, report, ph, seg, start, seconds, W,
+                                                               fps=3 * fps), depth=9)) for ph in (0, 1)]
+    else:
+        streams = [follow.prefetch(follow.game_stream(rec, devs, report, ph, seg, start, seconds, W, fps=fps))
+                   for ph in (0, 1)]
+    t_wasb = 0.0
 
     def to_pixel(phone, xz):
         """Predicted pitch position -> this phone's pixel, or None if out of frame."""
@@ -120,28 +207,56 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
             pred = None
         found = []
         for phone, (buf, fl) in enumerate(((fa, flip[0]), (fb, flip[1]))):
-            img = detect.nv12_to_rgb(*gpu.upload_nv12(buf, W, H, dev))
-            img = img.flip(1, 2) if fl else img
+            bufs = buf if wasb else (buf,)
+            buf = bufs[1] if wasb else buf
+
+            def rgb(b):
+                im = detect.nv12_to_rgb(*gpu.upload_nv12(b, W, H, dev))
+                return im.flip(1, 2) if fl else im
+
+            img = rgb(buf)
             rows = []
             if full:
                 tl = detect.tiles(H, W)
                 rows += [(r, "scan") for r in run(img, tl)]
                 tiles_total += len(tl)
-            if pred is not None:
-                px = to_pixel(phone, pred)
-                if px is not None:
-                    x0 = int(np.clip(px[0] - WIN / 2, 0, W - WIN)); y0 = int(np.clip(px[1] - WIN / 2, 0, H - WIN))
-                    rows += [(r, "win") for r in run(img, [(x0, y0)])]
+            px = to_pixel(phone, pred) if pred is not None else None
+            peaks = []
+            if wasb and (full or px is not None):
+                tw0 = time.time()
+                if full:
+                    corners, wsrc = wasb.scan_corners(H, W), "wasb"
+                else:
+                    corners = [wasb.window_corner(H, W, px, 2 if diam_at(roles[phone], *px) < ZOOM_BELOW_PX else 4)]
+                    wsrc = "wasbwin"
+                peaks = [(c, wsrc) for c in wasb(torch.stack([rgb(bufs[0]), img, rgb(bufs[2])]), corners)]
+                t_wasb += time.time() - tw0
+            if px is not None:
+                x0 = int(np.clip(px[0] - WIN / 2, 0, W - WIN)); y0 = int(np.clip(px[1] - WIN / 2, 0, H - WIN))
+                rows += [(r, "win") for r in run(img, [(x0, y0)])]
+                tiles_total += 1
+                if diam_at(roles[phone], *px) < ZOOM_BELOW_PX:
+                    x0 = int(np.clip(px[0] - ZOOM_CROP / 2, 0, W - ZOOM_CROP))
+                    y0 = int(np.clip(px[1] - ZOOM_CROP / 2, 0, H - ZOOM_CROP))
+                    rows += [(r, "zoom") for r in run(img, [(x0, y0)], scale=2.0)]
                     tiles_total += 1
-                    if diam_at(roles[phone], *px) < ZOOM_BELOW_PX:
-                        x0 = int(np.clip(px[0] - ZOOM_CROP / 2, 0, W - ZOOM_CROP))
-                        y0 = int(np.clip(px[1] - ZOOM_CROP / 2, 0, H - ZOOM_CROP))
-                        rows += [(r, "zoom") for r in run(img, [(x0, y0)], scale=2.0)]
-                        tiles_total += 1
-            if not rows:
+            if not rows and not peaks:
                 continue
-            kept = detect.nms(np.array([r for r, _ in rows]))
+            kept = detect.nms(np.array([r for r, _ in rows])) if rows else np.zeros((0, 5))
             src_of = {tuple(np.round(r[:4])): s for r, s in rows}
+            extra = []
+            for (x, y, score, _), s in peaks:
+                d = diam_at(roles[phone], x, y)
+                if any(np.hypot(x - (x1 + x2) / 2, y - (y1 + y2) / 2) < max(8.0, WASB_SAME_DIAM * d)
+                       for x1, y1, x2, y2, _ in kept):
+                    continue
+                box = np.array([x - d / 2, y - d / 2, x + d / 2, y + d / 2, score])
+                extra.append(box)
+                src_of[tuple(np.round(box[:4]))] = s
+            if extra:
+                kept = np.vstack([kept, extra])
+            if not len(kept):
+                continue
             bgr = (img.permute(1, 2, 0).cpu().numpy()[..., ::-1] * 255).astype(np.uint8)
             crops = np.stack([balljudge.crop_at(bgr, (x1 + x2) / 2, (y1 + y2) / 2,
                                                 diam_at(roles[phone], (x1 + x2) / 2, (y1 + y2) / 2))
@@ -197,13 +312,19 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
         if (i + 1) % 100 == 0:
             el = time.time() - t0
             print(f"{i + 1}/{int(seconds * fps)} frames, {el / 60:.1f} min, {tiles_total / (i + 1):.1f} tiles/frame"
-                  f" ({n_full} full scans)", flush=True)
+                  f" ({n_full} full scans)"
+                  + (f"; WASB {wasb.tiles / (i + 1):.1f} tiles/frame, {t_wasb / 60:.1f} min" if wasb else ""), flush=True)
+    n = len(frames_out)
+    if not n:
+        raise SystemExit("no frames decoded (are the clip's segment files on disk?)")
     tag = os.environ.get("OSB_WIN_TAG", "win")  # output name; e.g. "win4" for a cadence experiment
     path = rec / "detect" / f"ball_{seg}_{start:g}_{seconds:g}.{tag}.json"
-    path.write_text(json.dumps({"segment": seg, "fps": fps, "model": str(ckpt), "mode": "window", "frames": frames_out}))
-    n = len(frames_out)
+    path.write_text(json.dumps({"segment": seg, "fps": fps, "model": str(ckpt), "mode": "window", "wasb": WASB,
+                                "frames": frames_out}))
     print(f"{n} frame pairs in {(time.time() - t0) / 60:.1f} min; {tiles_total / n:.1f} tiles per frame pair"
-          f" vs {2 * len(detect.tiles(H, W))} for full scans; {n_full} full scans -> {path.name}", flush=True)
+          f" vs {2 * len(detect.tiles(H, W))} for full scans; {n_full} full scans"
+          + (f"; WASB {wasb.tiles / n:.1f} tiles per frame pair, {t_wasb / 60:.1f} min" if wasb else "")
+          + f" -> {path.name}", flush=True)
     os._exit(0)  # the output is written; interpreter teardown (MPS, decoder threads) has hung for hours
 
 

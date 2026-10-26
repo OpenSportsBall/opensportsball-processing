@@ -225,6 +225,7 @@ Candidate sources, all in `footage/rec3/detect/ball_<seg>_<start>_<seconds>.<tag
 |---|---|---|
 | (none) | `ballclip.py` | fine-tuned RF-DETR on every 640 px tile, 10 fps (~30 min per 2 min clip) |
 | `win` | `ballwin.py` | the same detector in search windows around the predicted ball, full scans every 2 s or when lost (~6.5 min per 2 min clip); the default source |
+| `wasb` | `OSB_WIN_WASB=1 OSB_WIN_TAG=wasb ballwin.py` | the `win` source plus WASB (fp16, 3 frames, 2x/4x tiles) in the full scans and one window; ~1.5-1.7x the time. `base` is the same run without WASB, for comparisons |
 | `flow` | `flowcands.py` | motion-only candidates (double difference, size, consistent step); also writes the goal-net change series `net_*.json` |
 
 Every candidate carries a `judge` score from `balljudge.py` (a 48 px crop
