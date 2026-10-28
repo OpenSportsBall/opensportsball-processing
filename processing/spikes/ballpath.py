@@ -74,7 +74,9 @@ HOLD_S = 0.0          # each run's end positions are held this long into the fra
 SMOOTH_S = 0.0        # half-width of a triangular smoothing of the positions along a run (0: none)
 MAX_SPEED = B.MAX_SPEED
 JUMP_GAP_S = 3.0      # runs this close in time whose join would need more than MAX_SPEED are two balls:
-                      # the one farther from the players' median is dropped (a spare ball kicked around)
+                      # the one farther from the players' median is dropped (a spare ball kicked around) ...
+JUMP_PLAY_MARGIN_M = 10.0   # ... when it is this much farther; closer than that, the shorter run is dropped
+                      # (a 0.8 s blip 4 m nearer the players dropped a 29 s run of the match ball)
 
 
 def node_costs(cands, people):
@@ -212,7 +214,8 @@ def drop_jumps(est, src, people, fps):
     """Two runs at most JUMP_GAP_S apart whose join would need more than
     MAX_SPEED are different balls (the path re-enters from "no ball"
     anywhere for GAP_PENALTY): drop the one farther from the players'
-    median over its frames, or the shorter one with no players. In place."""
+    median over its frames by at least JUMP_PLAY_MARGIN_M, else (or with
+    no players) the shorter one. In place."""
     runs, i, n = [], 0, len(est)
     while i < n:
         if est[i] is None:
@@ -234,7 +237,7 @@ def drop_jumps(est, src, people, fps):
             gap = (r[0] - (kept[1] - 1)) / fps
             if gap <= JUMP_GAP_S and np.hypot(*(est[r[0]] - est[kept[1] - 1])) > MAX_SPEED * gap:
                 da, db = off_play(kept), off_play(r)
-                if da is None or db is None:
+                if da is None or db is None or abs(da - db) < JUMP_PLAY_MARGIN_M:
                     drop = r if r[1] - r[0] <= kept[1] - kept[0] else kept
                 else:
                     drop = r if db >= da else kept
