@@ -48,7 +48,8 @@ STATIC_LOITER_S = 8.0     # in a loiter cell (bench, spectators) or outside the 
 STATIC_LOITER_HITS = 3    # with this many sightings is a spare ball (a ball that went out comes back in seconds)
 NEAR_PLAYER_M = 6.0       # the match ball is usually this close to someone
 BRIDGE_S = 1.0            # interpolate gaps up to this long
-PITCH_MARGIN_M = 3.0      # candidates this far outside the lines still count (balls at the corners and touchlines)
+PITCH_MARGIN_M = 10.0     # candidates this far outside the lines still count (balls at the corners and touchlines,
+                          # and far balls whose depth is metres out: 3 lost 6 labelled match balls, 2026-10-28)
 MIN_HITS = 2              # a track shorter than this scores nothing
 MIN_JUDGE = 0.3           # candidates scored below this by balljudge.py are ignored (0: judge not used)
 BODY_FRAC = 0.8           # candidates in the top 80% of a person's box are kit, hands, knees

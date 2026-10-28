@@ -35,10 +35,13 @@ STEEP per metre beyond MAX_SPEED x dt) plus CROSS_COST. Entering or
 leaving "no ball" costs GAP_PENALTY, so the path bridges a gap of a few
 seconds rather than restarting on a stray candidate, and restarts
 anywhere after a long one. Skipped frames inside a skip edge are
-interpolated up to BRIDGE_S, as ball.py bridges; SMOOTH_S > 0 smooths
-the positions along each run of the path, HOLD_S > 0 holds a run's end
-positions into the frames around it. STILL_COST > 0 charges a step
-under STILL_DEG (a parked spare ball; ball.py's "moving" score).
+interpolated up to BRIDGE_S, as ball.py bridges. A candidate within
+REST_M of one up to REST_SKIP_S earlier may follow it directly too (a
+ball at rest, lost by the detector for longer than SKIP_MAX), bridged
+the same way. SMOOTH_S > 0 smooths the positions along each run of the
+path, HOLD_S > 0 holds a run's end positions into the frames around it.
+STILL_COST > 0 charges a step under STILL_DEG (a parked spare ball;
+ball.py's "moving" score).
 
 ~1200 frames x a few candidates: a plain dynamic programme, under a
 second per clip.
@@ -70,6 +73,8 @@ NEAR_W = 0.0          # a candidate within NEAR_PLAYER_M of a player costs this 
 STILL_DEG = 0.1       # a same-phone step under this is "still" ...
 STILL_COST = 0.0      # ... and costs this (0: off)
 BRIDGE_S = 1.0        # frames skipped by an edge are interpolated when the skip is at most this long
+REST_SKIP_S = 2.0     # a candidate may also follow one up to this long earlier when the two are within REST_M:
+REST_M = 2.0          # a ball at rest the detector loses for a while; such skips are bridged too (0: off)
 HOLD_S = 0.0          # each run's end positions are held this long into the frames before and after it (0: off)
 SMOOTH_S = 0.0        # half-width of a triangular smoothing of the positions along a run (0: none)
 MAX_SPEED = B.MAX_SPEED
@@ -77,6 +82,7 @@ JUMP_GAP_S = 3.0      # runs this close in time whose join would need more than 
                       # the one farther from the players' median is dropped (a spare ball kicked around) ...
 JUMP_PLAY_MARGIN_M = 10.0   # ... when it is this much farther; closer than that, the shorter run is dropped
                       # (a 0.8 s blip 4 m nearer the players dropped a 29 s run of the match ball)
+JUMP_KEEP_S = 5.0     # ... unless both are at least this long: then both are kept (0: off)
 
 
 def node_costs(cands, people):
@@ -138,14 +144,16 @@ def path(cands, people, n, fps):
         b = np.full(m, best_none[i - 1] + GAP_PENALTY)
         bk = np.full((m, 2), -1, int)
         bk[:, 0] = i - 1
-        # ... or from a candidate up to SKIP_MAX frames back.
-        for k in range(1, SKIP_MAX + 1):
+        # ... or from a candidate up to SKIP_MAX frames back (REST_SKIP_S for one at the same spot).
+        for k in range(1, max(SKIP_MAX, int(round(REST_SKIP_S * fps))) + 1):
             a = i - k
             if a < 0:
                 break
             if not len(cands[a]):
                 continue
             c = best[a][:, None] + motion_cost(pts[a], pts[i], ang[a], ang[i], phone[a], phone[i], k, fps)
+            if k > SKIP_MAX:
+                c[np.hypot(*(pts[a][:, None, :] - pts[i][None, :, :]).transpose(2, 0, 1)) > REST_M] = np.inf
             ja = c.argmin(0)
             v = c[ja, np.arange(m)]
             better = v < b
@@ -190,7 +198,7 @@ def track(cands, people, n, fps):
     # Bridge the frames a skip edge jumped over, up to BRIDGE_S.
     for i in range(n):
         a = prev_frame[i]
-        if choice[i] >= 0 and a >= 0 and choice[a] >= 0 and 1 < i - a <= BRIDGE_S * fps:
+        if choice[i] >= 0 and a >= 0 and choice[a] >= 0 and 1 < i - a <= max(BRIDGE_S, REST_SKIP_S) * fps:
             for m in range(a + 1, i):
                 w = (m - a) / (i - a)
                 est[m] = (1 - w) * est[a] + w * est[i]
@@ -215,7 +223,8 @@ def drop_jumps(est, src, people, fps):
     MAX_SPEED are different balls (the path re-enters from "no ball"
     anywhere for GAP_PENALTY): drop the one farther from the players'
     median over its frames by at least JUMP_PLAY_MARGIN_M, else (or with
-    no players) the shorter one. In place."""
+    no players) the shorter one, unless both last JUMP_KEEP_S (the path
+    strayed at one's end: both are mostly the match ball). In place."""
     runs, i, n = [], 0, len(est)
     while i < n:
         if est[i] is None:
@@ -238,6 +247,9 @@ def drop_jumps(est, src, people, fps):
             if gap <= JUMP_GAP_S and np.hypot(*(est[r[0]] - est[kept[1] - 1])) > MAX_SPEED * gap:
                 da, db = off_play(kept), off_play(r)
                 if da is None or db is None or abs(da - db) < JUMP_PLAY_MARGIN_M:
+                    if JUMP_KEEP_S and min(r[1] - r[0], kept[1] - kept[0]) >= JUMP_KEEP_S * fps:
+                        kept = r
+                        continue
                     drop = r if r[1] - r[0] <= kept[1] - kept[0] else kept
                 else:
                     drop = r if db >= da else kept

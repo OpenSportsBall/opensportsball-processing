@@ -87,6 +87,7 @@ Tracking:
 | Static-spot rules: 30 s for a still ball; 8 s in bench cells or outside the lines | Removed the spare balls by the bench that the camera followed for 10 s at a time. | adopted |
 | Offline minimum-cost path (`ballpath.py`, Viterbi over candidates with an angular motion cost per phone) | Found 57% / 72-74% (chain 49-57% / 68-72%), coverage up to 44% / 72%; same play boxes; aims at the ball in 39% / 70% of the clips. | adopted (default) |
 | Path gap penalty 2 -> 1 (cheaper to enter and leave "no ball", so isolated confident sightings join the path) | Play boxes 19/25 -> 20/25 (19:36); ball labels the same found-rate with fewer wrong (seg 3: 4 -> 2). A cheaper no-ball cost (1.5) or no judge filter each lose a box. | adopted |
+| Linker fixes: pitch margin 3 -> 10 m, a ball at rest bridged up to 2 s, two long runs both kept when distance from play cannot pick one (2026-10-28) | Found 57 -> 66 of 90 labelled balls (stock WASB 62 -> 70, tuned 61 -> 69), wrong 4 -> 5; play boxes 29/41 unchanged. A learned per-candidate P(ball) had too few negatives at the labelled moments to fit. | adopted |
 | Longer ballhold (5-8 s) | Loses two boxes to stale holds. | dropped |
 | Label-time correction (the decoder's late first frame put label images 0.2-0.9 s after their stored time) | Most "wrong" estimates were the clock; with it the tracker shows 1 wrong per clip and the rest are gaps. | adopted |
 
