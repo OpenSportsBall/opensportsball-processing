@@ -93,6 +93,23 @@ def attrdict(d):
     return AttrDict({k: attrdict(v) for k, v in d.items()}) if isinstance(d, dict) else d
 
 
+def wasb_with_bg(ckpt: Path | None = None) -> torch.nn.Module:
+    """WASB with the empty pitch as a fourth input frame (heattrain.py): 12
+    input channels, the background first. From the football weights with
+    the background's weights at zero (exactly the stock model), or from a
+    heattrain.py checkpoint. On the CPU; the caller moves it."""
+    model = Heat("wasb", torch.device("cpu")).model
+    old = model.conv1
+    new = torch.nn.Conv2d(12, old.out_channels, old.kernel_size, old.stride, old.padding, bias=False)
+    with torch.no_grad():
+        new.weight.zero_()
+        new.weight[:, 3:] = old.weight
+    model.conv1 = new
+    if ckpt is not None:
+        model.load_state_dict(torch.load(ckpt, map_location="cpu"))
+    return model
+
+
 class Heat:
     """A heatmap model: `frames_in` consecutive RGB frames in, one heatmap
     (for frame `pick` of the window) out, per 512x288 tile."""

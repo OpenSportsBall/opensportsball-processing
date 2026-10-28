@@ -67,8 +67,12 @@ JUMP_MAX_M = 15.0       # a candidate further than this from the last sighting n
 WIN = 640
 ZOOM_CROP = 320
 WASB = bool(os.environ.get("OSB_WIN_WASB"))
+WASB_STEER = bool(os.environ.get("OSB_WASB_STEER"))  # WASB's candidates also update the online track (moves RF-DETR's windows)
+WASB_EVERY = bool(os.environ.get("OSB_WASB_EVERY"))  # WASB's full scan on every frame, not only with RF-DETR's
+WASB_CKPT = os.environ.get("OSB_WASB_CKPT")  # a heattrain.py model (with the background input) instead of the stock one
 WASB_SCALES = (2, 4)    # WASB's full scans: 512x288 tiles of the frame downscaled this much
-WASB_MIN = 0.05         # heatmap peaks above this are candidates (ballheat.py's PEAK_MIN) ...
+WASB_MIN = float(os.environ.get("OSB_WASB_MIN", 0.3 if WASB_CKPT else 0.05))  # heatmap peaks above this are
+                        # candidates (stock: ballheat.py's PEAK_MIN; a fine-tuned model is surer) ...
 WASB_TOP = 30           # ... at most this many per phone and frame, the strongest
 WASB_SAME_DIAM = 1.5    # a peak within this many ball diameters (or 8 px) of an RF-DETR box is that ball
 
@@ -76,12 +80,15 @@ WASB_SAME_DIAM = 1.5    # a peak within this many ball diameters (or 8 px) of an
 class Wasb:
     """WASB in fp16 on the GPU: three consecutive frames stacked as
     channels in, the middle frame's heatmap out, per 512x288 tile of a
-    downscaled frame."""
+    downscaled frame. With a heattrain.py checkpoint the model also takes
+    the empty pitch (the segment's background) as a fourth frame."""
 
-    def __init__(self, dev: torch.device):
+    def __init__(self, dev: torch.device, ckpt: Path | None = None):
         import ballheat
 
-        self.model = ballheat.Heat("wasb", dev).model.half()
+        self.bg = ckpt is not None
+        model = ballheat.wasb_with_bg(ckpt) if self.bg else ballheat.Heat("wasb", dev).model
+        self.model = model.to(dev).eval().half()
         self.tile_grid, self.tw, self.th = ballheat.tile_grid, ballheat.IN_W, ballheat.IN_H
         self.mean = torch.tensor(ballheat.MEAN, device=dev).view(1, 3, 1, 1)
         self.std = torch.tensor(ballheat.STD, device=dev).view(1, 3, 1, 1)
@@ -99,13 +106,22 @@ class Wasb:
         return x0, y0, s
 
     @torch.no_grad()
-    def __call__(self, frames: torch.Tensor, corners: list[tuple[int, int, int]]) -> list[list[float]]:
-        """frames (3, 3, H, W) RGB in [0, 1] (previous, this, next) ->
-        peaks [x, y, score, scale] in frame pixels, merged, strongest first."""
-        x = ((frames - self.mean) / self.std).half()
-        pyr = {s: F.avg_pool2d(x, s) for s in {c[2] for c in corners}}
-        batch = torch.stack([pyr[s][:, :, y // s:y // s + self.th, x0 // s:x0 // s + self.tw].reshape(9, self.th, self.tw)
-                             for x0, y, s in corners])
+    def __call__(self, frames: torch.Tensor, corners: list[tuple[int, int, int]], bg: torch.Tensor | None = None,
+                 base: int = 1) -> list[list[float]]:
+        """frames (3, 3, H, W) RGB in [0, 1] (previous, this, next), already
+        downscaled `base` times from the 4K frame, and for a background
+        model bg (3, H', W') at 2x downscale -> peaks [x, y, score, scale]
+        in 4K frame pixels, merged, strongest first. Corners are (x, y,
+        scale) in 4K pixels."""
+        x = (frames - self.mean) / self.std
+        scales = {c[2] for c in corners}
+        pyr = {s: F.avg_pool2d(x, s // base) if s > base else x for s in scales}
+        if self.bg:
+            b = (bg[None] - self.mean) / self.std
+            pyr = {s: torch.cat([F.avg_pool2d(b, s // 2) if s > 2 else b, pyr[s]]) for s in scales}
+        n_in = 12 if self.bg else 9
+        batch = torch.stack([pyr[s][:, :, y // s:y // s + self.th, x0 // s:x0 // s + self.tw].reshape(n_in, self.th, self.tw)
+                             for x0, y, s in corners]).half()
         hm = torch.sigmoid(self.model(batch)[0][:, 1].float())
         self.tiles += len(corners)
         top = F.max_pool2d(hm[:, None], 5, 1, 2)[:, 0]
@@ -125,6 +141,16 @@ class Wasb:
             if len(kept) >= WASB_TOP:
                 break
         return kept
+
+
+def merge_phones(found: list[dict]) -> list[dict]:
+    """One candidate per ball seen by both phones: the surer one."""
+    merged = []
+    for d in sorted(found, key=lambda d: -d["conf"] * d["judge"]):
+        if not any(m["phone"] != d["phone"] and np.hypot(m["yaw"] - d["yaw"], m["pitch"] - d["pitch"]) < MERGE_DEG
+                   for m in merged):
+            merged.append(d)
+    return merged
 
 
 def triplets(stream):
@@ -159,7 +185,21 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
     dev = gpu.device()
     model = rfdetr.RFDETRMedium(pretrain_weights=str(ckpt))
     W, H = follow.SRC_W, follow.SRC_H
-    wasb = Wasb(dev) if WASB else None
+    wasb = Wasb(dev, Path(WASB_CKPT) if WASB_CKPT else None) if WASB else None
+    bgs: dict = {}
+
+    def background(phone: int, t: float) -> torch.Tensor | None:
+        """The background of the segment Main is in at clip time t (heattrain.py's, on the GPU)."""
+        if not (wasb and wasb.bg):
+            return None
+        k, local = seg, start + t
+        while k + 1 < len(devs["main"]["segments"]) and local >= devs["main"]["segments"][k]["durationMs"] / 1000:
+            local -= devs["main"]["segments"][k]["durationMs"] / 1000
+            k += 1
+        if (phone, k) not in bgs:
+            import heattrain
+            bgs[(phone, k)] = torch.from_numpy(heattrain.load_bg(rec, roles[phone], k)).to(dev).permute(2, 0, 1).float() / 255
+        return bgs[(phone, k)]
     if wasb:
         streams = [triplets(follow.prefetch(follow.game_stream(rec, devs, report, ph, seg, start, seconds, W,
                                                                fps=3 * fps), depth=9)) for ph in (0, 1)]
@@ -222,14 +262,15 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
                 tiles_total += len(tl)
             px = to_pixel(phone, pred) if pred is not None else None
             peaks = []
-            if wasb and (full or px is not None):
+            if wasb and (full or WASB_EVERY or px is not None):
                 tw0 = time.time()
-                if full:
+                if full or WASB_EVERY:
                     corners, wsrc = wasb.scan_corners(H, W), "wasb"
                 else:
                     corners = [wasb.window_corner(H, W, px, 2 if diam_at(roles[phone], *px) < ZOOM_BELOW_PX else 4)]
                     wsrc = "wasbwin"
-                peaks = [(c, wsrc) for c in wasb(torch.stack([rgb(bufs[0]), img, rgb(bufs[2])]), corners)]
+                peaks = [(c, wsrc) for c in wasb(torch.stack([rgb(bufs[0]), img, rgb(bufs[2])]), corners,
+                                                  background(phone, t))]
                 t_wasb += time.time() - tw0
             if px is not None:
                 x0 = int(np.clip(px[0] - WIN / 2, 0, W - WIN)); y0 = int(np.clip(px[1] - WIN / 2, 0, H - WIN))
@@ -274,14 +315,11 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
                               "src": src_of.get(tuple(np.round([x1, y1, x2, y2])), "scan")})
         if full:
             last_full, n_full = i, n_full + 1
-        merged = []
-        for d in sorted(found, key=lambda d: -d["conf"] * d["judge"]):
-            if not any(m["phone"] != d["phone"] and np.hypot(m["yaw"] - d["yaw"], m["pitch"] - d["pitch"]) < MERGE_DEG
-                       for m in merged):
-                merged.append(d)
+        merged = merge_phones(found)
         # Online track: the surest on-pitch candidate near the prediction (or anywhere after a scan).
+        # WASB's candidates don't steer it unless OSB_WASB_STEER: RF-DETR's windows go where they would without WASB.
         best = None
-        for d in merged:
+        for d in merged if WASB_STEER else merge_phones([d for d in found if not d["src"].startswith("wasb")]):
             if not d["onPitch"] or d["conf"] < ACCEPT_CONF or d["judge"] < ACCEPT_JUDGE:
                 continue
             if pred is not None:

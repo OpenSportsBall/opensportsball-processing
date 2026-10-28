@@ -197,6 +197,7 @@ the play boxes.
 | Score ball.py's online chain instead | `OSB_BALL_CHAIN=1 uv run processing/spikes/balleval.py footage/rec3 <name> ["NAME=value,..." ...]` |
 | Write `ball.json` with the path tracker | `uv run processing/spikes/ballpath.py footage/rec3 footage/rec3/detect/ball_<seg>_<start>_<seconds>[.win].json [out.json]` |
 | Score detectors per frame | `uv run processing/spikes/ballheat.py footage/rec3 <name> [wasb] [tracknetv2] [tracknetv3]` |
+| Fine-tune WASB with the background | `uv run processing/spikes/heattrain.py footage/rec3 bg`, then `data labels labels_seg3 labels_seg9`, `train <name> [--hold <set>]`, `eval <name \| stock> <set>`; in ballwin.py `OSB_WIN_WASB=1 OSB_WASB_CKPT=footage/rec3/heattrain/<name>.pt` (the recording needs `heattrain.py <rec> bg`) |
 | Measure an old set's label-time offsets | `uv run processing/spikes/ballheat.py footage/rec3 <name> dt` (writes `dtS` per frame into `items.json`) |
 
 Sets: `footage/rec3/labels_<name>/` (`items.json`, `images/`, `pano/`,
