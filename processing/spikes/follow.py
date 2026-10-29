@@ -305,6 +305,21 @@ def frame_stream(path: Path, start: float, seconds: float, width: int, fps: floa
         proc.wait()
 
 
+def piece_runs(pieces: list[dict], t: float, n: int, fps: float) -> list[list]:
+    """Splits `n` frames from `t` s into a Main segment into runs that one
+    Secondary file covers: [piece (None where no file does), its local
+    start s, frames]."""
+    runs: list[list] = []
+    for i in range(n):
+        tm = t + i / fps
+        p = next((q for q in pieces if 0 <= tm + q["offsetS"] < q["durationMs"] / 1000 - 0.5 / fps), None)
+        if runs and runs[-1][0] is p:
+            runs[-1][2] += 1
+        else:
+            runs.append([p, tm + (p["offsetS"] if p else 0.0), 1])
+    return runs
+
+
 def game_stream(rec: Path, devs: dict, report: dict, phone: int, seg: int, start: float, seconds: float,
                 width: int, fps: float = FPS):
     """Exactly round(seconds * fps) frames of one phone from `start` s into
@@ -313,7 +328,12 @@ def game_stream(rec: Path, devs: dict, report: dict, phone: int, seg: int, start
     of Secondary is read at that segment's own audio offset, which jumps at
     switches. Where a phone has no frame for a moment (the offset puts it
     before its segment began, or a file ends early) its nearest frame is
-    repeated, so the two phones stay frame-aligned."""
+    repeated, so the two phones stay frame-aligned.
+
+    For phones that cut segments at different lengths, phase0.py lists
+    every Secondary file overlapping each Main segment (report segments'
+    "secondaryPieces"), and Secondary is read from whichever of them has
+    each moment, switching files within a Main segment."""
     role = ("main", "secondary")[phone]
     segs_main = devs["main"]["segments"]
     total = int(round(seconds * fps))
@@ -326,6 +346,29 @@ def game_stream(rec: Path, devs: dict, report: dict, phone: int, seg: int, start
             t, k = t - dur, k + 1
             continue
         n = min(total - sent, int(round((dur - t) * fps)))
+        pieces = report["segments"][k].get("secondaryPieces") if phone == 1 else None
+        if pieces:
+            pending = 0  # frames before any file's first: sent as that first frame
+            for p, local, m in piece_runs(pieces, t, n, fps):
+                got = 0
+                if p is not None:
+                    frames = frame_stream(rec / p["objectKey"], local, m / fps + 1 / fps, width, fps)
+                    for buf in frames:
+                        for _ in range(pending):
+                            yield buf
+                        pending = 0
+                        if got >= m:
+                            break
+                        yield buf
+                        last, got = buf, got + 1
+                    frames.close()
+                while got < m and last is not None:  # no file has this moment: hold the nearest frame
+                    yield last
+                    got += 1
+                pending += m - got
+            sent += n
+            t, k = 0.0, k + 1
+            continue
         off = 0.0 if phone == 0 else report["segments"][k]["offsetS"]
         local = t + off
         lead = int(round(-local * fps)) if local < 0 else 0
@@ -1447,7 +1490,7 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
     sw = Stopwatch()
     manifest = json.loads((rec / "manifest.json").read_text())
     report = json.loads((rec / "phase0" / "report.json").read_text())
-    devs = {d["role"]: d for d in manifest["devices"]}
+    devs = phase0.paired_devices(manifest, report)
     out = rec / "follow"
     out.mkdir(exist_ok=True)
     cache = passa_cache(out, seg, start, seconds)

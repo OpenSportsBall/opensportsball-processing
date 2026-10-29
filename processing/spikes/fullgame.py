@@ -7,7 +7,7 @@
 # ///
 """Renders a whole game with the follow cam, in chunks, overnight.
 
-    uv run processing/spikes/fullgame.py footage/rec3 [--start 0] [--chunk 600] [--max-chunks N] [--out fullgame]
+    uv run processing/spikes/fullgame.py footage/rec3 [--start 0 | --start-segment N] [--chunk 600] [--max-chunks N] [--out fullgame]
                                                       [--features goalkick,goalframe,unsure,ball,goalin,ballhold]
 
 Each chunk of the game (on Main's clock from segment 0; the readers run
@@ -70,6 +70,8 @@ def main() -> None:
     ap.add_argument("--max-chunks", type=int, default=0)
     ap.add_argument("--start", type=float, default=0.0,
                     help="s on Main's clock to start from (skip a warm-up before kickoff); audio is cut to match")
+    ap.add_argument("--start-segment", type=int, default=0,
+                    help="start at Main's segment N instead (skip N segments of warm-up); added to --start")
     ap.add_argument("--out", default="fullgame")
     ap.add_argument("--features", default="goalkick,goalframe,unsure,ball,goalin,ballhold,roles,kickoff")
     ap.add_argument("--roles-fps", type=float, default=4.0, help="roles.py rate (people move slowly; 4 is plenty)")
@@ -79,6 +81,7 @@ def main() -> None:
     manifest = json.loads((rec / "manifest.json").read_text())
     devs = {d["role"]: d for d in manifest["devices"]}
     total = sum(s["durationMs"] for s in devs["main"]["segments"]) / 1000
+    a.start += sum(s["durationMs"] for s in devs["main"]["segments"][:a.start_segment]) / 1000
     chunks = []
     t = a.start
     while t < total - 1:

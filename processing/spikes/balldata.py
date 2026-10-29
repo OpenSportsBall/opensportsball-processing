@@ -35,6 +35,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 import follow  # noqa: E402
+import phase0  # noqa: E402
 import pitch as P  # noqa: E402
 
 TILE = 640
@@ -65,7 +66,7 @@ def main(rec: Path, out: Path) -> None:
     labels = json.loads((lab_dir / "labels.json").read_text())
     manifest = json.loads((rec / "manifest.json").read_text())
     report = json.loads((rec / "phase0" / "report.json").read_text())
-    devs = {d["role"]: d for d in manifest["devices"]}
+    devs = phase0.paired_devices(manifest, report)
     flip = [report["upsideDown"]["main"], report["upsideDown"]["secondary"]]
     cm, cs = follow.setup_cameras(rec, report, devs, flip)
     cams = {"main": cm.at(3840), "secondary": cs.at(3840)}

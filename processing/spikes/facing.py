@@ -39,6 +39,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
 import balleval as E  # noqa: E402
 import follow  # noqa: E402
+import phase0  # noqa: E402
 import pitch as P  # noqa: E402
 import witness as Wt  # noqa: E402
 
@@ -124,7 +125,7 @@ def main(rec: Path, name: str) -> None:
     players = Wt.players_per_frame(rec, seg0, start, seconds, data["fps"], pose)
     manifest = json.loads((rec / "manifest.json").read_text())
     report = json.loads((rec / "phase0" / "report.json").read_text())
-    devs = {d["role"]: d for d in manifest["devices"]}
+    devs = phase0.paired_devices(manifest, report)
     flip = [report["upsideDown"]["main"], report["upsideDown"]["secondary"]]
     cm, cs = follow.setup_cameras(rec, report, devs, flip)
     cams = {"main": cm.at(3840), "secondary": cs.at(3840)}

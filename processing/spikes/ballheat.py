@@ -382,7 +382,7 @@ def main(rec: Path, name: str, models: list[str]) -> None:
     labels = json.loads((lab / "labels.json").read_text())
     manifest = json.loads((rec / "manifest.json").read_text())
     report = json.loads((rec / "phase0" / "report.json").read_text())
-    devs = {d["role"]: d for d in manifest["devices"]}
+    devs = phase0.paired_devices(manifest, report)
     flip = {"main": report["upsideDown"]["main"], "secondary": report["upsideDown"]["secondary"]}
     seg0, start = int(items[0]["id"].split("_")[0][1:]), float(items[0]["id"].split("_")[1])
     diam_at = balljudge.expected_at(rec)

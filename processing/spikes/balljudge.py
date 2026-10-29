@@ -35,6 +35,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 import balldata  # noqa: E402
+import phase0  # noqa: E402
 
 SIZE = 48           # crop fed to the net
 CROP = 4.0          # crop side as a multiple of the expected ball diameter ...
@@ -86,7 +87,7 @@ def expected_at(rec: Path):
 
     manifest = json.loads((rec / "manifest.json").read_text())
     report = json.loads((rec / "phase0" / "report.json").read_text())
-    devs = {d["role"]: d for d in manifest["devices"]}
+    devs = phase0.paired_devices(manifest, report)
     flip = [report["upsideDown"]["main"], report["upsideDown"]["secondary"]]
     cm, cs = follow.setup_cameras(rec, report, devs, flip)
     cams = {"main": cm.at(3840), "secondary": cs.at(3840)}
@@ -320,7 +321,7 @@ def judge_clip(rec: Path, cands_path: Path, name: str = "judge", out_tag: str = 
     seconds = len(frames) / fps
     manifest = json.loads((rec / "manifest.json").read_text())
     report = json.loads((rec / "phase0" / "report.json").read_text())
-    devs = {d["role"]: d for d in manifest["devices"]}
+    devs = phase0.paired_devices(manifest, report)
     flip = [report["upsideDown"]["main"], report["upsideDown"]["secondary"]]
     diam_at = expected_at(rec)
     score = load_judge(rec, name)

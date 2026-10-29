@@ -106,7 +106,7 @@ def main(rec: Path) -> None:
     labels = json.loads((lab_dir / "labels.json").read_text())
     manifest = json.loads((rec / "manifest.json").read_text())
     report = json.loads((rec / "phase0" / "report.json").read_text())
-    devs = {d["role"]: d for d in manifest["devices"]}
+    devs = phase0.paired_devices(manifest, report)
     flip = {"main": report["upsideDown"]["main"], "secondary": report["upsideDown"]["secondary"]}
     cm, cs = follow.setup_cameras(rec, report, devs, [flip["main"], flip["secondary"]])
     cams = {"main": cm.at(3840), "secondary": cs.at(3840)}

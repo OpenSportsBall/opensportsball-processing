@@ -38,6 +38,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 import follow  # noqa: E402
+import phase0  # noqa: E402
 
 PANO_DEG = 0.04              # panorama resolution: zoomable, ~2 4K pixels per panorama pixel at the far side
 PANO_YAW = (-100.0, 100.0)   # degrees
@@ -69,7 +70,7 @@ def grab(rec: Path, devs: dict, report: dict, phone: int, seg: int, t: float, fl
 def make(rec: Path, name: str, seg0: int, start: float, times: list[float]) -> None:
     manifest = json.loads((rec / "manifest.json").read_text())
     report = json.loads((rec / "phase0" / "report.json").read_text())
-    devs = {d["role"]: d for d in manifest["devices"]}
+    devs = phase0.paired_devices(manifest, report)
     flip = [report["upsideDown"]["main"], report["upsideDown"]["secondary"]]
     cm, cs = follow.setup_cameras(rec, report, devs, flip)
     out = rec / "playeval" / name

@@ -66,7 +66,7 @@ def background(rec: Path, seg: int, pano: Pano):
     lines don't."""
     manifest = json.loads((rec / "manifest.json").read_text())
     report = json.loads((rec / "phase0" / "report.json").read_text())
-    devs = {d["role"]: d for d in manifest["devices"]}
+    devs = phase0.paired_devices(manifest, report)
     flip = [report["upsideDown"]["main"], report["upsideDown"]["secondary"]]
     cm, cs = follow.setup_cameras(rec, report, devs, flip)
     cams = [cm.at(follow.SRC_W), cs.at(follow.SRC_W)]

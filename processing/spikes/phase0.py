@@ -11,12 +11,24 @@ Run on a recording downloaded from S3 (manifest.json plus <deviceId>/ dirs):
 
     uv run processing/spikes/phase0.py footage/rec1 [preview start, s]
 
-Syncs each segment pair by audio, calibrates a stitch from segment 0,
+Pairs each Main segment with the Secondary file that overlaps it most and
+syncs the pair by audio, calibrates a stitch from segment 0,
 re-estimates it once per segment to see whether the mount held, and writes
 report.json, a stitched still and a short stitched preview to
 <recording>/phase0/. The preview starts at the given game time (seconds on
 Main's timeline, across segments). Prototype only; the pipeline proper
 goes in osb_processing once this works on real games.
+
+Phones that cut segments at different lengths (an iPhone at 300 s, a
+Pixel at ~285 s) drift apart: Main's segment k and Secondary's k cover
+different minutes, and one Secondary file covers only part of a Main
+segment. Pairing by time handles the first; for the second, every
+Secondary file overlapping each Main segment is synced too and listed as
+the segment's "secondaryPieces", which follow.game_stream reads across.
+The phones' start stamps disagree by a second or two, and the error grows
+over a game, so each segment's sync is searched around the previous
+segment's measured error rather than the stamps alone. Other scripts get
+the pairing from paired_devices().
 
 Stitching uses OpenCV's panorama stitcher, which estimates each camera's
 focal length and rotation from the matches. The phones' reported field of
@@ -42,6 +54,13 @@ PREVIEW_W = 960      # width of each phone's frame in the preview
 PREVIEW_SECONDS = 12
 CALIB_FRAMES = 8     # frame pairs tried for the stitch calibration
 MIN_SETTLED_S = 10.0  # calibrate after the last settings lock only if this much of segment 0 is left
+FIRST_SEARCH_S = 8.0  # the first sync has only the start stamps to go on: search wider
+SYNC_OK = 3.0         # a sync this sharp updates the stamp error the next one searches around ...
+SYNC_OK_WINDOWS = 0.5  # ... as does one where this share of its 4 s windows agree (whole-file sharpness
+                       # runs low over long files even when they lock cleanly)
+MIXED_MIN_S = 2.0     # a second Secondary file overlapping a Main segment this much: mixed segment lengths
+PIECE_MIN_S = 0.05    # once mixed, a file overlapping a segment at least this much (a frame or so) is a piece
+PIECE_MIN_SYNC_S = 30.0  # shorter pieces are placed from the stamps (and the segment's error), not synced
 
 
 # ---------------------------------------------------------------- media io
@@ -136,13 +155,13 @@ def gcc_phat(a: np.ndarray, b: np.ndarray, max_lag: int) -> tuple[float, float]:
     return float(i - max_lag + frac), sharpness
 
 
-def sync(main_audio: np.ndarray, sec_audio: np.ndarray, guess_s: float) -> dict:
+def sync(main_audio: np.ndarray, sec_audio: np.ndarray, guess_s: float, search_s: float = 2.0) -> dict:
     """Offset d (s): an event at Main file time t is at Secondary time t + d."""
     a, b = main_audio, sec_audio
-    # Whole clip, searching +-2 s around the BLE guess.
+    # Whole clip, searching +-search_s around the guess.
     shift = int(round(guess_s * FS))
     b_aligned = b[shift:] if shift >= 0 else np.concatenate([np.zeros(-shift, np.float32), b])
-    k, sharp = gcc_phat(a, b_aligned[: len(a)], int(2 * FS))
+    k, sharp = gcc_phat(a, b_aligned[: len(a)], int(search_s * FS))
     d = guess_s - k / FS
 
     # 4 s windows every 2 s to see drift between the two phones' clocks.
@@ -213,16 +232,25 @@ def calibrate(pairs: list[tuple[np.ndarray, np.ndarray]]):
 
 # -------------------------------------------------------------------- main
 
-def ble_guess(manifest, main_seg, sec_seg, main_f, sec_f) -> float:
-    """Offset d predicted by the BLE clock estimate, in seconds.
-
+def file_t0_ms(rec: Path, seg: dict) -> float:
+    """Where a segment file's time 0 is on its phone's clock, ms.
     startedAtDeviceMs is the first video frame, which sits at the video
-    stream's start_time in the file; convert both to Main's clock.
-    """
-    off = (manifest.get("clockSync") or {}).get("secondaryOffsetMs", 0)
-    main_t0 = main_seg["startedAtDeviceMs"] - 1000 * probe_start(main_f, "v")
-    sec_t0 = sec_seg["startedAtDeviceMs"] - off - 1000 * probe_start(sec_f, "v")
-    return (main_t0 - sec_t0) / 1000
+    stream's start_time in the file."""
+    return seg["startedAtDeviceMs"] - 1000 * probe_start(rec / seg["objectKey"], "v")
+
+
+def paired_devices(manifest: dict, report: dict) -> dict:
+    """The manifest's devices by role, with Secondary's segments listed one
+    per Main segment: the file phase0 paired with it (report segments'
+    "secondaryIndex"), so devs["secondary"]["segments"][k] goes with Main's
+    k and report["segments"][k]["offsetS"]. Reports from before pairing by
+    time keep the manifest's order (index pairing)."""
+    devs = {d["role"]: d for d in manifest["devices"]}
+    idx = [s.get("secondaryIndex") for s in report.get("segments", [])]
+    if "secondary" in devs and idx and None not in idx:
+        by_index = {s["index"]: s for s in devs["secondary"]["segments"]}
+        devs["secondary"] = {**devs["secondary"], "segments": [by_index[i] for i in idx]}
+    return devs
 
 
 class Encoder:
@@ -246,6 +274,11 @@ class Encoder:
         self.proc.wait()
 
 
+def confident(s: dict) -> bool:
+    """Whether a sync() result locked cleanly."""
+    return s["sharpness"] >= SYNC_OK or s["windowsUsed"] >= SYNC_OK_WINDOWS * max(len(s["windows"]), 10)
+
+
 def settled_at(dev: dict, seg: dict) -> float:
     """Seconds into `seg` (one of `dev`'s segments) when the phone last
     locked focus and white balance (the manifest's settingsLocks): before
@@ -265,19 +298,71 @@ def main(rec: Path, preview_at: float | None) -> None:
     out.mkdir(exist_ok=True)
     report: dict = {"recording": manifest["sessionId"], "segments": []}
 
-    # Sync each segment pair on its own: Android loses frames at every
-    # segment switch, so a later pair's offset can differ from the first.
-    pairs = list(zip(main_d["segments"], sec_d["segments"]))
-    for ms, ss in pairs:
-        mf_, sf_ = rec / ms["objectKey"], rec / ss["objectKey"]
-        guess = ble_guess(manifest, ms, ss, mf_, sf_)
-        s = sync(load_audio(mf_), load_audio(sf_), guess)
-        seg = {"index": ms["index"], "bleOffsetS": round(guess, 4),
-               "bleErrorMs": round(1000 * (guess - s["offsetS"]), 1), **s}
+    # Pair by time and sync each pair on its own: Android loses frames at
+    # every segment switch, so a later pair's offset can differ from the
+    # first. Offsets are Secondary file time minus Main file time for the
+    # same moment; the stamps predict them, off by `err`.
+    clock_ms = (manifest.get("clockSync") or {}).get("secondaryOffsetMs", 0)
+    main_t0 = {s["index"]: file_t0_ms(rec, s) for s in main_d["segments"]}
+    sec_t0 = {s["index"]: file_t0_ms(rec, s) - clock_ms for s in sec_d["segments"]}
+
+    def stamped(ms, ss):
+        return (main_t0[ms["index"]] - sec_t0[ss["index"]]) / 1000
+
+    def overlap(ms, ss, d):
+        return min(ms["durationMs"] / 1000, ss["durationMs"] / 1000 - d) - max(0.0, -d)
+
+    audio: dict[str, np.ndarray] = {}
+
+    def audio_of(seg):  # the last few files only: a game's worth doesn't fit
+        key = seg["objectKey"]
+        if key not in audio:
+            if len(audio) >= 4:
+                audio.pop(next(iter(audio)))
+            audio[key] = load_audio(rec / key)
+        return audio[key]
+
+    err, have_err = 0.0, False
+    pairs = []
+    for ms in main_d["segments"]:
+        ss = max(sec_d["segments"], key=lambda x: overlap(ms, x, stamped(ms, x) + err))
+        pairs.append((ms, ss))
+        guess = stamped(ms, ss) + err
+        s = sync(audio_of(ms), audio_of(ss), guess, 2.0 if have_err else FIRST_SEARCH_S)
+        if confident(s):
+            err, have_err = s["offsetS"] - stamped(ms, ss), True
+        seg = {"index": ms["index"], "secondaryIndex": ss["index"], "bleOffsetS": round(stamped(ms, ss), 4),
+               "bleErrorMs": round(1000 * (stamped(ms, ss) - s["offsetS"]), 1), **s}
         report["segments"].append(seg)
-        print(f"segment {ms['index']}: audio offset {s['offsetS'] * 1000:8.2f} ms"
-              f" (sharpness {s['sharpness']}), BLE error {seg['bleErrorMs']} ms,"
-              f" drift {s['driftPpm']} ppm, {s['windowsUsed']}/{len(s['windows'])} windows")
+        print(f"segment {ms['index']} + secondary {ss['index']}: audio offset {s['offsetS'] * 1000:8.2f} ms"
+              f" (sharpness {s['sharpness']}), stamp error {-seg['bleErrorMs']} ms,"
+              f" drift {s['driftPpm']} ppm, {s['windowsUsed']}/{len(s['windows'])} windows", flush=True)
+
+    # Different segment lengths: a Main segment spans more than one
+    # Secondary file. List each with its own offset ("secondaryPieces").
+    def pieces_of(ms, seg_err, min_s=PIECE_MIN_S):
+        return [x for x in sec_d["segments"] if overlap(ms, x, stamped(ms, x) + seg_err) >= min_s]
+    errs = [seg["offsetS"] - stamped(ms, ss) for (ms, ss), seg in zip(pairs, report["segments"])]
+    if any(len(pieces_of(ms, e, MIXED_MIN_S)) > 1 for (ms, _), e in zip(pairs, errs)):
+        report["mixedSegmentLengths"] = True
+        for (ms, ss), seg, seg_err in zip(pairs, report["segments"], errs):
+            pieces = []
+            for x in pieces_of(ms, seg_err):
+                guess = stamped(ms, x) + seg_err
+                ov = overlap(ms, x, guess)
+                p = {"index": x["index"], "objectKey": x["objectKey"], "durationMs": x["durationMs"],
+                     "offsetS": round(guess, 6), "overlapS": round(ov, 1), "synced": False}
+                if x is ss:
+                    p.update(offsetS=seg["offsetS"], synced=True, sharpness=seg["sharpness"])
+                elif ov >= PIECE_MIN_SYNC_S:
+                    r = sync(audio_of(ms), audio_of(x), guess)
+                    if confident(r) and abs(r["offsetS"] - guess) < 0.5:
+                        p.update(offsetS=r["offsetS"], synced=True, sharpness=r["sharpness"])
+                pieces.append(p)
+            seg["secondaryPieces"] = pieces
+            print(f"segment {ms['index']}: " + ", ".join(
+                f"secondary {p['index']} {p['overlapS']:.0f} s at {p['offsetS']:+.3f} s"
+                f"{'' if p['synced'] else ' (from stamps)'}" for p in pieces), flush=True)
 
     # Stitch from segment 0: sample frame pairs across it, aligned by d.
     main_f = rec / pairs[0][0]["objectKey"]

@@ -47,6 +47,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
 import ball as B  # noqa: E402
 import follow  # noqa: E402
+import phase0  # noqa: E402
 import pitch as P  # noqa: E402
 
 HIT_M = float(os.environ.get("OSB_HIT_M", 3.0))        # a hit: within this plus HIT_PER_M x the ball's distance ...
@@ -73,7 +74,7 @@ def setup(rec: Path, name: str):
     data = json.loads(cands_path.read_text())
     manifest = json.loads((rec / "manifest.json").read_text())
     report = json.loads((rec / "phase0" / "report.json").read_text())
-    devs = {d["role"]: d for d in manifest["devices"]}
+    devs = phase0.paired_devices(manifest, report)
     flip = [report["upsideDown"]["main"], report["upsideDown"]["secondary"]]
     cm, cs = follow.setup_cameras(rec, report, devs, flip)
     cams = {"main": cm.at(3840), "secondary": cs.at(3840)}

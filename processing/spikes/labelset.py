@@ -117,7 +117,7 @@ def panoramas(rec: Path, out: Path | None = None) -> None:
 
     manifest = json.loads((rec / "manifest.json").read_text())
     report = json.loads((rec / "phase0" / "report.json").read_text())
-    devs = {d["role"]: d for d in manifest["devices"]}
+    devs = phase0.paired_devices(manifest, report)
     flip = [report["upsideDown"]["main"], report["upsideDown"]["secondary"]]
     cm, cs = follow.setup_cameras(rec, report, devs, flip)
     out = out or rec / "labels"
@@ -195,7 +195,7 @@ def pairs(rec: Path) -> None:
     labels = json.loads(labels_path.read_text()) if labels_path.exists() else {}
     manifest = json.loads((rec / "manifest.json").read_text())
     report = json.loads((rec / "phase0" / "report.json").read_text())
-    devs = {d["role"]: d for d in manifest["devices"]}
+    devs = phase0.paired_devices(manifest, report)
     flip = {"main": report["upsideDown"]["main"], "secondary": report["upsideDown"]["secondary"]}
     (out / "items.single.json").write_text(json.dumps(items, indent=1))  # backup
 
@@ -245,7 +245,7 @@ def clip(rec: Path, name: str, seg0: int, start: float, seconds: float, step: fl
 
     manifest = json.loads((rec / "manifest.json").read_text())
     report = json.loads((rec / "phase0" / "report.json").read_text())
-    devs = {d["role"]: d for d in manifest["devices"]}
+    devs = phase0.paired_devices(manifest, report)
     flip = {"main": report["upsideDown"]["main"], "secondary": report["upsideDown"]["secondary"]}
     out = rec / f"labels_{name}"
     (out / "images").mkdir(parents=True, exist_ok=True)
@@ -296,7 +296,7 @@ def main(rec: Path, count: int, seed: int) -> None:
 
     manifest = json.loads((rec / "manifest.json").read_text())
     report = json.loads((rec / "phase0" / "report.json").read_text())
-    devs = {d["role"]: d for d in manifest["devices"]}
+    devs = phase0.paired_devices(manifest, report)
     flip = {"main": report["upsideDown"]["main"], "secondary": report["upsideDown"]["secondary"]}
     out = rec / "labels"
     (out / "images").mkdir(parents=True, exist_ok=True)

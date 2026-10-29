@@ -80,7 +80,7 @@ JUDGE_MIN = 0.3
 def setup(rec: Path):
     manifest = json.loads((rec / "manifest.json").read_text())
     report = json.loads((rec / "phase0" / "report.json").read_text())
-    devs = {d["role"]: d for d in manifest["devices"]}
+    devs = phase0.paired_devices(manifest, report)
     flip = {"main": report["upsideDown"]["main"], "secondary": report["upsideDown"]["secondary"]}
     return devs, report, flip
 

@@ -38,6 +38,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).parent))
 import follow  # noqa: E402
+import phase0  # noqa: E402
 import gpu  # noqa: E402
 
 PERSON, BALL = 1, 37        # COCO class ids in RF-DETR's output
@@ -128,7 +129,7 @@ def main(rec: Path, seg: int, start: float, seconds: float, fps: float) -> None:
 
     manifest = json.loads((rec / "manifest.json").read_text())
     report = json.loads((rec / "phase0" / "report.json").read_text())
-    devs = {d["role"]: d for d in manifest["devices"]}
+    devs = phase0.paired_devices(manifest, report)
     flip = [report["upsideDown"]["main"], report["upsideDown"]["secondary"]]
     cm, cs = follow.setup_cameras(rec, report, devs, flip)
     cams = [cm.at(follow.SRC_W), cs.at(follow.SRC_W)]

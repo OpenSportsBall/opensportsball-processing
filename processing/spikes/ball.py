@@ -271,7 +271,7 @@ def crops(rec: Path, frames, src, path, n=12):
 
     manifest = json.loads((rec / "manifest.json").read_text())
     report = json.loads((rec / "phase0" / "report.json").read_text())
-    devs = {d["role"]: d for d in manifest["devices"]}
+    devs = phase0.paired_devices(manifest, report)
     flip = [report["upsideDown"]["main"], report["upsideDown"]["secondary"]]
     seg = json.loads((rec / "detect" / "detections.json").read_text())["segment"]
     picks = [i for i in range(len(src)) if src[i] is not None]
