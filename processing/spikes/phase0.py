@@ -41,6 +41,7 @@ FS = 48_000          # audio sample rate used for sync
 PREVIEW_W = 960      # width of each phone's frame in the preview
 PREVIEW_SECONDS = 12
 CALIB_FRAMES = 8     # frame pairs tried for the stitch calibration
+MIN_SETTLED_S = 10.0  # calibrate after the last settings lock only if this much of segment 0 is left
 
 
 # ---------------------------------------------------------------- media io
@@ -245,6 +246,17 @@ class Encoder:
         self.proc.wait()
 
 
+def settled_at(dev: dict, seg: dict) -> float:
+    """Seconds into `seg` (one of `dev`'s segments) when the phone last
+    locked focus and white balance (the manifest's settingsLocks): before
+    that it may not have been on the mount yet. 0 for recordings that
+    don't say."""
+    locks = dev.get("settingsLocks") or []
+    if not locks:
+        return 0.0
+    return max(0.0, (locks[-1]["atDeviceMs"] - seg["startedAtDeviceMs"]) / 1000)
+
+
 def main(rec: Path, preview_at: float | None) -> None:
     manifest = json.loads((rec / "manifest.json").read_text())
     devs = {d["role"]: d for d in manifest["devices"]}
@@ -273,7 +285,16 @@ def main(rec: Path, preview_at: float | None) -> None:
     d = report["segments"][0]["offsetS"]
     dur = min(pairs[0][0]["durationMs"], pairs[0][1]["durationMs"]) / 1000 - abs(d) - 1
     t_main0 = max(0.0, -d) + 0.5
-    times = np.linspace(t_main0, t_main0 + dur - 0.5, CALIB_FRAMES)
+    t_end = t_main0 + dur - 0.5
+    # Only frames from after both phones last locked their settings: before,
+    # one may still have been in someone's hand or on a lowered tripod.
+    settled = max(settled_at(main_d, pairs[0][0]), settled_at(sec_d, pairs[0][1]) - d) + 1
+    if settled > t_main0 and settled <= t_end - MIN_SETTLED_S:
+        t_main0 = settled
+    elif settled > t_main0:
+        print(f"settings were last locked {settled:.0f} s into segment 0; calibrating from all of it")
+    report["calibrationFromS"] = round(t_main0, 2)
+    times = np.linspace(t_main0, t_end, CALIB_FRAMES)
     # Each phone records which way up it was; older recordings don't, so
     # guess from the picture. Only 0 and 180 occur with the app's fixed
     # landscape orientation.
