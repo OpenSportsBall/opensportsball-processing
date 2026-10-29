@@ -8,7 +8,15 @@
 Serves <recording>/pitch/background.png and saves every tap to
 <recording>/pitch/taps.json: {point name: {"yaw", "pitch" (panorama degrees,
 yaw right +, pitch down +), "at"}} or {"skipped": true}. The points are the
-ones pitch.py's taps mode refits with (pitch.TAP_POINTS). Listens on
+ones pitch.py's taps mode refits with (pitch.TAP_POINTS). If pitch.py's review
+mode has written <recording>/pitch/review.json, the page also draws the fit
+(markings, goal frames, where it puts each point) so a reviewer can accept a
+point where the fit has it ("fromFit": true) or tap it where it really is.
+
+The page also shows the pitch's line colour (<recording>/pitch/paint.json,
+which pitch.py writes when it chooses the colour itself) with each colour's
+detected lines (pitch/lines_<colour>.png) to compare, and saves the
+reviewer's choice back with "confirmed": true. Listens on
 localhost only: the footage shows people and stays on this machine.
 """
 
@@ -28,6 +36,7 @@ LOCK = threading.Lock()
 
 # Kept in step with pitch.py (importing it would pull in torch for a page server).
 YAW_RANGE, PITCH_RANGE, DEG_PER_PX = (-100.0, 100.0), (-2.0, 38.0), 0.03
+PAINTS = ["white", "yellow", "orange", "red", "blue"]  # pitch.py's line_mask colours
 POINTS = [
     ("{e} corner flag", "where the near touchline meets the goal line"),
     ("{e} 18-yard goal-line corner", "where the 18-yard box's near side meets the goal line"),
@@ -50,8 +59,15 @@ def make_handler(rec: Path):
     points = [{"name": n.format(e=e), "hint": h, "end": e} for e in ("left", "right") for n, h in POINTS]
     points += [{"name": n, "hint": h, "end": "centre"} for n, h in CENTRE_POINTS]
 
+    paint_path = rec / "pitch" / "paint.json"
+
     def load() -> dict:
         return json.loads(taps_path.read_text()) if taps_path.exists() else {}
+
+    def load_paint() -> dict:
+        p = json.loads(paint_path.read_text()) if paint_path.exists() else {"paint": "white", "chosenBy": "default"}
+        p["linesAvailable"] = [c for c in PAINTS if (rec / "pitch" / f"lines_{c}.png").exists()]
+        return p
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):  # quiet
@@ -71,16 +87,40 @@ def make_handler(rec: Path):
                 return self.send(200, (HERE / "index.html").read_bytes(), "text/html; charset=utf-8")
             if path == "/meta":
                 body = {"points": points, "yawDeg": YAW_RANGE, "pitchDeg": PITCH_RANGE, "panoDeg": DEG_PER_PX,
-                        "recording": rec.name}
+                        "recording": rec.name, "paints": PAINTS}
                 return self.send(200, json.dumps(body).encode(), "application/json")
             if path == "/taps":
                 with LOCK:
                     return self.send(200, json.dumps(load()).encode(), "application/json")
+            if path == "/review":
+                review = rec / "pitch" / "review.json"
+                return self.send(200, review.read_bytes() if review.exists() else b"null", "application/json")
+            if path == "/paint":
+                with LOCK:
+                    return self.send(200, json.dumps(load_paint()).encode(), "application/json")
+            if path.startswith("/lines/") and path.endswith(".png") and path[len("/lines/"):-len(".png")] in PAINTS:
+                lines = rec / "pitch" / f"lines_{path[len('/lines/'):-len('.png')]}.png"
+                if lines.exists():
+                    return self.send(200, lines.read_bytes(), "image/png")
             if path == "/background.png":
                 return self.send(200, (rec / "pitch" / "background.png").read_bytes(), "image/png")
             self.send(404, b"not found", "text/plain")
 
         def do_POST(self):
+            if self.path == "/paint":
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+                if body.get("paint") not in PAINTS:
+                    return self.send(400, b"unknown paint colour", "text/plain")
+                with LOCK:
+                    p = json.loads(paint_path.read_text()) if paint_path.exists() else {}
+                    if p.get("paint") not in (None, body["paint"]) and "suggested" not in p:
+                        p["suggested"] = p["paint"]  # what pitch.py had chosen, kept for comparison
+                    p.update(paint=body["paint"], confirmed=True, confirmedAt=time.strftime("%Y-%m-%dT%H:%M:%S"))
+                    p.pop("linesAvailable", None)
+                    tmp = paint_path.with_suffix(".tmp")
+                    tmp.write_text(json.dumps(p, indent=1))
+                    os.replace(tmp, paint_path)
+                return self.send(200, json.dumps(load_paint()).encode(), "application/json")
             if not self.path.startswith("/taps/"):
                 return self.send(404, b"not found", "text/plain")
             name = self.path[len("/taps/"):].replace("%20", " ")
@@ -96,6 +136,8 @@ def make_handler(rec: Path):
                 else:
                     taps[name] = {"yaw": round(float(body["yaw"]), 3), "pitch": round(float(body["pitch"]), 3),
                                   "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+                    if body.get("fromFit"):
+                        taps[name]["fromFit"] = True
                 tmp = taps_path.with_suffix(".tmp")
                 tmp.write_text(json.dumps(taps, indent=1))
                 os.replace(tmp, taps_path)

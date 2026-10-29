@@ -8,7 +8,7 @@
 <title>Pitch keypoints</title>
 <style>
   :root { --bg: #15171a; --panel: #1f2226; --line: #33373d; --text: #e8eaed; --muted: #9aa0a6;
-          --pt: #ffd400; --ok: #5bd17a; --skip: #f0a040; }
+          --pt: #ffd400; --ok: #5bd17a; --skip: #f0a040; --fit: #ff4fd8; --lines: #3fd0ff; }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif;
          display: grid; grid-template-columns: minmax(200px, 310px) minmax(0, 1fr); height: 100vh; overflow: hidden; }
@@ -24,6 +24,16 @@
   .tag.ok { background: #1f4d2c; color: var(--ok); }
   .tag.skip { background: #4d3a1f; color: var(--skip); }
   .tag.none { background: #333; color: var(--muted); }
+  .tag.fit { background: #4d1f45; color: var(--fit); }
+  #fitinfo { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+  #paintinfo { color: var(--muted); font-size: 12px; }
+  #paintinfo b { color: var(--text); font-weight: 600; }
+  #paintinfo code { font-size: 11px; color: var(--text); }
+  .sw { display: flex; align-items: center; gap: 5px; padding: 5px 8px; }
+  .sw i { width: 12px; height: 12px; border-radius: 50%; display: inline-block; border: 1px solid #0006; }
+  .sw.sel { border-color: var(--pt); background: #363c43; }
+  .sw.chosen::after { content: "✓"; color: var(--ok); }
+  #fitinfo b { color: var(--text); font-weight: 600; }
   #hint { margin-top: 12px; padding: 8px 10px; border-radius: 6px; background: #111316; min-height: 54px; }
   #hint b { color: var(--pt); }
   button { background: #2c3137; color: var(--text); border: 1px solid var(--line); border-radius: 6px;
@@ -49,19 +59,32 @@
   <h1>Pitch keypoints</h1>
   <div class="sub" id="rec"></div>
   <div class="sub">Click exactly on each point. Zoom in close: a pixel here is a few centimetres at the far end.</div>
+  <h2>Line colour</h2>
+  <div id="paintinfo"></div>
+  <div class="row" id="swatches"></div>
+  <div class="row"><button id="paintok">Confirm colour</button><button id="lines" hidden>Show lines</button></div>
+  <h2>Points</h2>
+  <div id="fitinfo"></div>
   <div id="list"></div>
   <div id="hint"></div>
   <div class="row">
+    <button id="accept" hidden>Fit is right</button>
     <button id="skip">Not visible</button>
     <button id="clear">Clear point</button>
     <button id="zoom">Zoom to point</button>
     <button id="all">Whole panorama</button>
+    <button id="fit" hidden>Hide fit</button>
   </div>
   <div class="help">
     <b>Click</b> places the selected point, then moves to the next.<br>
     <b>Scroll</b> to zoom, <b>drag</b> to pan.<br>
     <b>↑ ↓</b> previous / next point. <b>Backspace</b> clears it.<br>
-    Points save as you place them.
+    Points save as you place them.<br>
+    <b>Line colour:</b> pick a colour to see the lines it finds (<b>L</b> toggles them), then confirm the
+    colour of the football lines.
+    <span id="fithelp" hidden><br><b>Reviewing a fit:</b> blue lines are the fitted markings, yellow the goal frames
+    (red if rejected), the pink ring where the fit puts the point. <b>Enter</b> accepts the ring, a click puts
+    the point where it really is. <b>F</b> hides the fit.</span>
   </div>
 </aside>
 <main>
@@ -71,9 +94,12 @@
 </main>
 <script>
 const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
-let meta = null, taps = {}, cur = 0, img = null;
+let meta = null, taps = {}, cur = 0, img = null, review = null, showFit = true;
 let view = { s: 1, x: 0, y: 0 };      // screen = (pano px - x) * s
 let drag = null;
+let paint = null, pick = null, showLines = false;
+const linesImg = {};
+const SWATCH = { white: "#f2f2f2", yellow: "#ffd400", orange: "#ff8a1f", red: "#ff3b3b", blue: "#3b7bff" };
 
 const toPx = (yaw, pitch) => [(yaw - meta.yawDeg[0]) / meta.panoDeg, (pitch - meta.pitchDeg[0]) / meta.panoDeg];
 const toDeg = (px, py) => [meta.yawDeg[0] + px * meta.panoDeg, meta.pitchDeg[0] + py * meta.panoDeg];
@@ -81,8 +107,18 @@ const scr = (px, py) => [(px - view.x) * view.s, (py - view.y) * view.s];
 const pano = (sx, sy) => [sx / view.s + view.x, sy / view.s + view.y];
 
 async function load() {
-  [meta, taps] = await Promise.all(["/meta", "/taps"].map(u => fetch(u).then(r => r.json())));
+  [meta, taps, review, paint] = await Promise.all(["/meta", "/taps", "/review", "/paint"].map(u => fetch(u).then(r => r.json())));
+  pick = paint.paint;
+  showLines = paint.linesAvailable.includes(pick) && !paint.confirmed;
+  renderPaint();
   document.getElementById("rec").textContent = meta.recording;
+  if (review) {
+    const p = review.pitch;
+    const goals = review.goals.map(g => `${g.side} ${g.widthM.toFixed(1)} × ${g.heightM.toFixed(2)} m${g.valid ? "" : " (rejected)"}`);
+    document.getElementById("fitinfo").innerHTML = `Fit (${p.fittedWith}): pitch <b>${p.lengthM} × ${p.widthM} m</b>,
+      camera ${p.cameraHeightM} m up.<br>Goals: ${goals.length ? goals.join(", ") : "none found"}.`;
+    for (const id of ["accept", "fit", "fithelp"]) document.getElementById(id).hidden = false;
+  }
   img = new Image();
   img.onload = () => { fitAll(); };
   img.src = "/background.png";
@@ -90,9 +126,54 @@ async function load() {
   select(first < 0 ? 0 : first);
 }
 
+function renderPaint() {
+  const el = document.getElementById("swatches");
+  el.innerHTML = "";
+  meta.paints.forEach(c => {
+    const b = document.createElement("button");
+    b.className = "sw" + (c === pick ? " sel" : "") + (paint.confirmed && c === paint.paint ? " chosen" : "");
+    b.innerHTML = `<i style="background:${SWATCH[c] || c}"></i>${c}`;
+    b.title = paint.linesAvailable.includes(c) ? `show the ${c} lines` : `no ${c} lines found (or not looked for)`;
+    b.onclick = () => { pick = c; if (paint.linesAvailable.includes(c)) showLines = true; renderPaint(); draw(); };
+    el.appendChild(b);
+  });
+  const sc = paint.scores || {};
+  const fmt = c => sc[c] && sc[c].score != null ? `${c} ${sc[c].score >= 0 ? "+" : ""}${sc[c].score.toFixed(2)}`
+                  : `${c} ${sc[c] && sc[c].plausible === false ? "rejected" : "—"}`;
+  const ranked = Object.keys(sc).filter(c => c !== "measured").sort((a, b) => (sc[b].score ?? -9) - (sc[a].score ?? -9));
+  const m = sc.measured;
+  let txt;
+  if (paint.confirmed) {
+    txt = `Confirmed: <b>${paint.paint}</b>` + (paint.suggested && paint.suggested !== paint.paint
+      ? ` (pitch.py chose ${paint.suggested}).` : ".");
+  } else if (paint.chosenBy === "default") {
+    txt = `Not set: <b>white</b> is assumed. Pick the colour of the football lines and confirm it.`;
+  } else {
+    txt = `Chosen automatically: <b>${paint.paint}</b>. Check its lines, then confirm it or pick another.`;
+  }
+  if (m) txt += `<br>The paint on the fitted lines is ${m.db > 0 ? "yellower" : "less yellow"} than the turf
+    (b* ${m.db >= 0 ? "+" : ""}${m.db}, L* ${m.dL >= 0 ? "+" : ""}${m.dL})${m.colour ? `: ${m.colour}` : ""}.`;
+  if (ranked.length) txt += `<br>How well each colour's lines fit a pitch: ${ranked.map(fmt).join(", ")}.`;
+  if (pick !== paint.paint) txt += `<br>Confirm to change it to <b>${pick}</b>.`;
+  if (paint.refit) txt += `<br>Changed from ${paint.refit}: refit so the fit follows the ${paint.paint} lines:
+    <code>pitch.py ${meta.recording} taps</code>.`;
+  document.getElementById("paintinfo").innerHTML = txt;
+  const lb = document.getElementById("lines");
+  lb.hidden = !paint.linesAvailable.includes(pick);
+  lb.textContent = showLines ? `Hide ${pick} lines` : `Show ${pick} lines`;
+  document.getElementById("paintok").textContent = paint.confirmed && pick === paint.paint ? "Confirmed ✓" : `Confirm ${pick}`;
+}
+
+function linesFor(c) {
+  if (!paint.linesAvailable.includes(c)) return null;
+  if (!linesImg[c]) { linesImg[c] = new Image(); linesImg[c].onload = draw; linesImg[c].src = `/lines/${c}.png`; }
+  return linesImg[c].complete ? linesImg[c] : null;
+}
+
 function select(k) {
   cur = (k + meta.points.length) % meta.points.length;
-  renderList(); draw();
+  renderList();
+  if (review && img && img.complete) zoomTo(meta.points[cur].name); else draw();
 }
 
 function renderList() {
@@ -105,7 +186,8 @@ function renderList() {
       const h = document.createElement("h2"); h.textContent = end === "centre" ? "centre" : `${end} end`; el.appendChild(h);
     }
     const t = taps[p.name];
-    const [cls, txt] = !t ? ["none", "—"] : t.skipped ? ["skip", "not visible"] : ["ok", "placed"];
+    const [cls, txt] = !t ? (review && review.points[p.name] ? ["fit", "to check"] : ["none", "—"])
+      : t.skipped ? ["skip", "not visible"] : t.fromFit ? ["ok", "fit right"] : ["ok", "placed"];
     const d = document.createElement("div");
     d.className = "item" + (k === cur ? " cur" : "");
     d.innerHTML = `<span>${p.name.replace(/^(left|right) /, "")}</span><span class="tag ${cls}">${txt}</span>`;
@@ -120,11 +202,13 @@ function resize() {
   const r = cv.getBoundingClientRect();
   cv.width = r.width * devicePixelRatio; cv.height = r.height * devicePixelRatio;
   ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
-  draw();
+  // Opened while the window had no room for the panorama: fit it now there is.
+  if (img && img.complete && !(view.s > 0)) fitAll(); else draw();
 }
 
 function fitRect(x0, y0, x1, y1) {
   const r = cv.getBoundingClientRect();
+  if (!r.width || !r.height) return;  // no room yet; resize() fits it later
   view.s = Math.min(r.width / (x1 - x0), r.height / (y1 - y0));
   view.x = (x0 + x1) / 2 - r.width / 2 / view.s;
   view.y = (y0 + y1) / 2 - r.height / 2 / view.s;
@@ -132,7 +216,8 @@ function fitRect(x0, y0, x1, y1) {
 }
 function fitAll() { fitRect(0, 0, img.width, img.height); }
 function zoomTo(name) {
-  const t = taps[name];
+  let t = taps[name];
+  if ((!t || t.skipped) && review) t = review.points[name];
   if (!t || t.skipped) return;
   const [x, y] = toPx(t.yaw, t.pitch);
   fitRect(x - 60, y - 30, x + 60, y + 30);
@@ -144,6 +229,9 @@ function draw() {
   if (!img || !img.complete || !meta) return;
   ctx.imageSmoothingEnabled = view.s < 2;
   ctx.drawImage(img, -view.x * view.s, -view.y * view.s, img.width * view.s, img.height * view.s);
+  const li = showLines && paint && linesFor(pick);
+  if (li) ctx.drawImage(li, -view.x * view.s, -view.y * view.s, img.width * view.s, img.height * view.s);
+  if (review && showFit) drawFit();
   meta.points.forEach((p, k) => {
     const t = taps[p.name];
     if (!t || t.skipped) return;
@@ -156,6 +244,32 @@ function draw() {
       ctx.font = "12px system-ui"; ctx.fillStyle = ctx.strokeStyle;
       ctx.fillText(p.name.replace(/^(left|right) /, ""), sx + 11, sy - 6);
     }
+  });
+}
+
+function polyline(pts, close) {
+  ctx.beginPath();
+  pts.forEach(([yaw, pitch], i) => {
+    const [sx, sy] = scr(...toPx(yaw, pitch));
+    // A marking passing behind the camera wraps in yaw: break it there.
+    if (i === 0 || Math.abs(yaw - pts[i - 1][0]) > 90) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+  });
+  if (close) ctx.closePath();
+  ctx.stroke();
+}
+
+function drawFit() {
+  ctx.lineWidth = 1.2; ctx.strokeStyle = "rgba(63, 208, 255, .85)";
+  review.lines.forEach(l => polyline(l));
+  review.goals.forEach(g => { ctx.lineWidth = 1.5; ctx.strokeStyle = g.valid ? "#ffd400" : "#ff5050"; polyline(g.deg); });
+  meta.points.forEach((p, k) => {
+    const f = review.points[p.name];
+    if (!f) return;
+    const [sx, sy] = scr(...toPx(f.yaw, f.pitch));
+    const sel = k === cur;
+    ctx.strokeStyle = "#ff4fd8"; ctx.lineWidth = sel ? 2 : 1.2;
+    ctx.beginPath(); ctx.arc(sx, sy, sel ? 7 : 5, 0, 2 * Math.PI); ctx.stroke();
+    if (sel) { ctx.font = "12px system-ui"; ctx.fillStyle = "#ff4fd8"; ctx.fillText("fit", sx + 9, sy + 14); }
   });
 }
 
@@ -215,10 +329,35 @@ document.getElementById("clear").onclick = () => {
 };
 document.getElementById("zoom").onclick = () => zoomTo(meta.points[cur].name);
 document.getElementById("all").onclick = () => fitAll();
+document.getElementById("accept").onclick = () => {
+  const name = meta.points[cur].name, f = review && review.points[name];
+  if (!f) return;
+  taps[name] = { yaw: f.yaw, pitch: f.pitch, fromFit: true };
+  post(name, { yaw: f.yaw, pitch: f.pitch, fromFit: true });
+  const next = meta.points.findIndex((p, k) => k > cur && !taps[p.name]);
+  select(next < 0 ? cur : next);
+};
+document.getElementById("lines").onclick = () => { showLines = !showLines; renderPaint(); draw(); };
+document.getElementById("paintok").onclick = async () => {
+  const before = paint.paint, wasConfirmed = paint.confirmed;
+  paint = await fetch("/paint", { method: "POST", body: JSON.stringify({ paint: pick }) }).then(r => r.json());
+  if (before !== paint.paint && (wasConfirmed || paint.suggested)) paint.refit = before;
+  renderPaint();
+  const s = document.getElementById("saved");
+  s.style.opacity = 1; setTimeout(() => s.style.opacity = 0, 700);
+};
+document.getElementById("fit").onclick = () => {
+  showFit = !showFit;
+  document.getElementById("fit").textContent = showFit ? "Hide fit" : "Show fit";
+  draw();
+};
 window.addEventListener("keydown", e => {
   if (e.key === "ArrowDown") { e.preventDefault(); select(cur + 1); }
   if (e.key === "ArrowUp") { e.preventDefault(); select(cur - 1); }
   if (e.key === "Backspace") document.getElementById("clear").click();
+  if (e.key === "Enter" && review) { e.preventDefault(); document.getElementById("accept").click(); }
+  if ((e.key === "f" || e.key === "F") && review) document.getElementById("fit").click();
+  if ((e.key === "l" || e.key === "L") && !document.getElementById("lines").hidden) document.getElementById("lines").click();
 });
 window.addEventListener("resize", resize);
 resize();

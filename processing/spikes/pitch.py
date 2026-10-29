@@ -12,6 +12,8 @@ Run after phase0.py and follow.py (cached cameras):
     uv run processing/spikes/pitch.py footage/rec3 <segment> [cx,cz,h,rot_deg,tilt_x,tilt_z,L,W,k]
     uv run processing/spikes/pitch.py footage/rec3 goals
     uv run processing/spikes/pitch.py footage/rec4 taps     (after tapping keypoints in pitchtap/server.py)
+    uv run processing/spikes/pitch.py footage/rec4 review   (the fit, for checking in pitchtap/server.py)
+    uv run processing/spikes/pitch.py footage/rec5 paint [start pose]  (choose the line colour, to confirm in pitchtap)
     uv run processing/spikes/pitch.py footage/rec3 fixture footage/fixtures/pitch/<name>
 
 The phones sit at (nearly) one point and the pitch is flat, so one 3x3
@@ -113,8 +115,86 @@ def turf(bg: np.ndarray, hue_min: int = 30) -> np.ndarray:
     return (field.astype(bool) | holes)
 
 
-def line_mask(bg: np.ndarray) -> np.ndarray:
-    """White paint on the turf: brighter than its surroundings at some
+def paint_colour(rec: Path, default: str = "white") -> str:
+    """The pitch's marking colour from <recording>/pitch/paint.json
+    ({"paint": "yellow"}; multi-sport turf often marks football in a colour),
+    or written by a normal run asked to choose ("auto").
+    `default` without the file. "auto" (in the file) has a normal run
+    choose the colour itself (choose_paint, advisory: check its choice)."""
+    path = rec / "pitch" / "paint.json"
+    return json.loads(path.read_text())["paint"] if path.exists() else default
+
+
+# Coloured paint: (top-hat size px, colour threshold), smallest first. The colour
+# is measured against the turf around each pixel at that scale, along the
+# paint's direction in Lab's a*b* plane (PAINTS). Thin far lines only stand out
+# at small sizes and must also be more saturated than their surroundings there
+# (broad haze patches on a floodlit far half are as yellow as faint paint);
+# near lines are wide and contrasty, so the large sizes take only a high
+# threshold and no saturation test (the yellow stripe of a red/yellow
+# touchline is less saturated than the red beside it). Tuned on yellow.
+COLOUR_SCALES = ((5, 3), (9, 3), (21, 7), (61, 12), (151, 14))
+COLOUR_SAT_MAX_K = 21
+
+# Paint colours the line finder knows: Lab a*b* direction (degrees from +a*,
+# red, towards +b*, yellow) and OpenCV hue windows (0-180). White is found
+# by brightness instead (line_mask). Only white and yellow have been checked
+# on real fields; the others are set from the colour wheel.
+PAINTS = {
+    "yellow": (90.0, ((12, 40),)),
+    "orange": (60.0, ((5, 20),)),
+    "red": (30.0, ((0, 8), (165, 180))),
+    "blue": (-90.0, ((90, 130),)),
+}
+
+
+def colour_mask(bg: np.ndarray, paint: str) -> np.ndarray:
+    """Paint of a colour in PAINTS on the turf. Faint far markings (the
+    2026-10-28 game's yellow centre circle and far ends) differ from the haze
+    around them by 1-3 units of colour, so they are not found; the mask keeps
+    what is unambiguous and leaves the far end to tapped keypoints."""
+    angle, hues = PAINTS[paint]
+    lab = cv2.cvtColor(bg, cv2.COLOR_BGR2LAB).astype(np.float32)
+    th = np.radians(angle)
+    # Yellow is exactly b* (angle 90): the same mask as when this was yellow only.
+    c = (lab[..., 1] - 128) * np.float32(round(np.cos(th), 12)) + (lab[..., 2] - 128) * np.float32(round(np.sin(th), 12))
+    hsv = cv2.cvtColor(bg, cv2.COLOR_BGR2HSV)
+    sat = hsv[..., 1].astype(np.float32)
+
+    def tophat(ch, k):
+        return cv2.morphologyEx(ch, cv2.MORPH_TOPHAT, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+
+    raw = np.zeros(c.shape, bool)
+    for k, t in COLOUR_SCALES:
+        raw |= (tophat(c, k) > t) & ((tophat(sat, k) > 2 * t) if k <= COLOUR_SAT_MAX_K else True)
+    tf = turf(bg, hue_min=20)
+    field = cv2.dilate(tf.astype(np.uint8), np.ones((9, 9), np.uint8)).astype(bool)
+    # The turf's far edge against a dark backdrop reads as a coloured band.
+    inner = np.arange(bg.shape[0])[:, None] > np.argmax(tf, axis=0)[None, :] + 8
+    h = hsv[..., 0]
+    in_hue = np.zeros(h.shape, bool)
+    for lo, hi in hues:
+        in_hue |= (h >= lo) & (h < hi)
+    raw &= in_hue & field & inner
+    # Keep line-shaped pieces: drops leaves, kit bags and floodlight glare.
+    n, lab_, st, _ = cv2.connectedComponentsWithStats(raw.astype(np.uint8), connectivity=8)
+    keep = np.zeros(n, bool)
+    for i in range(1, n):
+        if st[i, cv2.CC_STAT_AREA] < 15:
+            continue
+        x0, y0, w0, h0 = st[i, :4]
+        ys, xs = np.nonzero(lab_[y0:y0 + h0, x0:x0 + w0] == i)
+        _, (w, hh), _ = cv2.minAreaRect(np.c_[xs, ys].astype(np.float32))
+        length = max(w, hh)
+        keep[i] = length > 25 and st[i, cv2.CC_STAT_AREA] / length < 0.12 * length
+    return (keep[lab_] * 255).astype(np.uint8)
+
+
+def line_mask(bg: np.ndarray, paint: str = "white") -> np.ndarray:
+    """Pitch markings on the turf, in the pitch's paint colour (see
+    paint_colour; colour_mask for the colours in PAINTS).
+
+    White paint: brighter than its surroundings at some
     scale (lines are a few pixels wide far away, tens nearby) and
     unsaturated (the blue, yellow and red markings belong to other sports).
     "Unsaturated" is S < 100, not lower: a line one or two pixels wide at
@@ -122,6 +202,10 @@ def line_mask(bg: np.ndarray) -> np.ndarray:
     saturated (the 2026-10-21 field's end markings were lost at S < 60). The
     turf's hue bound is lower than turf()'s default because one phone's
     colour cast can put distant grass at hue ~25-30 (that field's Main half)."""
+    if paint in PAINTS:
+        return colour_mask(bg, paint)
+    if paint != "white":
+        raise ValueError(f"unknown paint colour {paint!r} (white or one of {', '.join(PAINTS)})")
     hsv = cv2.cvtColor(bg, cv2.COLOR_BGR2HSV)
     v = hsv[..., 2]
     tophat = np.zeros_like(v)
@@ -653,7 +737,7 @@ def goals_main(rec: Path) -> None:
     j = json.loads(base.read_text())
     pose = PitchPose([*j["cameraXZ"], j["heightM"], j["rotRad"], *j["tiltRad"], j["lengthM"], j["widthM"],
                       j["markingScale"], *j.get("warpDeg", [0.0, 0.0])])
-    goals, q = detect_goals(bg, line_mask(bg), pano, pose)
+    goals, q = detect_goals(bg, line_mask(bg, paint_colour(rec)), pano, pose)
     for g in goals:
         print(f"{'left ' if g['side'] < 0 else 'right'} goal: {'valid' if g['valid'] else 'REJECTED'}; "
               f"{g['width']} x {g['height']} m; end markings {g['endLinesPx']} px from paint,"
@@ -688,6 +772,9 @@ def tap_targets(pose: PitchPose) -> dict:
         out[f"{e} 18-yard front corner"] = (x0 - s * k * PEN_DEPTH, -k * PEN_HALF)
         out[f"{e} 6-yard goal-line corner"] = (x0, -k * GOAL_HALF)
         out[f"{e} 6-yard front corner"] = (x0 - s * k * GOAL_DEPTH, -k * GOAL_HALF)
+    out["halfway far end"] = (0.0, hw)
+    out["circle near crossing"] = (0.0, -k * CIRCLE_R)
+    out["circle far crossing"] = (0.0, k * CIRCLE_R)
     return out
 
 
@@ -711,7 +798,7 @@ def taps_main(rec: Path) -> None:
     posts = [n for n in taps if n.endswith("post base")]
     obs = {n: np.array(pano.to_px(np.array([taps[n]["yaw"]]), np.array([taps[n]["pitch"]]))).ravel() for n in taps}
     print(f"{len(points)} tapped keypoints, {len(posts)} post bases")
-    mask = line_mask(bg)
+    mask = line_mask(bg, paint_colour(rec))
     dist = cv2.distanceTransform((mask == 0).astype(np.uint8), cv2.DIST_L2, 5)
     free = [0, 1, 2, 3, 4, 5, 6, 7, 9, 10]
 
@@ -757,6 +844,43 @@ def taps_main(rec: Path) -> None:
     for n in taps:
         cv2.drawMarker(img, tuple(int(c) for c in obs[n]), (255, 255, 0), cv2.MARKER_CROSS, 18, 2)
     cv2.imwrite(str(out / "overlay_taps.jpg"), cv2.resize(img, (pano.w // 2, pano.h // 2)), [cv2.IMWRITE_JPEG_QUALITY, 90])
+
+
+def review_main(rec: Path) -> None:
+    """Export the current fit for review in pitchtap/server.py: every marking
+    and goal frame as polylines in panorama degrees, and where the fit puts
+    each tap point. Writes pitch/review.json."""
+    out = rec / "pitch"
+    pose = load_pose(rec)
+    goals_path = out / "goals.json"
+    goals = json.loads(goals_path.read_text())["goals"] if goals_path.exists() else []
+    lines = []
+    for e in _elements(pose.L, pose.W, pose.k):
+        if e[0] == "seg":
+            xz = np.linspace(e[1], e[2], 200)
+        else:
+            _, (cx, cz), r, t0, t1 = e
+            t = np.linspace(t0, t1, 200)
+            xz = np.c_[cx + r * np.cos(t), cz + r * np.sin(t)]
+        lines.append(np.round(pose.angles(xz), 3).tolist())
+    frames = []
+    for g in goals:
+        w2 = g["width"] / 2
+        corners = [(g["z"] - w2, 0.0), (g["z"] - w2, g["height"]), (g["z"] + w2, g["height"]), (g["z"] + w2, 0.0)]
+        a = pose.angles3(np.array([[g["x"], z] for z, _ in corners]), [h for _, h in corners])
+        frames.append({"side": "left" if g["side"] < 0 else "right", "valid": g["valid"],
+                       "widthM": g["width"], "heightM": g["height"], "deg": np.round(a, 3).tolist()})
+    targets = dict(tap_targets(pose))
+    for g in goals:
+        targets[f"{'left' if g['side'] < 0 else 'right'} near post base"] = (g["x"], g["z"] - g["width"] / 2)
+    names = list(targets)
+    a = pose.angles(np.array([targets[n] for n in names]))
+    fit = {n: {"yaw": round(float(y), 3), "pitch": round(float(p), 3)} for n, (y, p) in zip(names, a)}
+    (out / "review.json").write_text(json.dumps({
+        "pitch": {"lengthM": round(pose.L, 2), "widthM": round(pose.W, 2), "cameraHeightM": round(pose.h, 2),
+                  "fittedWith": json.loads((out / "pitch.json").read_text()).get("fittedWith", "lines")},
+        "lines": lines, "goals": frames, "points": fit}, indent=1))
+    print(f"wrote {out / 'review.json'}: {len(lines)} markings, {len(frames)} goals, {len(fit)} points")
 
 
 def load_goals(rec: Path):
@@ -829,6 +953,193 @@ def save_fixture(rec: Path, dest: Path) -> None:
     print(f"fixture saved to {dest}: background.png, expected.json ({len(expected['keyPointsDeg'])} key points)")
 
 
+PAINT_TOL_PX = 4.0  # a model line point this close to detected paint is on it
+PAINT_MIN_PX = 2000  # a colour with fewer line pixels than this isn't tried
+PAINT_TIE = 0.8     # runner-up scoring this share of the best: too close to choose
+PAINT_WEAK = 0.15   # best score under this: no colour fits well
+# Football pitches, adult (90-120 x 45-90 m) down to small-sided youth ones; a
+# fit outside this has stretched onto noise and can't win.
+PLAUSIBLE_L, PLAUSIBLE_W, PLAUSIBLE_H = (45.0, 125.0), (25.0, 95.0), (0.5, 10.0)
+
+
+def plausible(pose: PitchPose) -> bool:
+    return bool(PLAUSIBLE_L[0] <= pose.L <= PLAUSIBLE_L[1] and PLAUSIBLE_W[0] <= pose.W <= PLAUSIBLE_W[1]
+                and pose.W < pose.L and PLAUSIBLE_H[0] <= pose.h <= PLAUSIBLE_H[1])
+
+
+def paint_score(mask: np.ndarray, pano: Pano, pose: PitchPose, field: np.ndarray, only=None) -> dict:
+    """How well a fitted football pitch lies on `mask`: the share of its line
+    points within PAINT_TOL_PX of paint ("onPaint"; points off the panorama
+    count as off paint), less the share a mask this dense would cover by
+    chance ("chance": its pixels grown by the tolerance, over `field`, the turf). The
+    difference ("score") stops a noisy mask from winning by covering
+    everything."""
+    dist = cv2.distanceTransform((mask == 0).astype(np.uint8), cv2.DIST_L2, 5)
+    ang = pose.angles(pitch_lines(pose.L, pose.W, pose.k, only=only))
+    x, y = pano.to_px(ang[:, 0], ang[:, 1])
+    ok = (x >= 0) & (x < pano.w - 1) & (y >= 0) & (y < pano.h - 1)
+    on = np.zeros(len(x), bool)
+    on[ok] = dist[y[ok].astype(int), x[ok].astype(int)] <= PAINT_TOL_PX
+    chance = float((dist <= PAINT_TOL_PX)[field].mean())
+    return {"onPaint": round(float(on.mean()), 3), "chance": round(chance, 3),
+            "score": round(float(on.mean()) - chance, 3)}
+
+
+PAINT_SAMPLE_PX = 6.0  # paint is sampled this close to the fitted near markings
+PAINT_WARM_DB = 1.0    # paint this much yellower than the turf (Lab b*) is a colour, not white ...
+PAINT_COOL_DB = -1.0   # ... and this much less yellow is white (or blue); between: can't tell
+
+
+def measure_paint(bg: np.ndarray, pano: Pano, pose: PitchPose) -> dict | None:
+    """The paint's colour on the fitted near touchline, halfway line and
+    centre circle: the median Lab difference between line pixels there
+    (found by any colour's line finder) and the turf around them. Under
+    floodlights the line finders overlap (the white one catches pale far
+    yellow paint, the yellow one floodlit white lines), but the paint's
+    own colour against the turf still differs: white paint is less yellow
+    than yellow-green turf (b* -10 and -12 on the 2026-10-14 and -21
+    fields), yellow paint more (+3 on 2026-10-28)."""
+    anyline = np.zeros(bg.shape[:2], bool)
+    for c in ("white", *PAINTS):
+        anyline |= line_mask(bg, c) > 0
+    ang = pose.angles(pitch_lines(pose.L, pose.W, pose.k, step=0.25, only=STAGES[0][0]))
+    x, y = pano.to_px(ang[:, 0], ang[:, 1])
+    ok = np.isfinite(x) & (x >= 0) & (x < pano.w - 1) & (y >= 0) & (y < pano.h - 1)
+    model = np.zeros(bg.shape[:2], np.uint8)
+    model[y[ok].astype(int), x[ok].astype(int)] = 1
+    sel = (cv2.distanceTransform(1 - model, cv2.DIST_L2, 5) <= PAINT_SAMPLE_PX) & anyline
+    if sel.sum() < 200:
+        return None
+    lab = cv2.cvtColor(bg, cv2.COLOR_BGR2LAB)
+    d = lab.astype(np.float32)[sel] - cv2.medianBlur(lab, 31).astype(np.float32)[sel]
+    dL, da, db = (float(v) for v in np.median(d, axis=0))
+    return {"pixels": int(sel.sum()), "dL": dL, "da": da, "db": db,
+            "angleDeg": round(float(np.degrees(np.arctan2(db, da))), 1)}
+
+
+def classify_paint(m: dict) -> str | None:
+    """A paint colour from measure_paint's colour against the turf, or None
+    when it is too close to the turf's own to tell. Only white and yellow
+    have been seen; the other bounds are from the colour wheel."""
+    if m["db"] >= PAINT_WARM_DB:
+        return "yellow" if m["angleDeg"] >= 65 else "orange" if m["angleDeg"] >= 30 else "red"
+    if m["db"] <= PAINT_COOL_DB:
+        return "blue" if m["db"] <= -15 and m["dL"] < 8 else "white"
+    return "red" if m["da"] >= 6 else None
+
+
+def choose_paint(bg: np.ndarray, pano: Pano, v0) -> tuple[str, PitchPose, dict]:
+    """Picks the paint colour (white or one in PAINTS) and fits the pitch.
+
+    First, where the lines are: the pitch is fitted with each colour's
+    line finder from the same start, and the fit that lies best on its own
+    paint (paint_score), among fits of a plausible size, gives the
+    position. Under floodlights the finders overlap, so that fit's colour
+    isn't the answer (it was white for the yellow-lined 2026-10-28 game);
+    the colour is measured on the paint under its near markings instead
+    (measure_paint). The pitch is then refitted with that colour's finder;
+    if that fit comes out implausible (far markings too faint to find), the
+    position fit is kept and the far end needs tapped keypoints. Exits
+    without choosing when the paint is too close to the turf's colour to
+    tell: write pitch/paint.json by hand."""
+    results = {}
+    field = turf(bg, hue_min=20)
+    for paint in ("white", *PAINTS):
+        mask = line_mask(bg, paint)
+        n = int((mask > 0).sum())
+        if n < PAINT_MIN_PX:
+            print(f"{paint}: {n} line pixels, not tried", flush=True)
+            results[paint] = {"linePixels": n, "score": None}
+            continue
+        print(f"{paint}: {n} line pixels, fitting", flush=True)
+        pose = fit_pose(mask, pano, v0)
+        r = {"linePixels": n, **paint_score(mask, pano, pose, field), "pose": pose,
+             "fit": pose_json(pose), "plausible": plausible(pose)}
+        if not r["plausible"]:
+            r["score"] = None  # stretched onto noise: not a candidate
+        results[paint] = r
+    tried = sorted((p for p in results if results[p]["score"] is not None), key=lambda p: -results[p]["score"])
+    scores = {p: {k: v for k, v in r.items() if k != "pose"} for p, r in results.items()}
+    print("fits (share of the pitch's lines on that colour's paint, less chance):")
+    for p, r in results.items():
+        if "pose" in r and not r["plausible"]:
+            print(f"  {p:7s} rejected: fitted a {r['pose'].L:.1f} x {r['pose'].W:.1f} m pitch,"
+                  f" camera {r['pose'].h:.2f} m up ({r['onPaint']:.3f} on paint)")
+    for p in tried:
+        r = results[p]
+        print(f"  {p:7s} {r['score']:+.3f}  ({r['onPaint']:.3f} on paint, {r['chance']:.3f} by chance;"
+              f" pitch {r['pose'].L:.1f} x {r['pose'].W:.1f} m)")
+    if not tried:
+        sys.exit("no colour's lines fit a pitch; write pitch/paint.json and a start pose by hand")
+    where = tried[0]
+    if results[where]["score"] < PAINT_WEAK:
+        print(f"no colour fits well (best {where}, {results[where]['score']:+.3f}): the start pose may be off;"
+              f" check overlay.jpg and tap keypoints")
+    m = measure_paint(bg, pano, results[where]["pose"])
+    if m is None:
+        sys.exit(f"too little paint under the {where} fit's near markings to measure its colour;"
+                 f" write pitch/paint.json by hand")
+    best = classify_paint(m)
+    print(f"paint on the {where} fit's near markings, against the turf: L* {m['dL']:+.0f}, a* {m['da']:+.0f},"
+          f" b* {m['db']:+.0f} ({m['pixels']} px) -> {best or 'too close to the turf to tell'}")
+    scores["measured"] = {**m, "positionFrom": where, "colour": best}
+    if best is None:
+        sys.exit("the paint's colour is too close to the turf's to tell: write pitch/paint.json by hand")
+    pose = results[where]["pose"]
+    if best != where:
+        first = pose
+        pose = fit_pose(line_mask(bg, best), pano, [first.cx, first.cz, first.h, first.rot, first.tx, first.tz,
+                                                    first.L, first.W, first.k, first.w1, first.w2])
+        if not plausible(pose):
+            print(f"{best}: the refit stretched to {pose.L:.1f} x {pose.W:.1f} m (far markings too faint to find);"
+                  f" keeping the {where} fit: tap keypoints (taps mode) to fit the far end")
+            pose = first
+    return best, pose, scores
+
+
+LINE_COLOURS_BGR = {"white": (255, 255, 255), "yellow": (0, 212, 255), "orange": (31, 138, 255),
+                    "red": (59, 59, 255), "blue": (255, 123, 59)}
+
+
+def write_line_overlays(out: Path, bg: np.ndarray) -> None:
+    """pitch/lines_<colour>.png for every colour with lines: transparent
+    except its line pixels, for the tap page to lay over the panorama."""
+    for c in ("white", *PAINTS):
+        m = line_mask(bg, c) > 0
+        path = out / f"lines_{c}.png"
+        if m.sum() < PAINT_MIN_PX:
+            path.unlink(missing_ok=True)
+            continue
+        rgba = np.zeros((*m.shape, 4), np.uint8)
+        rgba[m] = (*LINE_COLOURS_BGR[c], 255)
+        cv2.imwrite(str(path), rgba)
+
+
+def save_paint(out: Path, paint: str, scores: dict) -> None:
+    """pitch/paint.json for a chosen colour, waiting for confirmation on the
+    tap page; a colour confirmed there is kept, with this choice beside it."""
+    path = out / "paint.json"
+    old = json.loads(path.read_text()) if path.exists() else {}
+    if old.get("confirmed"):
+        old.update(suggested=paint, scores=scores)
+        path.write_text(json.dumps(old, indent=1))
+        print(f"paint: {old['paint']} (confirmed on the tap page; this run chose {paint})")
+        return
+    path.write_text(json.dumps({"paint": paint, "chosenBy": "choose_paint", "scores": scores}, indent=1))
+    print(f"paint: {paint} -> {path} (confirm it on the tap page)")
+
+
+def paint_main(rec: Path, start: list[float] | None = None) -> None:
+    """Chooses the paint colour for a recording whose pitch is already
+    mapped (choose_paint) and writes paint.json and the colours' line
+    overlays for the tap page, leaving pitch.json alone."""
+    out = rec / "pitch"
+    bg = cv2.imread(str(out / "background.png"))
+    best, _, scores = choose_paint(bg, Pano(), start or START_POSE)
+    write_line_overlays(out, bg)
+    save_paint(out, best, scores)
+
+
 def main(rec: Path, seg: int, start: list[float] | None = None) -> None:
     out = rec / "pitch"
     out.mkdir(exist_ok=True)
@@ -840,17 +1151,23 @@ def main(rec: Path, seg: int, start: list[float] | None = None) -> None:
         bg = background(rec, seg, pano)
         cv2.imwrite(str(bg_path), bg)
     cv2.imwrite(str(out / "background.jpg"), cv2.resize(bg, (pano.w // 3, pano.h // 3)))
-    mask = line_mask(bg)
-    cv2.imwrite(str(out / "lines.png"), mask)
-    cv2.imwrite(str(out / "lines_small.png"), cv2.resize(mask, (pano.w // 3, pano.h // 3), interpolation=cv2.INTER_AREA))
-    print(f"panorama {pano.w}x{pano.h}, line pixels {int((mask > 0).sum())}")
     # Start: on the halfway line (it looks vertical at ~4 deg yaw); the
     # painted centre circle spans ~32 deg and dips 2.5-5.3 deg, which puts
     # its centre ~31 m away with the camera ~1.9 m up; the near touchline
     # passes under the panorama, so it is within ~2 m of the camera.
     v0 = start or START_POSE
     cv2.imwrite(str(out / "overlay_init.jpg"), cv2.resize(draw(bg, pano, PitchPose(v0)), (pano.w // 3, pano.h // 3)))
-    pose = fit_pose(mask, pano, v0)
+    paint, pose = paint_colour(rec), None
+    if paint == "auto":
+        paint, pose, scores = choose_paint(bg, pano, v0)
+        save_paint(out, paint, scores)
+    write_line_overlays(out, bg)
+    mask = line_mask(bg, paint)
+    cv2.imwrite(str(out / "lines.png"), mask)
+    cv2.imwrite(str(out / "lines_small.png"), cv2.resize(mask, (pano.w // 3, pano.h // 3), interpolation=cv2.INTER_AREA))
+    print(f"panorama {pano.w}x{pano.h}, {paint} line pixels {int((mask > 0).sum())}")
+    if pose is None:
+        pose = fit_pose(mask, pano, v0)
     cv2.imwrite(str(out / "overlay.jpg"), cv2.resize(draw(bg, pano, pose), (pano.w // 3, pano.h // 3)))
     (out / "pitch.json").write_text(json.dumps({
         "cameraXZ": [pose.cx, pose.cz], "heightM": pose.h, "rotRad": pose.rot,
@@ -864,6 +1181,12 @@ if __name__ == "__main__":
         goals_main(Path(sys.argv[1]))
     elif len(sys.argv) > 2 and sys.argv[2] == "taps":
         taps_main(Path(sys.argv[1]))
+    elif len(sys.argv) > 2 and sys.argv[2] == "review":
+        review_main(Path(sys.argv[1]))
+    elif len(sys.argv) > 2 and sys.argv[2] == "paint":
+        # Optional third argument: a start pose, as for a normal run.
+        v = [float(x) for x in sys.argv[3].split(",")] if len(sys.argv) > 3 else None
+        paint_main(Path(sys.argv[1]), v and [*v[:3], float(np.radians(v[3])), *v[4:], *([0.0, 0.0] if len(v) < 11 else [])])
     elif len(sys.argv) > 3 and sys.argv[2] == "fixture":
         save_fixture(Path(sys.argv[1]), Path(sys.argv[3]))
     else:
