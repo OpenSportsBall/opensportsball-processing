@@ -56,7 +56,8 @@ def main(rec: Path, seg: int, start: float, seconds: float, tset: str, fps: floa
     cm, cs = follow.setup_cameras(rec, report, devs, flip)
     cams = [cm.at(follow.SRC_W), cs.at(follow.SRC_W)]
     pose = P.load_pose(rec)
-    goals = {g["side"]: np.array([g["x"], g["z"]]) for g in P.load_goals(rec)}
+    # No goals.json (none detected): the goal-line centres, as in follow.py.
+    goals = {g["side"]: np.array([g["x"], g["z"]]) for g in P.load_goals(rec) or []}
     hl, hw = pose.L / 2 + 1, pose.W / 2 + 1
     tdir = rec / "teams" / tset
     m = np.load(tdir / "model.npz")
@@ -126,6 +127,7 @@ def main(rec: Path, seg: int, start: float, seconds: float, tset: str, fps: floa
         if (i + 1) % 100 == 0:
             print(f"{i + 1}/{int(seconds * fps)} frames, {(time.time() - t0) / 60:.1f} min, roles so far {dict(tally)}", flush=True)
     path = rec / "detect" / f"roles_{seg}_{start:g}_{seconds:g}.json"
+    path.parent.mkdir(exist_ok=True)
     path.write_text(json.dumps({"segment": seg, "fps": fps, "teams": tset, "frames": frames_out}))
     print(f"{len(frames_out)} frames in {(time.time() - t0) / 60:.1f} min; roles {dict(tally)} -> {path.name}", flush=True)
     import os
