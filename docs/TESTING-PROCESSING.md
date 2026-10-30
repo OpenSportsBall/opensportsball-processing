@@ -298,6 +298,7 @@ way and none raises the found-rate; the backlog has their numbers.
 
 | Path | What |
 |---|---|
+| `footage/bench/` | the bench store: both games' bench inputs and video, mirrored to S3 (section 6) |
 | `footage/rec3/pitch/` | pitch map, goals, background panorama, overview map |
 | `footage/fixtures/pitch/` | mapping regression fixtures; `night-2026-10-21/` is the marked-field benchmark |
 | `footage/rec3/follow/` | pass A caches (`passA_*.json`), the last run's path files, `camlog.txt` and `play_debug.json` |
@@ -334,3 +335,48 @@ each per phone) into `footage/rec3/<device id>/` with the manifest's
 object keys, e.g.
 
     aws s3 cp --profile sbv s3://<footage bucket>/accounts/.../recordings/78618588-.../<device id>/<device id>_003.mp4 footage/rec3/<device id>/
+
+## 6. The bench store
+
+`footage/bench/` holds everything the benches in sections 1-3 read, for
+both games, including the video they need, so any of them can be rerun
+from scratch (new detectors, ballwin settings, roles) without going back
+to the full recordings. It is mirrored to `s3://<footage bucket>/bench/`,
+outside `accounts/`: the upload Lambda ignores it, and deleting a game's
+raw footage after rendering won't touch it.
+
+| Path | What |
+|---|---|
+| `bench/rec3/` | the first game: manifest, `phase0/`, `pitch/`, `teams/`, `bg/`, `playeval/` (5 sets, 26 moments), `follow/` (pass A caches), `detect/` (candidates by tag, roles, net series), `labels/` (random set), `labels_seg3/`, `labels_seg9/`, `balldata/`, `balltrain/` (the RF-DETR checkpoint), `balljudge/`, `heattrain/*.pt` |
+| `bench/rec3/<device>/` | Main segments 0-6 and 9 and their Secondary pairs (16 files, 20 GB): game 0:00-30:00, the seg 3 and seg 9 clips |
+| `bench/rec4cal/` | the 2026-10-21 night game in the corrected camera model: manifest, `phase0/`, `pitch/`, `lens/`, `teams/`, `bg/`, `playeval/` (2 sets, 15 moments), `follow/`, `detect/`, `balljudge/` (rec3's judge) |
+| `bench/rec4cal/<device>/` | Main segments 2-6 and their Secondary pairs (10 files, 12.5 GB): game 10:00-30:00 |
+| `bench/fixtures/pitch/` | the pitch regression fixtures and the marked-field benchmark |
+
+Run the benches on it by giving its recordings:
+
+    uv run processing/spikes/playbench.py footage/bench/rec3 footage/bench/rec4cal [variant ...]
+    OSB_BALL_TAG=win uv run processing/spikes/balleval.py footage/bench/rec3 seg3
+    OSB_PITCH_FIXTURES=footage/bench/fixtures/pitch uv run ... pytest processing/tests/test_pitch_regression.py
+
+Checked when the store was made (2026-10-29): every segment matches its
+manifest's sha256, the play bench gives 29/41 (rec3 20/26, rec4cal 9/15)
+as on the working recordings, balleval matches them, and ballwin decodes
+the rec4cal video. The pitch regression test fails 4/4 on both copies of
+its fixtures alike (a regression since 2026-10-21, not the store).
+
+The benches write their outputs (paths, candidate files, caches) into the
+store as they do into any recording; don't push scratch variants to S3.
+
+| Step | Command |
+|---|---|
+| Check the video every set needs is there and matches the manifest | `uv run processing/spikes/benchstore.py [footage/bench/<rec>] [--quick]` |
+| Restore it on a new machine | `aws s3 sync --profile sbv s3://<footage bucket>/bench/ footage/bench/` |
+| Save changes to it | `aws s3 sync --profile sbv footage/bench/ s3://<footage bucket>/bench/` |
+
+Adding a set: make it on the full recording (section 2 or 3), copy its
+directory and the files it needs (candidates, pass A cache, roles) into
+the store, and download any segment `benchstore.py` reports missing from
+the recording's S3 prefix with the manifest's object key. Video is kept as
+whole, untouched segments so detector runs reproduce exactly; trimming them
+to the bench stretches would save only ~15%.
