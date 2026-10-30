@@ -26,6 +26,11 @@ and otherwise on one window around the prediction (2x when the ball is
 expected small, else 4x). Heatmap peaks become candidates with the peak
 as their confidence, unless an RF-DETR box already holds the same ball.
 
+OSB_FAR_ZOOM=lost (or full) adds a 2x pass over the far band (the crops
+where the ball would be under ZOOM_BELOW_PX) to the scans while the ball is
+lost (or to every full scan). One more labelled ball in 90 for ~30% more
+time (docs/BACKLOG.md, 2026-10-28), so off by default.
+
 Writes <recording>/detect/ball_<segment>_<start>_<seconds>.win.json in
 ballclip.py's format (plus "src": scan / win / zoom / wasb / wasbwin per
 candidate) and prints the tiles per frame against a full scan.
@@ -67,6 +72,9 @@ V_DECAY = 0.85          # ... and shrinks by this per frame while the ball is un
 JUMP_MAX_M = 15.0       # a candidate further than this from the last sighting needs ACCEPT_JUMP_CONF
 WIN = 640
 ZOOM_CROP = 320
+FAR_ZOOM = os.environ.get("OSB_FAR_ZOOM", "")  # "lost": scans while the ball is lost add 2x tiles of the far band
+                                              # (where the ball would be under ZOOM_BELOW_PX); "full": every scan
+FAR_STEP = 280          # far-band crops (ZOOM_CROP) start this far apart (40 px overlap)
 WASB = bool(os.environ.get("OSB_WIN_WASB"))
 WASB_STEER = bool(os.environ.get("OSB_WASB_STEER"))  # WASB's candidates also update the online track (moves RF-DETR's windows)
 WASB_EVERY = bool(os.environ.get("OSB_WASB_EVERY"))  # WASB's full scan on every frame, not only with RF-DETR's
@@ -233,6 +241,30 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
                 rows.append(np.r_[b, sc])
         return rows
 
+    def far_band(phone):
+        """Corners of ZOOM_CROP crops covering the on-pitch pixels where the
+        ball would be under ZOOM_BELOW_PX (the far half of the pitch)."""
+        ys = list(range(detect.BAND_TOP, H - ZOOM_CROP, FAR_STEP)) + [H - ZOOM_CROP]
+        xs = list(range(0, W - ZOOM_CROP, FAR_STEP)) + [W - ZOOM_CROP]
+        out = []
+        for y0 in ys:
+            for x0 in xs:
+                for sx in range(x0 + 20, x0 + ZOOM_CROP, 70):
+                    for sy in range(y0 + 20, y0 + ZOOM_CROP, 70):
+                        yaw, pit = detect.to_angles(cams[phone], np.array([[sx, sy]], float))[0]
+                        gx, gz = pose.to_pitch(yaw, pit)
+                        if (not np.isnan(gx) and abs(gx) <= hl and abs(gz) <= hw
+                                and diam_at(roles[phone], sx, sy) < ZOOM_BELOW_PX):
+                            out.append((x0, y0))
+                            break
+                    else:
+                        continue
+                    break
+        return out
+    far = [far_band(ph) for ph in (0, 1)] if FAR_ZOOM else [[], []]
+    if FAR_ZOOM:
+        print(f"far band: {len(far[0])} + {len(far[1])} crops at 2x ({FAR_ZOOM} scans)", flush=True)
+
     frames_out, t0 = [], time.time()
     ball_xz, ball_v, last_seen, last_full = None, np.zeros(2), -10 ** 9, -10 ** 9
     tiles_total, n_full = 0, 0
@@ -261,6 +293,9 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
                 tl = detect.tiles(H, W)
                 rows += [(r, "scan") for r in run(img, tl)]
                 tiles_total += len(tl)
+                if FAR_ZOOM == "full" or (FAR_ZOOM == "lost" and (ball_xz is None or lost >= LOST_S)):
+                    rows += [(r, "far") for r in run(img, far[phone], scale=2.0)]
+                    tiles_total += len(far[phone])
             px = to_pixel(phone, pred) if pred is not None else None
             peaks = []
             if wasb and (full or WASB_EVERY or px is not None):
