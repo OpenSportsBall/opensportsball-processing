@@ -337,7 +337,7 @@ function updateText(sg) {
   document.getElementById('info').textContent = `Segment ${it.segment}, ${mins}:${secs.padStart(4, '0')} in · `
     + (it.frames.length > 1 ? 'both phones' : `${it.frames[0].phone} phone only`);
   const parts = [sg.visible.length
-    ? 'Suggestions: ' + sg.visible.map((c, k) => `${k + 1} ${c.frame.phone} (${c.conf.toFixed(2)})`).join(', ')
+    ? 'Suggestions: ' + sg.visible.map((c, k) => `${k + 1} ${c.frame.phone} (${c.fromPath ? 'ball path' : c.conf.toFixed(2)})`).join(', ')
     : 'No new suggestions'];
   if (sg.hidden.length) parts.push(`${sg.hidden.length} at spots seen before (H to ${showHidden ? 'hide' : 'show'})`);
   if (sg.spares.length) parts.push(`known spare balls (O marks them)`);

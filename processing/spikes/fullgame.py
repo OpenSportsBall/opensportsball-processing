@@ -39,7 +39,7 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).parent
-CKPT = "balltrain/checkpoint_best_total.pth"
+DETECTOR = HERE.parents[1] / "footage" / "models" / "ball_detector.pth"  # the standard ball detector (README there)
 
 
 def run(cmd: list[str], log: Path, done_file: Path | None = None, grace_s: float = 180.0) -> int:
@@ -73,6 +73,7 @@ def main() -> None:
     ap.add_argument("--start-segment", type=int, default=0,
                     help="start at Main's segment N instead (skip N segments of warm-up); added to --start")
     ap.add_argument("--out", default="fullgame")
+    ap.add_argument("--detector", type=Path, default=DETECTOR, help="ball detector checkpoint (default: the standard one)")
     ap.add_argument("--features", default="goalkick,goalframe,unsure,ball,goalin,ballhold,roles,kickoff")
     ap.add_argument("--roles-fps", type=float, default=4.0, help="roles.py rate (people move slowly; 4 is plenty)")
     ap.add_argument("--teams", default="", help="teams.py set for roles.py (the people stage); empty: no roles")
@@ -118,7 +119,7 @@ def main() -> None:
             t0, rc = time.time(), 0
             if not cands(start, seconds).exists():  # the candidates may be there from an earlier run
                 rc = run(["uv", "run", "-q", str(HERE / "ballwin.py"), str(rec), "0", f"{start:g}", f"{seconds:g}",
-                          str(rec / CKPT), "10"], out / "logs" / f"ball_{k:02d}.log", done_file=cands(start, seconds))
+                          str(a.detector), "10"], out / "logs" / f"ball_{k:02d}.log", done_file=cands(start, seconds))
                 if rc and cands(start, seconds).exists():
                     rc = 0  # the candidates are there; whatever happened after doesn't matter
             if rc == 0 and a.teams and not roles_file(start, seconds).exists():

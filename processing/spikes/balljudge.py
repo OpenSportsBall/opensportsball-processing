@@ -8,6 +8,7 @@
 """A small classifier that judges ball candidates from a crop around each.
 
     uv run processing/spikes/balljudge.py data  footage/rec3 [train clip sets] [test clip sets]   # e.g. seg9 seg3
+    uv run processing/spikes/balljudge.py merge footage/rec5-game footage/rec3 footage/rec5-game*3   # crops of several
     uv run processing/spikes/balljudge.py train footage/rec3 [epochs] [model name]
     uv run processing/spikes/balljudge.py eval  footage/rec3      # held-back moments: candidates ranked by the judge
     uv run processing/spikes/balljudge.py clip  footage/rec3 <candidates.json> [model name] [output tag]
@@ -21,6 +22,12 @@ negatives are motion candidates and the stock detector's suggestions
 that aren't a ball. Split by moment, as balldata.py does.
 
 Writes <recording>/balljudge/: crops.npz, judge.pt, and eval output.
+
+Every game is judged by the standard model, footage/models/ball_judge.pt
+(STANDARD; ballwin.py's inline scores, eval, and clip with no model name).
+A model name picks <recording>/balljudge/<name>.pt instead, as trained
+here; to make one the standard, copy it over STANDARD and note it in
+footage/models/README.md.
 """
 
 from __future__ import annotations
@@ -36,6 +43,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
 import balldata  # noqa: E402
 import phase0  # noqa: E402
+
+STANDARD = Path(__file__).resolve().parents[2] / "footage" / "models" / "ball_judge.pt"
 
 SIZE = 48           # crop fed to the net
 CROP = 4.0          # crop side as a multiple of the expected ball diameter ...
@@ -173,6 +182,33 @@ def data(rec: Path, train_sets=(), test_sets=()) -> None:
         print(f"{sp}: {m.sum()} crops, {y[m].sum()} positives")
 
 
+def merge(out_rec: Path, specs: list[str]) -> None:
+    """One crops.npz from several recordings' (each made by `data`, kept
+    as crops_<recording>.npz when it is the output's own): "<rec>*N"
+    repeats that recording's train crops N times, to weight a new set (a
+    ball colour the others haven't seen) against a large old one. Each
+    keeps its own split."""
+    out = out_rec / "balljudge"
+    own = out / "crops.npz"
+    if own.exists() and not (out / f"crops_{out_rec.name}.npz").exists():
+        own.rename(out / f"crops_{out_rec.name}.npz")
+    Xs, ys, splits = [], [], []
+    for spec in specs:
+        rec, n = Path(spec.split("*")[0]), int(spec.split("*")[1]) if "*" in spec else 1
+        src = rec / "balljudge" / (f"crops_{rec.name}.npz" if rec == out_rec else "crops.npz")
+        z = np.load(src)
+        tr = z["split"] == "train"
+        for r in range(n):
+            m = np.ones(len(tr), bool) if r == 0 else tr
+            Xs.append(z["X"][m]); ys.append(z["y"][m]); splits.append(z["split"][m])
+        print(f"{src}: {len(tr)} crops ({z['y'].sum()} positives), train x{n}")
+    X, y, split = np.concatenate(Xs), np.concatenate(ys), np.concatenate(splits)
+    np.savez_compressed(own, X=X, y=y, split=split)
+    for sp in ("train", "valid", "test"):
+        m = split == sp
+        print(f"{sp}: {m.sum()} crops, {y[m].sum()} positives")
+
+
 class Judge:
     """Tiny conv net; built lazily so numpy-only commands don't import torch."""
 
@@ -242,12 +278,13 @@ def average_precision(scores, labels) -> float:
     return float((prec * l_).sum() / max(1, l_.sum()))
 
 
-def load_judge(rec: Path, name: str = "judge"):
+def load_judge(rec: Path, name: str | None = None):
+    """The standard judge, or <rec>/balljudge/<name>.pt when named."""
     import torch
 
     dev = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
     net = Judge.build().to(dev)
-    net.load_state_dict(torch.load(rec / "balljudge" / f"{name}.pt", map_location=dev))
+    net.load_state_dict(torch.load(STANDARD if name is None else rec / "balljudge" / f"{name}.pt", map_location=dev))
     net.eval()
 
     def score(crops: np.ndarray) -> np.ndarray:
@@ -308,7 +345,7 @@ def evaluate(rec: Path) -> None:
     print(f"\nstock detector alone (conf >= 0.2): match ball {100 * det_only / n_match:.0f}%")
 
 
-def judge_clip(rec: Path, cands_path: Path, name: str = "judge", out_tag: str = "") -> None:
+def judge_clip(rec: Path, cands_path: Path, name: str | None = None, out_tag: str = "") -> None:
     """Adds a "judge" score to every candidate in a ballclip.py file: the
     clip is streamed once per phone at the candidates' frame rate (a
     couple of minutes for 2 minutes of 4K), each candidate cropped from
@@ -354,12 +391,14 @@ def judge_clip(rec: Path, cands_path: Path, name: str = "judge", out_tag: str = 
 if __name__ == "__main__":
     cmd, rec = sys.argv[1], Path(sys.argv[2])
     if cmd == "clip":
-        judge_clip(rec, Path(sys.argv[3]), sys.argv[4] if len(sys.argv) > 4 else "judge",
+        judge_clip(rec, Path(sys.argv[3]), (sys.argv[4] if len(sys.argv) > 4 else "") or None,
                    sys.argv[5] if len(sys.argv) > 5 else "")
     elif cmd == "data":
         train_sets = [x for x in (sys.argv[3] if len(sys.argv) > 3 else "").split(",") if x]
         test_sets = [x for x in (sys.argv[4] if len(sys.argv) > 4 else "").split(",") if x]
         data(rec, train_sets, test_sets)
+    elif cmd == "merge":
+        merge(rec, sys.argv[3:])
     elif cmd == "train":
         train(rec, int(sys.argv[3]) if len(sys.argv) > 3 else 30, sys.argv[4] if len(sys.argv) > 4 else "judge")
     elif cmd == "eval":

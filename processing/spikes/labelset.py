@@ -12,6 +12,7 @@
     uv run processing/spikes/labelset.py footage/rec3 pano
     uv run processing/spikes/labelset.py footage/rec3 clip <name> <segment> <start s> <seconds> [step s]
     uv run processing/spikes/labelset.py footage/rec3 pairs
+    uv run processing/spikes/labelset.py footage/rec5-game ball <candidates file in detect/> [count] [phone] [seed]
 
 Picks `count` random moments across all segments of the recording, and
 for each one phone's frame (upright, full resolution), saved as a JPEG in
@@ -24,6 +25,17 @@ processing/spikes/label/server.py.
 (pano/<id>.jpg), so the ball is easier to find on the field, and
 pano_maps.json: per phone, panorama <-> frame pixel lookups on coarse grids
 (the cameras are fixed, so one table per phone serves every item).
+
+"ball" picks `count` frames of one phone ("main" by default) where the
+ball is likely in view, from a ballwin.py candidates file (detect/...,
+e.g. a .nojudge.json one: see below) and the ball path ballpath.py makes
+from it: half where the path rests on that phone's detection (its
+candidates there are the suggestions), half where the path bridges a gap
+the detector missed (often the hard cases: small, blurred, half hidden),
+with the path's position projected into the frame as the first suggestion
+("fromPath"). Frames are at least BALL_GAP_S apart. For a new ball the
+models haven't seen (the 2026-10-28 game's orange one, which the judge
+rejects): its candidates without the judge still find it.
 
 "pairs" turns every unlabelled item into a moment with both phones'
 frames (kind "pair"), so the ball is clicked once on the panorama and
@@ -65,6 +77,8 @@ def grab(path: Path, t: float, flip: bool, width: int = 3840) -> np.ndarray | No
     a file's end the decoder returns nothing, so the time steps back in
     0.25 s steps (up to 2 s); None when there is still no frame."""
     for back in range(9):
+        if t - 0.25 * back < 0:
+            break  # the file's start: nothing earlier to try
         for pre in (phase0.FRAME_PREROLL_S, 3.0):
             img = phase0.frame_at(path, t - 0.25 * back, width, flip, pre)
             if img is not None:
@@ -168,7 +182,11 @@ def panoramas(rec: Path, out: Path | None = None) -> None:
             continue
         seg, t = it["segment"], it["t"]
         a = grab(rec / devs["main"]["segments"][seg]["objectKey"], t, flip[0], src_w)
-        b = grab(rec / devs["secondary"]["segments"][seg]["objectKey"], t + report["segments"][seg]["offsetS"],
+        # Phones with different segment lengths: the Secondary file that has this moment (phase0's pieces).
+        piece = next((p for p in report["segments"][seg].get("secondaryPieces", [])
+                      if 0 <= t + p["offsetS"] < p["durationMs"] / 1000), None)
+        b = grab(rec / piece["objectKey"], t + piece["offsetS"], flip[1], src_w) if piece else \
+            grab(rec / devs["secondary"]["segments"][seg]["objectKey"], t + report["segments"][seg]["offsetS"],
                  flip[1], src_w)
         if a is None or b is None:
             print(f"{it['id']}: no frame for the panorama at {t:.2f} s, skipped", flush=True)
@@ -291,6 +309,100 @@ def clip(rec: Path, name: str, seg0: int, start: float, seconds: float, step: fl
     panoramas(rec, out)
 
 
+BALL_GAP_S = 1.5  # "ball" set frames at least this far apart in game time
+
+
+def ball_set(rec: Path, cands_name: str, count: int, role: str, seed: int) -> None:
+    import ball as B
+    import ballpath
+    import follow
+    import pitch as P
+
+    manifest = json.loads((rec / "manifest.json").read_text())
+    report = json.loads((rec / "phase0" / "report.json").read_text())
+    devs = phase0.paired_devices(manifest, report)
+    flip = {"main": report["upsideDown"]["main"], "secondary": report["upsideDown"]["secondary"]}
+    phone = 0 if role == "main" else 1
+    if phone and any("secondaryPieces" in s for s in report["segments"]):
+        sys.exit("ball: secondary frames of a mixed-length recording aren't supported; use main")
+    cam = follow.setup_cameras(rec, report, devs, [flip["main"], flip["secondary"]])[phone].at(3840)
+    pose = P.load_pose(rec)
+    data = json.loads((rec / "detect" / cands_name).read_text())
+    fps, frames = data["fps"], data["frames"]
+    n = len(frames)
+    cands = [[d for d in f["detections"] if B.usable(d, pose)] for f in frames]
+    spots = B.static_spots(cands, fps, pose=pose)
+    keep = [[d for d in fr if all(np.hypot(*(np.array(d["xz"]) - sp)) > B.STATIC_RADIUS for sp in spots)]
+            for fr in cands]
+    est, src = ballpath.track(keep, [np.zeros((0, 2))] * n, n, fps)
+
+    def path_px(i):
+        yaw, pitch = pose.angles(np.array([est[i]], float))[0]
+        x, y, ok = cam.project(follow.direction(np.radians(yaw), np.radians(pitch)))
+        return (float(x), float(y)) if ok else None
+
+    def chosen(i):
+        return next((c for c in src[i] if isinstance(c, dict)), None) if src[i] is not None else None
+
+    seen = [i for i in range(n) if chosen(i) is not None and chosen(i)["phone"] == phone]
+    bridged = [i for i in range(n) if est[i] is not None and src[i] is None and path_px(i) is not None]
+    rng = np.random.default_rng(seed)
+    picks: list[tuple[int, str]] = []
+
+    def take(pool, kind, want):
+        got = 0
+        for i in rng.permutation(pool):
+            if got >= want:
+                break
+            if all(abs(frames[i]["t"] - frames[j]["t"]) >= BALL_GAP_S for j, _ in picks):
+                picks.append((int(i), kind))
+                got += 1
+        return got
+
+    half = take(bridged, "bridged", count // 2)
+    take(seen, "detected", count - half)
+    if len(picks) < count:
+        take(bridged, "bridged", count - len(picks))
+    print(f"{len(seen)} frames with a {role} detection on the path, {len(bridged)} bridged in {role}'s view;"
+          f" picked {sum(k == 'detected' for _, k in picks)} + {sum(k == 'bridged' for _, k in picks)}", flush=True)
+
+    out = rec / "labels"
+    (out / "images").mkdir(parents=True, exist_ok=True)
+    items_path = out / "items.json"
+    items = json.loads(items_path.read_text()) if items_path.exists() else []
+    done = {it["id"] for it in items}
+    segs = devs["main"]["segments"]
+    for k, (i, kind) in enumerate(sorted(picks)):
+        seg, t = 0, frames[i]["t"]
+        while seg < len(segs) - 1 and t >= segs[seg]["durationMs"] / 1000:
+            t -= segs[seg]["durationMs"] / 1000
+            seg += 1
+        t = round(t, 2)
+        iid = f"b{seg:02d}_t{t:07.2f}_{role}"
+        if iid in done:
+            continue
+        print(f"{k + 1}/{len(picks)} grabbing {iid}", flush=True)
+        off = 0.0 if role == "main" else report["segments"][seg]["offsetS"]
+        img = grab(rec / devs[role]["segments"][seg]["objectKey"], t + off, flip[role])
+        if img is None:
+            print(f"{iid}: no frame at {t + off:.2f} s, skipped", flush=True)
+            continue
+        cv2.imwrite(str(out / "images" / f"{iid}.jpg"), img, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        sugg = [{"x": round((d["box"][0] + d["box"][2]) / 2, 1), "y": round((d["box"][1] + d["box"][3]) / 2, 1),
+                 "conf": round(d["conf"], 3)} for d in sorted(frames[i]["detections"], key=lambda d: -d["conf"])
+                if d["phone"] == phone][:MAX_SUGGESTIONS]
+        if kind == "bridged":
+            x, y = path_px(i)
+            sugg = [{"x": round(x, 1), "y": round(y, 1), "conf": 0.0, "fromPath": True}] + sugg[:MAX_SUGGESTIONS - 1]
+        items.append({"id": iid, "image": f"images/{iid}.jpg", "segment": seg, "t": t, "phone": role,
+                      "width": img.shape[1], "height": img.shape[0], "candidates": sugg, "dtS": 0.0,
+                      "pick": kind, "source": cands_name})
+        items_path.write_text(json.dumps(items, indent=1))  # every frame: a long run can be stopped
+        print(f"{k + 1}/{len(picks)} {iid}", flush=True)
+    items_path.write_text(json.dumps(items, indent=1))
+    print(f"{len(items)} frames in {out}")
+
+
 def main(rec: Path, count: int, seed: int) -> None:
     import rfdetr
 
@@ -339,6 +451,9 @@ def main(rec: Path, count: int, seed: int) -> None:
 if __name__ == "__main__":
     if len(sys.argv) > 2 and sys.argv[2] == "pano":
         panoramas(Path(sys.argv[1]))
+    elif len(sys.argv) > 3 and sys.argv[2] == "ball":
+        ball_set(Path(sys.argv[1]), sys.argv[3], int(sys.argv[4]) if len(sys.argv) > 4 else 100,
+                 sys.argv[5] if len(sys.argv) > 5 else "main", int(sys.argv[6]) if len(sys.argv) > 6 else 1)
     elif len(sys.argv) > 2 and sys.argv[2] == "pairs":
         pairs(Path(sys.argv[1]))
     elif len(sys.argv) > 6 and sys.argv[2] == "clip":

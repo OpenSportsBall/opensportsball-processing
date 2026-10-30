@@ -116,6 +116,8 @@ def frame_at(path: Path, t: float, width: int, rotate180: bool = False,
     the asked time past that run. None when the file ends before `t`, or
     when every frame of the window is the one repeated frame (the preroll
     was too short: try a longer one)."""
+    if t < 0:
+        return None  # (a negative frame count would have ffmpeg decode the whole file)
     pre = min(preroll, t)
     n = int(round(pre * 30)) + 1
     frames = frames_at(path, t - pre, n, 30, width, rotate180)

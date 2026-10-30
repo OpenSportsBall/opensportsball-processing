@@ -233,6 +233,14 @@ Every candidate carries a `judge` score from `balljudge.py` (a 48 px crop
 classifier; `data`, `train`, `eval`, `clip`). `ballcompare.py` compares the
 stock and fine-tuned detectors on the random label set's held-back frames.
 
+Every game uses one standard detector and judge, `footage/models/ball_detector.pth`
+and `ball_judge.pt` (provenance and bench scores in `footage/models/README.md`):
+`fullgame.py` runs `ballwin.py` with the detector (`--detector` to override), and
+`balljudge.load_judge` reads the judge unless a model name picks
+`<recording>/balljudge/<name>.pt`. Since 2026-10-30 these are the rec3 + rec5
+models (white and orange balls); before, rec3's. The benches pass a detector
+explicitly; their candidate files keep the judge scores they were made with.
+
 `ballpath.py` links the same filtered candidates as one minimum-cost path
 over the whole clip (offline Viterbi; angular motion within a phone's
 view, metric between phones, a "no ball" node per frame, edges up to 1 s
@@ -306,6 +314,7 @@ way and none raises the found-rate; the backlog has their numbers.
 | `footage/rec3/labels/` | the random ball label set (detector training data) |
 | `footage/rec3/labels_<name>/` | clip ball label sets |
 | `footage/rec3/detect/` | ball candidate files by clip and tag, net series |
+| `footage/models/` | the standard ball detector and judge every game uses, with a README of where each came from |
 | `footage/rec3/balldata/`, `balltrain/`, `balljudge/` | detector dataset and checkpoints, judge crops and models |
 | `footage/rec3/fullgame2/` | the second whole-game run's logs: per-chunk `camlog_*.txt` and the runner's logs (the video was removed) |
 
