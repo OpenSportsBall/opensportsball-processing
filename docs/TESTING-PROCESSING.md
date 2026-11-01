@@ -304,6 +304,9 @@ way and none raises the found-rate; the backlog has their numbers.
 
 ## 4. Where things are
 
+The whole `footage/` layout, its S3 backup and how to restore it are in
+[DATA.md](DATA.md).
+
 | Path | What |
 |---|---|
 | `footage/bench/` | the bench store: both games' bench inputs and video, mirrored to S3 (section 6) |
