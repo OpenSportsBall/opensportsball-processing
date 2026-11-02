@@ -183,8 +183,9 @@ def data(rec: Path, train_sets=(), test_sets=()) -> None:
 
 
 def merge(out_rec: Path, specs: list[str]) -> None:
-    """One crops.npz from several recordings' (each made by `data`, kept
-    as crops_<recording>.npz when it is the output's own): "<rec>*N"
+    """One crops.npz from several recordings' (each made by `data`; read
+    from crops_<recording>.npz when there is one, as a merge leaves the
+    output's own, else crops.npz): "<rec>*N"
     repeats that recording's train crops N times, to weight a new set (a
     ball colour the others haven't seen) against a large old one. Each
     keeps its own split."""
@@ -195,7 +196,9 @@ def merge(out_rec: Path, specs: list[str]) -> None:
     Xs, ys, splits = [], [], []
     for spec in specs:
         rec, n = Path(spec.split("*")[0]), int(spec.split("*")[1]) if "*" in spec else 1
-        src = rec / "balljudge" / (f"crops_{rec.name}.npz" if rec == out_rec else "crops.npz")
+        src = rec / "balljudge" / f"crops_{rec.name}.npz"
+        if not src.exists():  # a recording's own crops; its crops.npz may be a merge made there
+            src = src.with_name("crops.npz")
         z = np.load(src)
         tr = z["split"] == "train"
         for r in range(n):
