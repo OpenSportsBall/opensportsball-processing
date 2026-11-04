@@ -2,11 +2,15 @@
 
 Thanks for helping. Before you open a pull request:
 
-1. **Sign the contributor license agreement (CLA).** Pull requests can't be
-   merged until it is signed. The CLA lets the maintainers offer this
-   pipeline under a commercial license alongside the AGPL. (TODO before the
-   repo goes public: adopt a CLA text, based on the Apache Individual CLA,
-   and connect CLA Assistant.)
+1. **Sign the
+   [contributor license agreement](https://github.com/OpenSportsBall/opensportsball/blob/main/CLA.md)
+   (CLA).** CLA Assistant asks you to sign when you open your first pull
+   request, and pull requests can't be merged until you do. One signature
+   covers every repository in the OpenSportsBall organization. You keep
+   the copyright to your work; the CLA lets the project offer this
+   pipeline under a commercial license alongside the AGPL. (TODO before
+   the repo goes public: have the CLA text reviewed and connect CLA
+   Assistant.)
 2. **Add the SPDX header** to every new source file:
 
    ```
