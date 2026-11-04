@@ -1,6 +1,6 @@
 # OpenSportsBall processing
 
-The video pipeline for [OpenSportsBall](../SportsBallVideo): two phones on a
+The video pipeline for [OpenSportsBall](https://github.com/OpenSportsBall/opensportsball): two phones on a
 dual-phone mount record the full field; this code syncs the two videos,
 stitches them into one panorama, follows the play with a virtual camera, and
 renders the game video.
