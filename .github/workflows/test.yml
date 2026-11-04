@@ -14,5 +14,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
       - run: uv sync --extra dev
-      - run: uv run pytest
+      # The pitch regression tests need footage fixtures, which never go in
+      # git, so here they skip; pytest exits 5 when it collects no tests.
+      - run: uv run pytest || [ $? -eq 5 ]
