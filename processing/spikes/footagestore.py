@@ -11,7 +11,9 @@
     uv run processing/spikes/footagestore.py backup [--dry-run]
     uv run processing/spikes/footagestore.py restore [--dry-run]
 
-The layout (docs/DATA.md) in the footage bucket (infra/cdk-outputs.json):
+The layout (docs/DATA.md) in the footage bucket: OSB_FOOTAGE_BUCKET, or
+FootageBucket in the main repo's infra/cdk-outputs.json (OSB_MAIN_REPO,
+default ../SportsBallVideo):
 
     accounts/...  the phones' uploads: raw video and manifests (the app's)
     bench/        = footage/bench/, the bench store
@@ -47,6 +49,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 FOOTAGE = ROOT / "footage"
+# The main OpenSportsBall repo, whose deploy writes the bucket name.
+MAIN_REPO = Path(os.environ.get("OSB_MAIN_REPO", ROOT.parent / "SportsBallVideo"))
 PROFILE = os.environ.get("OSB_AWS_PROFILE", "sbv")
 DEVICE_DIR = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 SKIP_SUFFIXES = {".mp4", ".m4a", ".mov"}  # video: raw video is handled per recording
@@ -54,7 +58,12 @@ SKIP_NAMES = {".DS_Store"}
 
 
 def bucket() -> str:
-    return json.loads((ROOT / "infra" / "cdk-outputs.json").read_text())["OpenSportsBall"]["FootageBucket"]
+    if name := os.environ.get("OSB_FOOTAGE_BUCKET"):
+        return name
+    outputs = MAIN_REPO / "infra" / "cdk-outputs.json"
+    if not outputs.is_file():
+        sys.exit(f"no {outputs}: set OSB_FOOTAGE_BUCKET, or OSB_MAIN_REPO to the main repo checkout")
+    return json.loads(outputs.read_text())["OpenSportsBall"]["FootageBucket"]
 
 
 def aws(*args: str, capture: bool = False) -> str:

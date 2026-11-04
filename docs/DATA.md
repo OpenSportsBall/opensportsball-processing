@@ -3,7 +3,7 @@
 Footage shows people, some possibly minors: nothing here goes in git
 (`footage/` is ignored) or anywhere public. Everything is on the working
 Mac under `footage/` and backed up to the footage bucket in S3
-(`FootageBucket` in `infra/cdk-outputs.json`).
+(`FootageBucket` in the main repo's `infra/cdk-outputs.json`).
 
 ## Layout
 

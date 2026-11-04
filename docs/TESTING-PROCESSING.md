@@ -3,7 +3,7 @@
 How the follow cam, the pitch map and the ball tracking are measured, what the
 measurements say today, and how to extend them. Everything here runs locally
 on the Phase 0 spikes in `processing/spikes/`. See `docs/BACKLOG.md` for the
-history of what was tried and `docs/TESTING-APPS.md` for the phone apps.
+history of what was tried and the main repo's `docs/TESTING-APPS.md` for the phone apps.
 
 ## Principles
 

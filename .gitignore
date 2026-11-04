@@ -1,0 +1,31 @@
+# Footage and datasets: never commit (footage shows minors)
+*.mp4
+*.mov
+*.m4v
+*.mkv
+*.avi
+*.h264
+*.h265
+*.hevc
+*.wav
+*.aac
+footage/
+datasets/
+ml/data/
+ml/runs/
+*.pt
+*.onnx
+*.engine
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/

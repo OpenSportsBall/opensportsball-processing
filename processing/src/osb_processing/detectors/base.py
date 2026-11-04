@@ -6,7 +6,7 @@ Every detector backend implements :class:`Detector`. The rest of the
 pipeline depends only on this module, never on a backend's package, so a
 backend can be swapped without touching tracking or rendering. Keeping an
 Apache-2.0 backend working preserves the option to offer this package under
-a commercial license (docs/LICENSING.md rule 5).
+a commercial license (CONTRIBUTING.md item 3).
 """
 
 from __future__ import annotations

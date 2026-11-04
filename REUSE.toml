@@ -1,0 +1,16 @@
+version = 1
+
+# Files that cannot carry an SPDX header (Markdown, JSON, YAML, TOML, ...).
+# When several annotations match a file, the last one wins, and a header
+# inside the file always takes precedence over these.
+
+[[annotations]]
+path = "**"
+SPDX-FileCopyrightText = "2026 The OpenSportsBall Authors"
+SPDX-License-Identifier = "AGPL-3.0-only"
+
+# Pinned copy of the main repo's data contract, which is Apache-2.0 there.
+[[annotations]]
+path = "schemas/manifest.schema.json"
+SPDX-FileCopyrightText = "2026 The OpenSportsBall Authors"
+SPDX-License-Identifier = "Apache-2.0"

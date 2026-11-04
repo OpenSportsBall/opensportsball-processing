@@ -14,7 +14,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # Detector backends. Keep at least one Apache-2.0 backend working; see
-# docs/LICENSING.md rule 5.
+# CONTRIBUTING.md item 3.
 ultralytics = ["ultralytics>=8.3"]   # AGPL-3.0
 rfdetr = ["rfdetr>=1.2"]             # Apache-2.0
 dev = ["pytest>=8"]
