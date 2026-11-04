@@ -9,8 +9,7 @@ Thanks for helping. Before you open a pull request:
    covers every repository in the OpenSportsBall organization. You keep
    the copyright to your work; the CLA lets the project offer this
    pipeline under a commercial license alongside the AGPL. (TODO before
-   the repo goes public: have the CLA text reviewed and connect CLA
-   Assistant.)
+   the repo goes public: connect CLA Assistant.)
 2. **Add the SPDX header** to every new source file:
 
    ```
