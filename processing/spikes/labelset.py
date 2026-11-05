@@ -259,6 +259,7 @@ def clip(rec: Path, name: str, seg0: int, start: float, seconds: float, step: fl
     `grab`) and each carries "dtS": 0.0, its image's offset from the
     moment's time; sets made before 2026-10-18 were grabbed up to 0.9 s
     late and have their measured offset there (ballheat.py <set> dt)."""
+    import follow
     import playeval
 
     manifest = json.loads((rec / "manifest.json").read_text())
@@ -273,19 +274,20 @@ def clip(rec: Path, name: str, seg0: int, start: float, seconds: float, step: fl
     items = []
     for clip_t in np.arange(0.0, seconds, step):
         seg, t = playeval.segment_time(devs, seg0, start + clip_t)
-        # A phone's file can end just before a segment switch: step back a little.
+        # A phone's file can end just before a segment switch (or, for phones
+        # that cut segments at different lengths, mid-segment): step back a little.
         for role in ("secondary", "main"):
-            off = 0.0 if role == "main" else report["segments"][seg]["offsetS"]
-            while t + off > devs[role]["segments"][seg]["durationMs"] / 1000 - 1.5:
+            while (f := follow.phone_at(devs, report, role, seg, t)) and f[1] > f[2] - 1.5:
                 t, clip_t = t - 0.2, clip_t - 0.2
         base = f"c{seg0}_{start:g}_t{clip_t:06.2f}"
         halves = {}
         for role in ("secondary", "main"):
             iid = f"{base}_{role}"
-            off = 0.0 if role == "main" else report["segments"][seg]["offsetS"]
-            img = grab(rec / devs[role]["segments"][seg]["objectKey"], t + off, flip[role])
+            f = follow.phone_at(devs, report, role, seg, t)
+            img = grab(rec / f[0], f[1], flip[role]) if f else None
             if img is None:
-                raise SystemExit(f"no frame for {role} segment {seg} at {t + off:.2f} s (clip {clip_t:.1f} s)")
+                where = f"{f[0].split('/')[-1]} at {f[1]:.2f} s" if f else "no file covers it"
+                raise SystemExit(f"no frame for {role} in segment {seg} at {t:.2f} s ({where}; clip {clip_t:.1f} s)")
             cv2.imwrite(str(out / "images" / f"{iid}.jpg"), img, [cv2.IMWRITE_JPEG_QUALITY, 92])
             if clip_cands and int(round(clip_t * clip_cands["fps"])) < len(clip_cands["frames"]):
                 k = int(round(clip_t * clip_cands["fps"]))

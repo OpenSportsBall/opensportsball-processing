@@ -75,6 +75,8 @@ def crop_at(img: np.ndarray, x: float, y: float, diam: float) -> np.ndarray:
 
 def frames_with_split(rec: Path):
     lab_dir = rec / "labels"
+    if not (lab_dir / "labels.json").exists():  # a recording with clip sets only
+        return lab_dir, []
     items = json.loads((lab_dir / "items.json").read_text())
     labels = json.loads((lab_dir / "labels.json").read_text())
     motion = json.loads((lab_dir / "motion.json").read_text())

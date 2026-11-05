@@ -34,6 +34,28 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
       recorded frame is ~104 deg (stitcher's focal estimate); the Pixel
       11's 103.6 deg matches. Check `CameraSelection.horizontalFovDeg`
       (crop or zoom ratio). Processing doesn't depend on it today.
+- [ ] A lens model per phone model, so the stitch can't drift in scale.
+      The stitcher only sees the overlap, so it can't separate both
+      focals from the angle between the phones: the same Pixel 11 came
+      out at f 733.6 px @ 1920 on rec6 and 763.5 on rec7 (2026-11-04),
+      and the 4% bent rec7's near touchline ~1 deg (pitch.py's w3 now
+      absorbs it in the taps refit). Holding Main's lens at rec6's value
+      and refitting only Secondary straightened the near touchline but
+      broke the far end and centre (overlap error 5.0 -> 8.4 px at 4K):
+      both lenses need to be known, not one. Plan:
+      - Prior first: `follow.refine` pulls each focal toward the
+        manifest's `video.horizontalFovDeg` (f = 960 / tan(hfov / 2) @
+        1920: Pixel 11 755.3, iPhone 14 Pro 720.8) instead of fixing it;
+        the Pixel 11 Pro's reported FOV is known to be wrong (above), so
+        a table per (model, lens, resolution) overrides it.
+      - Then measure the table: focal, k1, k2 per phone model from a game
+        with tapped keypoints (the pitch is metric, so it pins the scale
+        the overlap can't) or a checkerboard.
+      - Check: rec7's near touchline straight with w3 = 0; the
+        night-2026-10-21 marked-field benchmark (pitchbench.py) and the
+        play bench no worse. Rebuilding cameras.json changes every
+        panorama angle: existing pitch fits and taps.json need redoing
+        (taps can be carried across through the phone pixels).
 - [ ] Players-only follow: `processing/spikes/follow.py` renders a 1080p
       virtual camera straight from both 4K sources. Cameras refined at
       1920 px (median error 11 to 4 px at 4K); each pixel comes from one

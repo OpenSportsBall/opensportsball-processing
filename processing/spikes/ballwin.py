@@ -189,7 +189,7 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
     pose = P.load_pose(rec)
     hl, hw = pose.L / 2 + P.ON_PITCH_MARGIN, pose.W / 2 + P.ON_PITCH_MARGIN
     diam_at = balljudge.expected_at(rec)
-    judge = balljudge.load_judge(rec)
+    judge = balljudge.load_judge(rec, os.environ.get("OSB_JUDGE") or None)  # a <rec>/balljudge/<name>.pt
 
     dev = gpu.device()
     model = rfdetr.RFDETRMedium(pretrain_weights=str(ckpt))

@@ -283,13 +283,16 @@ def confident(s: dict) -> bool:
 
 def settled_at(dev: dict, seg: dict) -> float:
     """Seconds into `seg` (one of `dev`'s segments) when the phone last
-    locked focus and white balance (the manifest's settingsLocks): before
-    that it may not have been on the mount yet. 0 for recordings that
-    don't say."""
-    locks = dev.get("settingsLocks") or []
-    if not locks:
+    locked focus and white balance (the manifest's settingsLocks) before
+    the segment ended: before that it may not have been on the mount yet.
+    Locks after the segment don't count: phones re-lock mid-game (rec7 at
+    ~52 and ~75 min), and those said nothing about segment 0. 0 for
+    recordings that don't say."""
+    end_ms = seg["startedAtDeviceMs"] + seg["durationMs"]
+    within = [k["atDeviceMs"] for k in dev.get("settingsLocks") or [] if k["atDeviceMs"] <= end_ms]
+    if not within:
         return 0.0
-    return max(0.0, (locks[-1]["atDeviceMs"] - seg["startedAtDeviceMs"]) / 1000)
+    return max(0.0, (max(within) - seg["startedAtDeviceMs"]) / 1000)
 
 
 def main(rec: Path, preview_at: float | None) -> None:
@@ -379,7 +382,8 @@ def main(rec: Path, preview_at: float | None) -> None:
     if settled > t_main0 and settled <= t_end - MIN_SETTLED_S:
         t_main0 = settled
     elif settled > t_main0:
-        print(f"settings were last locked {settled:.0f} s into segment 0; calibrating from all of it")
+        print(f"settings were last locked {settled:.0f} s into segment 0, leaving under {MIN_SETTLED_S:.0f} s"
+              " of it; calibrating from all of it")
     report["calibrationFromS"] = round(t_main0, 2)
     times = np.linspace(t_main0, t_end, CALIB_FRAMES)
     # Each phone records which way up it was; older recordings don't, so

@@ -376,7 +376,7 @@ STAGES = [
 X_SCALE = np.array([1, 1, 0.1, 0.02, 0.01, 0.01, 1, 1, 0.05, 0.05, 0.05, 0.05])
 
 
-def fit_pose(mask: np.ndarray, pano: Pano, v0, stages=STAGES):
+def fit_pose(mask: np.ndarray, pano: Pano, v0, stages=STAGES, verbose: bool = True):
     """Least squares on the distance from the model's line points to the
     nearest painted pixel, truncated and blurred, coarse to fine, starting
     from the clearest markings so the fit can't lock onto the wrong line."""
@@ -402,6 +402,8 @@ def fit_pose(mask: np.ndarray, pano: Pano, v0, stages=STAGES):
 
         sol = least_squares(resid, v[free], loss="soft_l1", f_scale=0.3, x_scale=X_SCALE[free], diff_step=1e-3)
         v[free] = sol.x
+        if not verbose:
+            continue
         print(f"  {'all markings' if only is None else 'near/halfway/circle'}, trunc {trunc:3d}px: camera at "
               f"({v[0]:.1f}, {v[1]:.1f}) m, {v[2]:.2f} m up, rot {np.degrees(v[3]):.1f} deg, pitch "
               f"{v[6]:.1f} x {v[7]:.1f} m, mean dist {trunc * np.abs(sol.fun).mean():.1f}px")
@@ -916,6 +918,34 @@ def load_goals(rec: Path):
 # Starting guess for the night game (hand-read; see main). Kept here so the
 # regression fixture reproduces the same fit.
 START_POSE = [0.0, -31.5, 1.9, float(np.radians(-4)), 0.0, 0.0, 100.0, 59.0, 1.0, 0.0, 0.0]
+# Camera heights main tries START_POSE at when no start is given: the fit
+# only converges from a start near the true height (rec7, 6.5 m up, ran
+# off from 1.9 m), and each fit takes about a second.
+START_HEIGHTS = (1.9, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0)
+
+
+def best_start(bg: np.ndarray, pano: Pano, paint: str) -> list[float]:
+    """START_POSE at the height in START_HEIGHTS whose lines-only fit lies
+    best on the paint (paint_score), among fits of a plausible size. On
+    rec7 the 6 m start won by +0.39 to +0.16; on rec6 the 4 m one, closer to
+    its tapped fit than the 1.9 m default."""
+    mask = line_mask(bg, "white" if paint == "auto" else paint)
+    field = turf(bg, hue_min=20)
+    best = None
+    for h in START_HEIGHTS:
+        v0 = list(START_POSE)
+        v0[2] = h
+        pose = fit_pose(mask, pano, v0, verbose=False)
+        s = paint_score(mask, pano, pose, field)["score"] if plausible(pose) else None
+        print(f"  start {h:4.1f} m up: pitch {pose.L:.1f} x {pose.W:.1f} m, camera {pose.h:.2f} m,"
+              f" {'score %+.3f' % s if s is not None else 'implausible'}", flush=True)
+        if s is not None and (best is None or s > best[0]):
+            best = (s, v0)
+    if best is None:
+        print("  no start gave a plausible pitch: using START_POSE; give a start pose by hand")
+        return list(START_POSE)
+    print(f"  starting from {best[1][2]:.1f} m up")
+    return best[1]
 
 
 def pose_json(pose: PitchPose) -> dict:
@@ -1179,9 +1209,13 @@ def main(rec: Path, seg: int, start: list[float] | None = None) -> None:
     # painted centre circle spans ~32 deg and dips 2.5-5.3 deg, which puts
     # its centre ~31 m away with the camera ~1.9 m up; the near touchline
     # passes under the panorama, so it is within ~2 m of the camera.
-    v0 = start or START_POSE
-    cv2.imwrite(str(out / "overlay_init.jpg"), cv2.resize(draw(bg, pano, PitchPose(v0)), (pano.w // 3, pano.h // 3)))
     paint, pose = paint_colour(rec), None
+    if start:
+        v0 = start
+    else:
+        print("no start pose given: trying START_POSE at several camera heights")
+        v0 = best_start(bg, pano, paint)
+    cv2.imwrite(str(out / "overlay_init.jpg"), cv2.resize(draw(bg, pano, PitchPose(v0)), (pano.w // 3, pano.h // 3)))
     if paint == "auto":
         paint, pose, scores = choose_paint(bg, pano, v0)
         save_paint(out, paint, scores)
