@@ -320,6 +320,25 @@ def piece_runs(pieces: list[dict], t: float, n: int, fps: float) -> list[list]:
     return runs
 
 
+def phone_at(devs: dict, report: dict, role: str, seg: int, t: float):
+    """The file one phone has for `t` s into Main's segment `seg`, as
+    (objectKey, time in that file, the file's duration s), or None when no
+    file has the moment. Main is its own clock; Secondary is read from the
+    segment's "secondaryPieces" when phase0.py listed them (phones that cut
+    segments at different lengths: Secondary's file k needn't cover Main's
+    segment k), else from its file `seg` at the segment's audio offset."""
+    if role == "main":
+        s = devs["main"]["segments"][seg]
+        return s["objectKey"], t, s["durationMs"] / 1000
+    pieces = report["segments"][seg].get("secondaryPieces")
+    if pieces:
+        p = next((q for q in pieces if 0 <= t + q["offsetS"] < q["durationMs"] / 1000), None)
+        return (p["objectKey"], t + p["offsetS"], p["durationMs"] / 1000) if p else None
+    s = devs["secondary"]["segments"][seg]
+    local = t + report["segments"][seg]["offsetS"]
+    return (s["objectKey"], local, s["durationMs"] / 1000) if 0 <= local < s["durationMs"] / 1000 else None
+
+
 def game_stream(rec: Path, devs: dict, report: dict, phone: int, seg: int, start: float, seconds: float,
                 width: int, fps: float = FPS):
     """Exactly round(seconds * fps) frames of one phone from `start` s into
