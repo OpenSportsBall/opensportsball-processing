@@ -59,8 +59,11 @@ def segment_time(devs: dict, seg: int, t: float) -> tuple[int, float]:
 def grab(rec: Path, devs: dict, report: dict, phone: int, seg: int, t: float, flip: bool) -> np.ndarray:
     """One full-resolution BGR frame of a phone at Main's time `t` in `seg`."""
     role = ("main", "secondary")[phone]
-    local = t + (0.0 if phone == 0 else report["segments"][seg]["offsetS"])
-    path = rec / devs[role]["segments"][seg]["objectKey"]
+    at = follow.phone_at(devs, report, role, seg, t)
+    if at is None:
+        raise SystemExit(f"no {role} frame at segment {seg}, {t:.2f} s")
+    key, local, _ = at
+    path = rec / key
     W, H = follow.SRC_W, follow.SRC_H
     buf = next(follow.frame_stream(path, max(0.0, local), 1 / follow.FPS, W))
     bgr = cv2.cvtColor(buf.reshape(H * 3 // 2, W), cv2.COLOR_YUV2BGR_NV12)
