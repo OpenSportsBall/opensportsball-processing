@@ -88,7 +88,7 @@ def main(rec: Path, piece: int, stamps: list[str]) -> None:
         feet = {0: [], 1: []}
         for p in fr["people"]:
             yaw, pit = pose.angles(np.array([p["xz"]], float))[0]
-            pit = pit - pose.warp(yaw)
+            pit = pose.unwarp(yaw, pit)
             y, q = np.radians(yaw), np.radians(pit)
             d = np.array([np.sin(y) * np.cos(q), np.sin(q), np.cos(y) * np.cos(q)])
             px, py, ok = cams[p["phone"]].project(d)
