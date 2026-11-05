@@ -280,15 +280,20 @@ class PitchPose:
     turned by `rot` about the vertical, and the ground tilted by `tilt_x`,
     `tilt_z` (radians) relative to the panorama's level.
     `k` scales the fixed-size markings (see _elements). `warp` (degrees) adds
-    w1 * u + w2 * u**2 to every vertical angle, u = yaw / 60 degrees: a smooth
+    w1 * u + w2 * u**2 + w3 * q**2 to every vertical angle, u = yaw / 60
+    degrees, q = the angle below the horizon / 30 degrees: a smooth
     correction for what one flat pitch and the camera model can't explain
     (calibration error toward a frame's edge, a crowned or tilted pitch).
-    Parameters: [cx, cz, h, rot, tilt_x, tilt_z, L, W, k(, w1, w2)].
+    w3 is for the bottom of the frames: the stitcher can't separate both
+    phones' focal lengths from the angle between them, and a focal a few
+    percent off bends the near touchline (rec7: ~1 deg at 35 deg down).
+    Parameters: [cx, cz, h, rot, tilt_x, tilt_z, L, W, k(, w1, w2(, w3))].
     """
 
     def __init__(self, v):
         self.cx, self.cz, self.h, self.rot, self.tx, self.tz, self.L, self.W, self.k = v[:9]
         self.w1, self.w2 = (v[9], v[10]) if len(v) > 9 else (0.0, 0.0)
+        self.w3 = v[11] if len(v) > 11 else 0.0
         cx_, sx = np.cos(self.tx), np.sin(self.tx)
         cz_, sz = np.cos(self.tz), np.sin(self.tz)
         rx = np.array([[1, 0, 0], [0, cx_, -sx], [0, sx, cx_]])
@@ -308,14 +313,34 @@ class PitchPose:
         q = np.stack([c * X - s * Z, self.h - np.asarray(height, float), s * X + c * Z], -1)
         return q @ self.Rt.T
 
-    def warp(self, yaw_deg):
+    def vector(self) -> np.ndarray:
+        return np.array([self.cx, self.cz, self.h, self.rot, self.tx, self.tz, self.L, self.W, self.k,
+                         self.w1, self.w2, self.w3], float)
+
+    def warp_json(self) -> list[float]:
+        return [self.w1, self.w2, self.w3]
+
+    def warp(self, yaw_deg, pitch_deg=0.0):
+        """Degrees added to the true vertical angle at (yaw, pitch)."""
         u = np.asarray(yaw_deg) / 60.0
-        return self.w1 * u + self.w2 * u * u
+        q = np.asarray(pitch_deg) / 30.0
+        return self.w1 * u + self.w2 * u * u + self.w3 * q * q
+
+    def unwarp(self, yaw_deg, pitch_deg):
+        """The true vertical angle (degrees) of a panorama direction: inverts
+        p_pano = p + warp(yaw, p), a quadratic in p once w3 is set."""
+        yaw_deg, pitch_deg = np.asarray(yaw_deg, float), np.asarray(pitch_deg, float)
+        c = pitch_deg - self.warp(yaw_deg)  # p + a * p**2 = c
+        a = self.w3 / 900.0
+        if abs(a) < 1e-12:
+            return c
+        disc = np.maximum(1.0 + 4.0 * a * c, 0.0)
+        return 2.0 * c / (1.0 + np.sqrt(disc))  # the root near c, stable for small a
 
     def _to_angles(self, d):
         yaw = np.degrees(np.arctan2(d[:, 0], d[:, 2]))
         pitch = np.degrees(np.arctan2(d[:, 1], np.hypot(d[:, 0], d[:, 2])))
-        return np.c_[yaw, pitch + self.warp(yaw)]
+        return np.c_[yaw, pitch + self.warp(yaw, pitch)]
 
     def angles3(self, xz: np.ndarray, height: np.ndarray) -> np.ndarray:
         return self._to_angles(self.directions3(xz, height))
@@ -326,7 +351,7 @@ class PitchPose:
     def to_pitch(self, yaw_deg, pitch_deg) -> np.ndarray:
         """Where rays (degrees) meet the ground, in pitch metres; NaN above
         the horizon."""
-        y, p = np.radians(yaw_deg), np.radians(np.asarray(pitch_deg) - self.warp(yaw_deg))
+        y, p = np.radians(yaw_deg), np.radians(self.unwarp(yaw_deg, pitch_deg))
         d = np.stack([np.sin(y) * np.cos(p), np.sin(p), np.cos(y) * np.cos(p)], -1) @ self.Rt
         with np.errstate(divide="ignore", invalid="ignore"):
             k = np.where(d[..., 1] > 1e-6, self.h / d[..., 1], np.nan)
@@ -343,10 +368,12 @@ STAGES = [
     ((NEAR_TOUCHLINE, HALFWAY, CENTRE_CIRCLE), 120, (0, 1, 2, 3, 4, 5, 7)),
     ((NEAR_TOUCHLINE, HALFWAY, CENTRE_CIRCLE), 40, (0, 1, 2, 3, 4, 5, 7)),
     (None, 40, (0, 1, 2, 3, 4, 5, 6, 7)),
+    # w3 (11) stays out: on lines alone it trades with the camera height
+    # and the pitch's size (rec7 ran to 136 m long); taps pin it down.
     (None, 12, (0, 1, 2, 3, 4, 5, 6, 7, 9, 10)),
     (None, 6, (0, 1, 2, 3, 4, 5, 6, 7, 9, 10)),
 ]
-X_SCALE = np.array([1, 1, 0.1, 0.02, 0.01, 0.01, 1, 1, 0.05, 0.05, 0.05])
+X_SCALE = np.array([1, 1, 0.1, 0.02, 0.01, 0.01, 1, 1, 0.05, 0.05, 0.05, 0.05])
 
 
 def fit_pose(mask: np.ndarray, pano: Pano, v0, stages=STAGES):
@@ -357,7 +384,7 @@ def fit_pose(mask: np.ndarray, pano: Pano, v0, stages=STAGES):
     from scipy.optimize import least_squares
 
     dist = cv2.distanceTransform((mask == 0).astype(np.uint8), cv2.DIST_L2, 5)
-    v = np.array(v0, float)
+    v = PitchPose(v0).vector()  # poses without w1-w3 get them as 0
     for only, trunc, free in stages:
         free = list(free)
         dt = cv2.GaussianBlur(np.minimum(dist, trunc), (0, 0), max(1.0, trunc / 6))
@@ -521,8 +548,7 @@ def fit_end_pose(line_dt: np.ndarray, pano: Pano, pose: PitchPose, side: int) ->
     from scipy.ndimage import map_coordinates
     from scipy.optimize import least_squares
 
-    v = np.array([pose.cx, pose.cz, pose.h, pose.rot, pose.tx, pose.tz, pose.L, pose.W, pose.k, pose.w1, pose.w2],
-                 float)
+    v = pose.vector()
     free = [0, 1, 2, 3, 4, 5, 6]
     for trunc in (60, 25, 10):
         dt = cv2.GaussianBlur(np.minimum(line_dt, trunc), (0, 0), max(1.0, trunc / 6))
@@ -645,9 +671,8 @@ def refit_with_goals(mask: np.ndarray, bg: np.ndarray, pano: Pano, pose: PitchPo
 
     line_dt = cv2.distanceTransform((mask == 0).astype(np.uint8), cv2.DIST_L2, 5)
     goal_dt = cv2.distanceTransform((white_structures(bg) == 0).astype(np.uint8), cv2.DIST_L2, 5)
-    v = np.array([pose.cx, pose.cz, pose.h, pose.rot, pose.tx, pose.tz, pose.L, pose.W, pose.k, pose.w1, pose.w2],
-                 float)
-    free = [0, 1, 2, 3, 4, 5, 6, 7, 9, 10]
+    v = pose.vector()
+    free = [0, 1, 2, 3, 4, 5, 6, 7, 9, 10]  # not w3: see STAGES
     sizes = [(side, w, h) for side, (w, h) in sizes.items()]
 
     def sample(dt, ang):
@@ -749,7 +774,7 @@ def goals_main(rec: Path) -> None:
               f" camera {pose.h:.2f} -> {q.h:.2f} m up")
         (out / "pitch.json").write_text(json.dumps({
             "cameraXZ": [q.cx, q.cz], "heightM": q.h, "rotRad": q.rot, "tiltRad": [q.tx, q.tz],
-            "lengthM": q.L, "widthM": q.W, "markingScale": q.k, "warpDeg": [q.w1, q.w2],
+            "lengthM": q.L, "widthM": q.W, "markingScale": q.k, "warpDeg": q.warp_json(),
             "fittedWith": "lines+goals"}, indent=1))
         cv2.imwrite(str(out / "overlay_goals.jpg"), cv2.resize(draw(bg, pano, q), (pano.w // 3, pano.h // 3)))
     cv2.imwrite(str(out / "map.jpg"), cv2.resize(draw_map(bg, pano, q, goals), (pano.w // 2, pano.h // 2)),
@@ -792,15 +817,15 @@ def taps_main(rec: Path) -> None:
     taps = {n: t for n, t in json.loads((out / "taps.json").read_text()).items() if not t.get("skipped")}
     j = json.loads((out / "pitch.json").read_text())
     (out / "pitch_before_taps.json").write_text(json.dumps(j, indent=1))
-    v = np.array([*j["cameraXZ"], j["heightM"], j["rotRad"], *j["tiltRad"], j["lengthM"], j["widthM"],
-                  j["markingScale"], *j.get("warpDeg", [0.0, 0.0])], float)
+    v = PitchPose([*j["cameraXZ"], j["heightM"], j["rotRad"], *j["tiltRad"], j["lengthM"], j["widthM"],
+                   j["markingScale"], *j.get("warpDeg", [0.0, 0.0])]).vector()
     points = [n for n in taps if not n.endswith("post base")]
     posts = [n for n in taps if n.endswith("post base")]
     obs = {n: np.array(pano.to_px(np.array([taps[n]["yaw"]]), np.array([taps[n]["pitch"]]))).ravel() for n in taps}
     print(f"{len(points)} tapped keypoints, {len(posts)} post bases")
     mask = line_mask(bg, paint_colour(rec))
     dist = cv2.distanceTransform((mask == 0).astype(np.uint8), cv2.DIST_L2, 5)
-    free = [0, 1, 2, 3, 4, 5, 6, 7, 9, 10]
+    free = [0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11]  # w3 too: the taps pin it down
 
     def tap_resid(pose):
         tg = tap_targets(pose)
@@ -895,7 +920,7 @@ START_POSE = [0.0, -31.5, 1.9, float(np.radians(-4)), 0.0, 0.0, 100.0, 59.0, 1.0
 
 def pose_json(pose: PitchPose) -> dict:
     return {"cameraXZ": [pose.cx, pose.cz], "heightM": pose.h, "rotRad": pose.rot, "tiltRad": [pose.tx, pose.tz],
-            "lengthM": pose.L, "widthM": pose.W, "markingScale": pose.k, "warpDeg": [pose.w1, pose.w2]}
+            "lengthM": pose.L, "widthM": pose.W, "markingScale": pose.k, "warpDeg": pose.warp_json()}
 
 
 def pose_from_json(j: dict) -> PitchPose:
@@ -1088,8 +1113,7 @@ def choose_paint(bg: np.ndarray, pano: Pano, v0) -> tuple[str, PitchPose, dict]:
     pose = results[where]["pose"]
     if best != where:
         first = pose
-        pose = fit_pose(line_mask(bg, best), pano, [first.cx, first.cz, first.h, first.rot, first.tx, first.tz,
-                                                    first.L, first.W, first.k, first.w1, first.w2])
+        pose = fit_pose(line_mask(bg, best), pano, first.vector())
         if not plausible(pose):
             print(f"{best}: the refit stretched to {pose.L:.1f} x {pose.W:.1f} m (far markings too faint to find);"
                   f" keeping the {where} fit: tap keypoints (taps mode) to fit the far end")
@@ -1172,7 +1196,7 @@ def main(rec: Path, seg: int, start: list[float] | None = None) -> None:
     (out / "pitch.json").write_text(json.dumps({
         "cameraXZ": [pose.cx, pose.cz], "heightM": pose.h, "rotRad": pose.rot,
         "tiltRad": [pose.tx, pose.tz], "lengthM": pose.L, "widthM": pose.W, "markingScale": pose.k,
-        "warpDeg": [pose.w1, pose.w2]}, indent=1))
+        "warpDeg": pose.warp_json()}, indent=1))
     place_detections(rec, pose)
 
 
