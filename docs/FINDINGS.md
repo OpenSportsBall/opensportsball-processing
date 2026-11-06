@@ -1,43 +1,64 @@
 # Findings: what we tried and what happened
 
-A summary of the processing techniques tested on the night game
-(2026-10-14, 97.5 minutes, two Pixels on a fixed mount) between
-2026-10-12 and 2026-10-19, organised by problem. Each entry gives the
-technique, its measured outcome, and its status. The dated detail,
-with numbers per run, is in `docs/BACKLOG.md` (Phase 0 section); the
-measurement methods are in `docs/TESTING-PROCESSING.md`.
+A summary of the processing techniques tested between 2026-10-12 and
+2026-11-05, organised by problem. Most were developed on the first
+night game (rec3, 2026-10-14, 97.5 minutes, two Pixels on a fixed
+mount); the record now also covers rec4 (a second night game, 115
+min), rec5 (Pixel + iPhone, orange ball, yellow paint), rec6 (the first
+daylight game) and rec7 (Pixel + iPhone, a ~6.2 m mount, yellow ball).
+Each entry gives the technique, its measured outcome, and its status.
+The dated detail, with numbers per run, is in `docs/BACKLOG.md` (Phase
+0 section); the measurement methods are in `docs/TESTING-PROCESSING.md`;
+the recordings are listed in `docs/DATA.md`.
 
 Status key: **adopted** (in the default configuration), **available**
 (implemented, off by default), **dropped** (tested, no gain), **open**
-(promising, not finished).
+(promising, not finished), **superseded** (replaced by a later row),
+**caveat** (a limit on the measurements, not a technique).
 
 Measurements referred to below:
-- *play boxes*: 26 reviewed must-see moments (12 on two 2-minute clips,
-  14 from the game's first 23 minutes); a moment is captured when >= 98%
-  of its box is in the 1080p view.
-- *ball labels*: the ball's position every 2 s along the same clips
-  (37 and 53 moments with the ball on the pitch); the tracker is scored
-  as found / wrong / missed per moment.
+- *play boxes*: reviewed must-see moments; a moment is captured when
+  >= 98% of its box is in the 1080p view. rec3 has 26 (12 on two
+  2-minute clips, 14 from the game's first 23 minutes), rec4 15 (game
+  10:00-30:00), so the bench is /41; rec7 has 5 on one piece.
+- *ball labels*: the ball's position every 2 s along rec3's two clips
+  (37 and 53 moments with the ball on the pitch, 90 in all); the tracker
+  is scored as found / wrong / missed per moment. Some of these labels
+  are still Claude's unedited drafts (see section 4).
+- *path share / aim share*: on games without tracker labels (rec5, rec6, rec7),
+  the share of frames with a ball estimate or with the camera aimed at
+  the ball. Coverage, not accuracy.
 
 ## 1. Synchronising and stitching the two phones
 
 | Technique | Outcome | Status |
 |---|---|---|
-| Audio sync by band-limited GCC-PHAT, per segment | Locks in every segment; clock drift a steady -9 ppm. The offset jumps by up to 390 ms at segment switches, and the phones' own timestamps don't show it, so every segment is re-synced. | adopted |
-| OpenCV panorama stitcher for the camera geometry, refined at 1920 px (focal lengths, two radial terms, Secondary's rotation) | One calibration from segment 0 holds for the whole mounted game (overlap points within ~3 px); alignment error at 4K halved by the refinement. Handheld footage drifts and would need periodic re-estimation. | adopted |
+| Audio sync by band-limited GCC-PHAT (whitening only 150 Hz-8 kHz; full-band PHAT locked on a false zero-lag peak), per segment | Locks in every segment of every game so far. Clock drift not constant: rec3 -3.9 ppm in segment 0, settling at -8 to -9.4 from segment 5; rec4 -5.6; Pixel + iPhone (rec5) +14. The offset jumps at segment switches (rec3 up to 390 ms; rec4 ~120 ms per switch, 2.93 s by the end) and the phones' own timestamps don't show it, so every segment is re-synced. | adopted |
+| Segments paired by time, with a second overlapping file read mid-segment (`secondaryPieces`) | iPhone (300 s) and Pixel (~285 s) segments drift 15 s apart per segment; index pairing froze the iPhone half for ~a quarter of rec5 and start stamps were up to 3.9 s off. Now all of rec5's pairs lock; raw rec5 matches a hand-built pairing to 0.02 ms. | adopted |
+| OpenCV panorama stitcher for the camera geometry, refined at 1920 px (focal lengths, two radial terms, Secondary's rotation) | On rec3 one calibration from segment 0 holds for the whole mounted game (overlap points ~1-4 px median); alignment error at 4K halved by the refinement. Not on every game: failed on rec5 (0/8 pairs; narrow overlap, soft iPhone; cameras set by hand from paint and gravity), 3/8 on rec4 and rec7, 1/8 on rec6; the same Pixel 11's focal comes out 4% apart on rec6 and rec7. Handheld footage drifts. | adopted, open |
+| Lens model per phone model (focal, k1, k2), focal pulled toward the manifest's FOV | Needed because the overlap can't separate focal from angle (rec7's near touchline bent ~1 deg). rec4cal used Main's factory focal and a fitted 726 px for the Pro (factory 670 gave a 21 px stitch error). Not built. | open |
+| Calibrate from the last settings lock within segment 0 (not the whole game's last) | rec6 and rec7 had been calibrated from the game's last lock (rec7 re-locked at ~52 and ~75 min), in effect from all of segment 0, warm-up included. Fixed for new games; their cameras not rebuilt. | adopted |
 | Homography fitted on field points | Worse than the stitcher: turf texture gives mostly false matches. | dropped |
 | Rendering straight from both 4K sources through a virtual camera, each pixel from one phone along a per-frame seam that avoids players, two-band blend | Fixes the doubled players that blending produced (the phones never capture the same instant). | adopted |
 | GPU pipeline (PyTorch on MPS/CUDA, hardware decode and encode, NV12 throughout) | 20 s of video in 64 s on an M-series Mac; a full game renders in ~2.5 h locally. | adopted |
 | Clips that run across segment boundaries; a decoder pre-roll after seeks | The pre-roll removed a 0.25-0.5 s freeze at the start of every render; a ~0.2 s hold remains at each segment switch (a real gap in the recording). | adopted |
+| Audio vs video alignment (motion matched across the overlap) | Agreed with the audio offset within ~1 frame where it correlated clearly (4 of 9 probes on rec3), noise elsewhere; the clap test is still to do. | open |
+| iPhone focus: settle-then-sweep lock in the app (rec5's iPhone half was soft throughout) | On a tester's 40 s clip the locked stretch is as sharp as the best autofocus frames (unverified measurement); not yet seen on a game. | open |
 
 ## 2. Mapping the pitch and the goals
 
 | Technique | Outcome | Status |
 |---|---|---|
-| Pitch pose fitted to the painted lines (camera position and height, rotation, ground tilt, length and width, plus a smooth vertical-angle correction) from a median background panorama | Night game: 109.3 x 60.5 m, camera 2.7 m up. | adopted |
-| Goals as goal-shaped white structures near each end, every left/right pair tried by refitting, validated against the markings | Corrects the map (the right end had been ~20 m off); the follow cam's goal rules only worked once the goals were detected. | adopted |
-| Regression test on saved background panoramas (`processing/tests/test_pitch_regression.py`) | 15 key points within 0.1 deg, goals within 0.3 m; one fixture so far. | adopted |
-| Automatic starting pose; youth and small-sided layouts; other venues and daylight | Not started. | open |
+| Pitch pose fitted to the painted lines (camera position and height, rotation, ground tilt, length and width, plus a smooth vertical-angle correction) from a median background panorama | rec3: 109.3 x 60.5 m, camera 2.7 m up. On every other field the lines-only fit ran off or settled wrong (rec4, rec5, rec6, rec7); they were fitted with taps. The lines alone can't tell scaled-down markings from a smaller pitch: the 9.15 m circle sets the scale. | adopted |
+| Line mask keeping faint far paint (saturation < 100, hue > 20) | Recovered rec4's far lines (lost to a colour cast); moved the rec3 fixture's fit (below). | adopted |
+| Line paint colour: each colour fitted, the paint measured (Lab b* against the turf) under the best fit's near markings | Right on rec3, rec4, rec5 (white b* -10 / -12, yellow +3 against a +1 cut-off). Picking whichever finder fits best chose white on the yellow field. Far yellow paint under floodlights is not detectable. | adopted, open |
+| Start pose by trying camera heights 1.9-10 m, best score on the paint | Picks rec7's high mount (6.5 m, 6.2 m after taps) and gives rec6 a better start than the 1.9 m default; fields still need taps for a good fit. | adopted |
+| Pitch keypoint taps (`pitchtap/`, `pitch.py <rec> taps`): corner flags, box corners, post bases, centre | The only way to pin rec4's ends (automatic junctions found one box of four); used on rec4, rec5, rec6 and rec7. | adopted |
+| Flat-pitch model on a field that drops away | rec4: no flat fit holds the near touchline (2.6 m below the camera) and the centre and ends (3.1 m); a crown term doesn't help. Height held at the measured 2.6 m is used. | open |
+| Depression term w3 in the warp, fitted with taps only | rec7 near touchline 0.5 -> 0.27 m off. Absorbs a stitch focal error (6.2 deg, expected ~1); runs away in a lines-only fit. A lens table per phone model is the real fix. | adopted, open |
+| Goals as goal-shaped white structures near each end, every left/right pair tried by refitting, validated against the markings | Corrects the map on rec3 (the right end had been ~20 m off); the follow cam's goal rules only worked once the goals were detected. Rejected on rec4 and rec7 (rec4's fitted by hand from the tapped posts); not run on rec5 (spare goals along the side). | adopted, open |
+| Regression test on saved background panoramas (`processing/tests/test_pitch_regression.py`) | 15 key points within 0.1 deg, goals within 0.3 m; one fixture (rec3). Failing 4 checks since the line-mask change for rec4 (2026-10-22): right goal 7.8 m against 7.4, length +1.1 m, lines-only points up to 0.37 deg. | adopted, failing |
+| Automatic starting pose from the centre circle; youth and small-sided layouts | Not started (the multi-height start above is a search, not a measurement). | open |
 
 ## 3. Where is play? The follow cam without the ball
 
@@ -45,23 +66,27 @@ Measurements referred to below:
 |---|---|---|
 | Median of all player blobs | Baseline; lags behind quick play. | dropped |
 | Speed-weighted centroid of players (player "vectors") | Caught a quick counter the median missed, but jumps between groups. | superseded |
+| Convergence point of running players (`play.py`) | Best at a 50 deg view on a 20 s test (78% vs 65%), noisier aim; scored against the early tracker only. Not wired into follow.py. | open |
 | Hotspot of running: players pooled over +-0.5 s, weighted linearly by speed, peak by mean shift, sticky (another peak must be 50% stronger for 0.7 s) | Followed an attack to goal; aim jumps > 40 deg/s fell from 435 to 73 frames. Needed linear (not squared) weights and 0.5 s position smoothing, because far-side jitter reads as running. | adopted |
-| Only people inside the lines; cells by the touchline occupied >= 10% of the time (bench, subs) ignored | Removes the bench from the aim. | adopted |
+| Only people inside the lines; bench and subs ignored. First a 4 m grid of cells by the touchline occupied >= 10% of the time; since 2026-10-23 bands along the lines (outside a line or < 0.5 m inside, 2 m on the far touchline, in a 4 m stretch busy >= 10% of frames) | Removes the bench from the aim. The grid, computed per clip and dilated, reached ~7 m into rec4's pitch and dropped 32-49% of all detections; the bands drop none there. | adopted |
 | Lull hold (<= 1 runner for 1 s keeps the aim from just before) | Stops the camera drifting to where players wait. | adopted |
-| Restart taker (a still player alone in a goal area, at a corner or on a touchline during a lull) | Frames the taker and the group. Flashes briefly in short lulls; needs the same gating as the goal kick. | adopted, open |
+| Restart taker (a still player alone in a goal area, at a corner or on a touchline during a lull) | Frames the taker and the group. Flashed briefly in short lulls and framed a lone keeper 40 m from play (rec4 25:20); since 2026-10-23 the taker must be where play just was (the ball in the last 5 s, else the held hotspot). | adopted |
 | goalframe: >= 4 players within 20 m of a goal while the hotspot is elsewhere, frame both | Catches goalmouth action the hotspot leaves. | adopted |
 | goalkick: a lone near-still player in a penalty area soon after play was there, held as a state until play resumes | Catches goal kicks; false positives fixed later by three vetoes (see 5). | adopted |
 | unsure: few runners near the hotspot keeps the view wide | Catches quick clearances at the price of width. | adopted |
 | lead (aim 1 s ahead), nowalk (walkers weigh nothing), fastboost (steeper speed weight), weak (frame everyone when the signal is thin), allnear, flow (aim along the runners' velocity), lone (include a fast runner elsewhere), gk2 (goal-kick cooldowns), bigger hotspot bandwidth, no lull | None beat the baseline on the play boxes (4/13). The misses were aim, not width: the hotspot stays on the pack while one player has the ball. | dropped |
-| Hotspot "weak signal" diagnosis | On the second clip only 10-18 of ~24 people are tracked per frame and few register as running; every rule degrades together. Better player detection (RF-DETR people instead of background blobs) is the real fix. | open |
+| Hotspot "weak signal" diagnosis | On the second clip only 10-18 of ~24 people are tracked per frame and few register as running; every rule degrades together. On rec4 pass A tracks 7-12 of the 24-29 people roles.py detects, and roles.py at half resolution sees far-touchline players at ~20 px. Better player detection (RF-DETR people instead of background blobs) is the real fix; peoplesurge is a first use of it. | open |
 | Zoom floor 50 deg (a 1080p view narrower than ~55 deg upsamples the 4K source; 65 deg is pixel-for-pixel at a phone's centre) | Sharper output, median width ~63 deg. | adopted |
 | Never show past the canvas's left or right edge: stop there and zoom in (to 40 deg; the phones' edges have the most pixels per degree) | Removes the black edge; a further margin for lens fall-off is still to be measured. | adopted, open |
 | Camera log (`camlog.txt`, one line per change of the driving rule) | Made the full-render reviews possible. | adopted |
-| surge: >= 60% of >= 4 running players heading the same way along the pitch; at first aim 5 m ahead of the frontmost, then frame the 5-7 forward-most non-keepers plus 5 m ahead | Fires in 19% of frames but moves the aim only ~4.5 deg at the median: the hotspot's running pool already sits near the front. Players only 13 -> 14/25; with the ball 19-20/25 (no gain; at N = 3-5 it pulls the view off moments the ball rule had). Can't catch a set piece (7:34): nobody runs. | available |
+| surge: >= 60% of >= 4 running players heading the same way along the pitch; at first aim 5 m ahead of the frontmost, then frame the 5-7 forward-most non-keepers plus 5 m ahead; since 2026-10-23 frame the runners heading the surge's way plus 5 m (fit within 70 deg) | Fires in 19% of frames but moves the aim only ~4.5 deg at the median: the hotspot's running pool already sits near the front. Front-five version on rec3: players only 13 -> 14/25, with the ball 19-20/25 (no gain). The front five took in subs on the touchline (rec4 28:47); framing the runners: rec3 21 vs 20/26, rec4 1/9 vs 0 and 4/6 vs 5. Can't catch a set piece (7:34): nobody runs. | available |
+| peoplesurge: surge on roles.py's detected people (velocity from the nearest person +-0.5 s) instead of pass A's tracks | rec4 10:00-20:00 5/6 vs 3/6; the combined bench 29/41 with it, 28/41 without. Needs roles. | available |
 | sideline: hotspot in a near-touchline corner, frame everyone in that corner with padding | Fires in 0.6% of frames: the hotspot drifts to the pack even when play is on the touchline (at the 10:02 throw-in it sat mid-pitch). Neutral; a wider zone costs coverage. The trigger would need the ball or the thrower. | available |
 | Front-of-field position (the forward-most players parked far from the hotspot, a set piece) | Seen at 7:34: the five forward-most players at the left goal line 40 m beyond the hotspot, with nobody running. Not built. | open |
 
 With the ball (section 4) and roles (section 6): **21/26 play boxes** (2026-10-20). On the first 12 moments 11/12; the 14 from the full game added three misses (a set piece with no ball candidate at 7:34, a throw-in with the ball in hands at 10:02, a single ball sighting at 14:05) and two 95% near-misses.
+
+With rec4's 15 moments added: 25/41 at first, **29/41** (rec3 20/26, rec4 9/15) after four changes on 2026-10-23 (loiter bands, the two-ball jump filter, restart gating, surge framing its runners), each tested alone first; the jump filter and restart gating only paid off together. The linker fixes of 2026-10-28 kept 29/41; scanning every 0.2 s while lost gave 30/41 but was not adopted (17-38% more ball-stage time). Still missed on rec4: a false far-left ball (18:27), a second ball by the touchline (26:31), 26:49, 28:04, 29:56. A box counts as captured when 98% of it is anywhere in view, even at the edge; a centred test is not built.
 
 ## 4. Where is the ball?
 
@@ -70,7 +95,10 @@ Detection:
 | Technique | Outcome | Status |
 |---|---|---|
 | Stock RF-DETR "sports ball" on 640 px tiles of the 4K frames | 58% of match balls at conf >= 0.2, 2.1 wrong suggestions per frame. | superseded |
-| Fine-tuned RF-DETR Medium on 275 labelled balls (640 px tiles, hard negatives) | 76% of match balls on held-back frames at 1.1 wrong per frame (stock: 69% at 10.5); the top suggestion is the ball 69% of the time. Overfits this game (96% on training frames). | adopted |
+| Fine-tuned RF-DETR Medium on 275 labelled balls (640 px tiles, hard negatives) | 76% of match balls on held-back frames at 1.1 wrong per frame (stock: 69% at 10.5); the top suggestion is the ball 69% of the time. Overfits this game (96% on training frames). | superseded |
+| Detector and judge retrained with each new ball and light (rec3 + rec5 orange x3, 2026-10-30; + rec6 daylight x2, 2026-11-01, the standard pair in `footage/models/`) | Without labels for a new ball colour the judge rejects the ball: rec5 path 7%, rec7 aim 0-1%. rec5 7% -> 34%; rec6 path 30% -> 52%; rec4cal 9 -> 10/15; rec3 20/26 throughout but labelled found 68 -> 63/90 over the two retrains (wrong 5 -> 3). The new detector needs the new judge. The standard judge turned out to be trained on rec3 x4, rec5 x9, rec6 x2 (a merge bug, fixed); the fixed mix benched no better. | adopted |
+| Yellow-ball judge (judge_v4: + rec7 x4, 119 labelled frames) | rec7 piece 2 (contains the labels): aim at the ball 1% -> 64%, play boxes 0/5 -> 4/5 (unverified); other pieces 28-63%. Not benched on the white-ball games. | available (`OSB_JUDGE=judge_v4`) |
+| Judge given the expected ball diameter at the candidate | Held-out clip AP 0.915 -> 0.936, but no bench moved beyond noise (rec3 21 vs 20/26, rec6 path 48 vs 49%). | dropped |
 | Frame differencing (motion candidates) | 55% of match balls at ~120 candidates per frame; ranking by contrast is poor. Half the misses are the ball merged into a player's blob, which the detector finds. | dropped |
 | Crop judge (48 px crop classifier, 1.5 ms per crop) to rank candidates | Ranks about as well as possible (top-1 62% against a 77% ceiling) and cleans candidates (zero wrong tracks), but does not raise the tracker's found-rate; retraining on the clip labels (cross-clip) raised its crop AP to 0.92-0.96, found-rate unchanged. | adopted (filter), not a lever |
 | Search-window detector (`ballwin.py`): windows around the predicted ball plus a 2x zoom window, full scans every 2 s or when lost | Same recall as full scans within a few points at 6-8x fewer tiles (6.5 min per 2-minute clip instead of 30). The online track needed a velocity cap, decay while unseen and a jump guard. | adopted |
@@ -83,13 +111,15 @@ Tracking:
 
 | Technique | Outcome | Status |
 |---|---|---|
-| Greedy online chain (`ball.py`: static-spot removal, linking under a speed limit, one physically consistent chain) | Tuned on the ball labels from 32% / 26% found to 54% / 62% (static filter 30 s, 2-hit tracks, judge >= 0.3, 0.6 s gap). | available (`OSB_BALL_CHAIN=1`) |
-| Static-spot rules: 30 s for a still ball; 8 s in bench cells or outside the lines | Removed the spare balls by the bench that the camera followed for 10 s at a time. | adopted |
+| Greedy online chain (`ball.py`: static-spot removal, linking under a speed limit, one physically consistent chain) | Tuned on the ball labels from 32% / 26% found to 54% / 62% (static filter 30 s, 2-hit tracks, judge >= 0.3, 0.6 s gap); the same tuning cost play boxes then (10 -> 8/13: the judge rejects a ball in the thrower's hands), recovered by ballwin candidates and ballhold. | available (`OSB_BALL_CHAIN=1`) |
+| Static-spot rules: 30 s for a still ball (at 4 s the ball placed for a goal kick was removed); 8 s in bench cells (since 2026-10-23 the loiter bands) or outside the lines; since 2026-10-29 only a run of sightings with no break over 10 s counts | Removed the spare balls by the bench that the camera followed for 10 s at a time. The run rule stopped the match ball crossing one spot twice from reading as static (rec3 0-10 min: 190 -> 24 spots). | adopted |
+| Two-ball jump filter (`ballpath.py`: runs too far apart in time and space to join keep the one nearer the players) | Removed a 5 s detour to a second ball (rec4 20:25, 55 m in 1 s); cut jumps of 55-91 m/s and kept all up to 32 m/s on four rec4 chunks. Refined 2026-10-27 so the players decide only when one run is >= 10 m farther from them. | adopted |
 | Offline minimum-cost path (`ballpath.py`, Viterbi over candidates with an angular motion cost per phone) | Found 57% / 72-74% (chain 49-57% / 68-72%), coverage up to 44% / 72%; same play boxes; aims at the ball in 39% / 70% of the clips. | adopted (default) |
 | Path gap penalty 2 -> 1 (cheaper to enter and leave "no ball", so isolated confident sightings join the path) | Play boxes 19/25 -> 20/25 (19:36); ball labels the same found-rate with fewer wrong (seg 3: 4 -> 2). A cheaper no-ball cost (1.5) or no judge filter each lose a box. | adopted |
 | Linker fixes: pitch margin 3 -> 10 m, a ball at rest bridged up to 2 s, two long runs both kept when distance from play cannot pick one (2026-10-28) | Found 57 -> 66 of 90 labelled balls (stock WASB 62 -> 70, tuned 61 -> 69), wrong 4 -> 5; play boxes 29/41 unchanged. A learned per-candidate P(ball) had too few negatives at the labelled moments to fit. | adopted |
 | Longer ballhold (5-8 s) | Loses two boxes to stale holds. | dropped |
 | Label-time correction (the decoder's late first frame put label images 0.2-0.9 s after their stored time) | Most "wrong" estimates were the clock; with it the tracker shows 1 wrong per clip and the rest are gaps. | adopted |
+| Clip labels pre-marked by Claude, then reviewed | 20 of seg 9's 118 frame labels and 33 of seg 3's 102 are still unedited drafts (`draftBy: claude`), mostly tiny far balls, so the found-rates lean on the detector's own view there. | caveat |
 
 Ball witnesses from other motion (none moved the tracker's found-rate):
 
@@ -114,8 +144,8 @@ Ball witnesses from other motion (none moved the tracker's found-rate):
 
 | Technique | Outcome | Status |
 |---|---|---|
-| Kit colour clustering (torso patches white-balanced against the turf, Gaussian mixture) | Clean kits on both clips: blue, solid green, green/white stripes, pink (referee and keeper), yellow (keeper). | adopted |
-| Sides by headcount (the two-way split of the kit components with the most equal numbers moment by moment) | Blue vs green + stripes on both clips (44% and 70% margins) without being told the stripes are the green team's second kit. Thresholds tuned on one game; the close-pairs rule (opponents mark each other) is the planned second vote. | adopted, open |
+| Kit colour clustering (torso patches white-balanced against the turf, Gaussian mixture) | Clean kits on both rec3 clips: blue, solid green, green/white stripes, pink (referee and keeper), yellow (keeper). White kits fall under the saturation floor (rec4, rec5); white and yellow merge under floodlights (rec7). | adopted, open |
+| Sides by headcount (the two-way split of the kit components with the most equal numbers moment by moment) | Blue vs green + stripes on both clips (44% and 70% margins) without being told the stripes are the green team's second kit. Thresholds tuned on one game; the close-pairs rule (opponents mark each other) is the planned second vote. Failed on every game since (rec4 two shades of red as the sides, rec5 one kit component, rec7 wrong split): sides set by hand in `sides.json`. | adopted, open |
 | Roles along a clip (`roles.py`): side, keeper (a solo colour in a goal area), referee (a solo colour elsewhere) | Keepers seen in 85-99% of frames at the goal line (after fixing a tiling bug that hid the far end). | adopted |
 | Referee removed from the hotspot; keeper with the ball triggers the goal-kick framing | 11/13 -> 12/13 play boxes (the goal kick where the ball sat in the keeper's hands). | adopted |
 | Kick-off from the sides alone (both teams in their own halves, nobody running) | Too brief a signature: stragglers still cross while the ball waits at the centre. | dropped |
@@ -125,9 +155,9 @@ Ball witnesses from other motion (none moved the tracker's found-rate):
 
 | Technique | Outcome | Status |
 |---|---|---|
-| Chunked full-game runner (`fullgame.py`): ball stage one chunk ahead of the render, resumable, audio muxed at the end | A game in ~5-6 h on the Mac with the ball candidates reused, ~8-9 h from scratch. Lessons: keep the Mac awake, stop 1 s before the end of the last file (decoder hang), exit stages hard after writing. | adopted |
+| Chunked full-game runner (`fullgame.py`): ball stage one chunk ahead of the render, resumable, audio muxed at the end | A game in ~5-6 h on the Mac with the ball candidates reused, ~8-9 h from scratch. Lessons: keep the Mac awake, stop 1 s before the end of the last file (decoder hang), exit stages hard after writing. Other games run slower: rec5 11.0 h; rec7's ball stage 70-75 min per 10-minute chunk (~2x rec4cal's pace), 38-51 min once judge_v4 held the track. | adopted |
 | `game.mp4` scaled up to 1440p for YouTube (`fullgame.py --height`, default 1440; 1080 keeps the render) | The 1080p upload played as AV1 at YouTube's low 1080p bitrate and lost much of the detail. rec7's piece 2 uploaded at 1440p, 4K and 1440p with `hqdn3d` grain reduction all played as VP9 and looked substantially better; the three looked about the same, so plain 1440p. Upscaling adds no detail (a 54 deg view spans ~1,420 source px); the gain is YouTube's bitrate for that resolution. +26 min and ~22 GB for a 95 min game. | adopted |
-| Scan cadence 4 s / 1 s instead of 2 s / 0.5 s; ball stage at 5 fps | Each cuts the ball stage 30-50% for a small loss (found-rate -3 to -6 points, one play box). | available (env) |
+| Scan cadence 4 s / 1 s instead of 2 s / 0.5 s; ball stage at 5 fps | Each cuts the ball stage 30-50% for a small loss (found-rate -3 to -8 points, the -8 for 4 s scans on seg 9 from transcript figures; one play box). | available (env) |
 | Cloud GPU (NVIDIA, fp16/TensorRT, NVDEC/NVENC) | Estimated 2-3 h per game; not built. | open |
 | Pieces named by their configuration, so a rule change re-renders only the affected chunks; roles sharing the ball stage's decode | Not built. | open |
 
@@ -142,7 +172,19 @@ Ball witnesses from other motion (none moved the tracker's found-rate):
 - **Keepers vanish from background subtraction.** A still keeper is
   absorbed into the background model; anything that needs the keeper
   (bearings, goal kicks) needs a person detector, which roles now gives.
-- **One game of data.** Every threshold here was tuned on one night game
-  and 12 + 90 labelled moments; the fine-tuned detector is overfit to
-  it. A second game, ideally daylight at another venue, is the next
-  thing to label.
+  Slowing the background model to ~1 minute helped only partly.
+- **Few games measured.** Every threshold was tuned on rec3 (one
+  night game, 12 + 90 labelled moments, partly Claude's drafts) and
+  tested on rec4's 15 play boxes. rec5, rec6 and rec7 (one daylight, two
+  with an iPhone half, orange and yellow balls) have labels for
+  training (rec7's a clip, used to train judge_v4) but no held-out
+  tracker labels, and only rec7 has play boxes (5). On them, automatic
+  sides, the lines-only pitch fit and (on rec5) the stitcher failed and
+  were set by hand or with taps. Held-out clip labels on another game,
+  ideally daylight, are the next thing to label.
+- **Ball colour.** The judge only accepts ball colours it has been
+  trained on; each new colour (orange, yellow) needed ~100 labelled
+  frames before the camera followed the ball.
+- **A flat pitch.** On rec4 no flat model fits both the near touchline
+  (2.6 m below the camera) and the centre and ends (3.1 m). The
+  follow cam has no curvature term.
