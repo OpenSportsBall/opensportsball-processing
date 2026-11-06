@@ -8,7 +8,7 @@
 """Renders a whole game with the follow cam, in chunks, overnight.
 
     uv run processing/spikes/fullgame.py footage/rec3 [--start 0 | --start-segment N] [--chunk 600] [--max-chunks N] [--out fullgame]
-                                                      [--features goalkick,goalframe,unsure,ball,goalin,ballhold]
+                                                      [--features goalkick,goalframe,unsure,ball,goalin,ballhold] [--height 1440 | 1080]
 
 Each chunk of the game (on Main's clock from segment 0; the readers run
 on across segment switches) goes through ballwin.py (ball candidates,
@@ -18,6 +18,13 @@ one chunk ahead of the follow cam, so the whole game takes about as long
 as the ball stage alone. A chunk whose piece exists is skipped, so the
 run can be resumed. At the end the pieces are concatenated and Main's
 audio is muxed in: <recording>/<out>/game.mp4.
+
+game.mp4 is scaled up from the pieces' 1080p to 1440p by default (--height
+1080 keeps it as rendered, with no re-encode). Upscaling adds no detail, but
+YouTube serves an upload of 1440p or more with VP9 and a much higher
+bitrate, and on rec7 that looked clearly better than the 1080p upload's
+AV1 stream. The scale and encode add ~26 min for a 95 min game and roughly
+double the file (~22 GB).
 
 Logs: <recording>/<out>/logs/, with each chunk's camera log and path
 (camlog_NN.txt, path_NN.json; score a path with playeval.py).
@@ -40,6 +47,8 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 DETECTOR = HERE.parents[1] / "footage" / "models" / "ball_detector.pth"  # the standard ball detector (README there)
+PIECE_H = 1080       # follow.py's render height (follow.OUT_H; 16:9)
+UPLOAD_BITRATE = {1440: "45M"}  # hardware H.264 lands at ~2/3 of this (~31 Mbit/s)
 
 
 def run(cmd: list[str], log: Path, done_file: Path | None = None, grace_s: float = 180.0) -> int:
@@ -77,6 +86,8 @@ def main() -> None:
     ap.add_argument("--features", default="goalkick,goalframe,unsure,ball,goalin,ballhold,roles,kickoff")
     ap.add_argument("--roles-fps", type=float, default=4.0, help="roles.py rate (people move slowly; 4 is plenty)")
     ap.add_argument("--teams", default="", help="teams.py set for roles.py (the people stage); empty: no roles")
+    ap.add_argument("--height", type=int, default=1440, choices=(PIECE_H, *UPLOAD_BITRATE),
+                    help=f"game.mp4's height: {PIECE_H} keeps the render as is; more scales it up for YouTube (default 1440)")
     a = ap.parse_args()
     rec = a.rec
     manifest = json.loads((rec / "manifest.json").read_text())
@@ -181,9 +192,17 @@ def main() -> None:
     alst.write_text("".join(f"file '{(rec / s['objectKey']).resolve()}'\n" for s in devs["main"]["segments"]))
     run(["ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(alst), "-vn", "-c:a", "copy",
          str(out / "audio.m4a")], log)
+    if a.height == PIECE_H:
+        video = ["-c", "copy"]
+    else:
+        br = UPLOAD_BITRATE[a.height]
+        video = ["-map", "0:v", "-map", "1:a", "-vf", f"scale={a.height * 16 // 9}:{a.height}:flags=lanczos",
+                 "-c:v", "h264_videotoolbox", "-profile:v", "high", "-pix_fmt", "yuv420p",
+                 "-b:v", br, "-maxrate", br, "-bufsize", br, "-c:a", "copy", "-movflags", "+faststart"]
     rc = run(["ffmpeg", "-v", "error", "-y", "-i", str(out / "video.mp4"), "-ss", f"{a.start:g}", "-i", str(out / "audio.m4a"),
-              "-c", "copy", "-shortest", str(out / "game.mp4")], log)
-    print(f"{'done' if rc == 0 else 'mux FAILED'}: {out / 'game.mp4'} in {(time.time() - t0) / 3600:.1f} h", flush=True)
+              *video, "-shortest", str(out / "game.mp4")], log)
+    print(f"{'done' if rc == 0 else 'mux FAILED'}: {out / 'game.mp4'} ({a.height}p) in {(time.time() - t0) / 3600:.1f} h",
+          flush=True)
 
 
 if __name__ == "__main__":

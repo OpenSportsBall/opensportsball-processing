@@ -126,6 +126,7 @@ Ball witnesses from other motion (none moved the tracker's found-rate):
 | Technique | Outcome | Status |
 |---|---|---|
 | Chunked full-game runner (`fullgame.py`): ball stage one chunk ahead of the render, resumable, audio muxed at the end | A game in ~5-6 h on the Mac with the ball candidates reused, ~8-9 h from scratch. Lessons: keep the Mac awake, stop 1 s before the end of the last file (decoder hang), exit stages hard after writing. | adopted |
+| `game.mp4` scaled up to 1440p for YouTube (`fullgame.py --height`, default 1440; 1080 keeps the render) | The 1080p upload played as AV1 at YouTube's low 1080p bitrate and lost much of the detail. rec7's piece 2 uploaded at 1440p, 4K and 1440p with `hqdn3d` grain reduction all played as VP9 and looked substantially better; the three looked about the same, so plain 1440p. Upscaling adds no detail (a 54 deg view spans ~1,420 source px); the gain is YouTube's bitrate for that resolution. +26 min and ~22 GB for a 95 min game. | adopted |
 | Scan cadence 4 s / 1 s instead of 2 s / 0.5 s; ball stage at 5 fps | Each cuts the ball stage 30-50% for a small loss (found-rate -3 to -6 points, one play box). | available (env) |
 | Cloud GPU (NVIDIA, fp16/TensorRT, NVDEC/NVENC) | Estimated 2-3 h per game; not built. | open |
 | Pieces named by their configuration, so a rule change re-renders only the affected chunks; roles sharing the ball stage's decode | Not built. | open |
