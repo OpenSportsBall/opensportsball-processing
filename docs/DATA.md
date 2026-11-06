@@ -43,10 +43,11 @@ The backup only uploads; it never deletes from S3.
 | Rec | Date | Game | What | Label sets |
 |---|---|---|---|---|
 | rec2 | 2026-10-12 | `a901c618` | first field test (2 segments); raw video only in `data/rec2/` | |
-| rec3 | 2026-10-15 | `f68af87f` | first game, white ball; bench | `labels` (random, 408 frames), `labels_seg3`, `labels_seg9` (clips) |
+| rec3 | 2026-10-14 | `f68af87f` | first game, night, white ball (an evening game: 2026-10-15 UTC); bench | `labels` (random, 408 frames), `labels_seg3`, `labels_seg9` (clips) |
 | rec4 | 2026-10-21 | `c92f9740` | night game, white ball; `rec4cal` (corrected camera model, bench), `rec4bench`, `rec4cal_cmp` are its variants | `labels_seg9` (not labelled) |
 | rec5 | 2026-10-28 | `38a1d10f` | orange ball; `rec5-game` (working copy), `rec5-cal` are its variants | `rec5-game/labels` (ball mode, 98 frames) |
 | rec6 | 2026-10-30 | `1f3a915a` | first daylight game | `labels` (random, both phones, 196 frames) |
+| rec7 | 2026-11-04 | `3ba4b9f2` | night game, Pixel 11 + iPhone 14 Pro, ~6.2 m mount, yellow ball; `balljudge/judge_v4.pt`; play boxes `playeval/seg0-1484` (5) | `labels_seg6` (clip, seg 6 100-220 s, both phones, 119 frames) |
 
 Add a row for every new recording.
 

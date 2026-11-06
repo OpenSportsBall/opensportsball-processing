@@ -12,12 +12,24 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
       97.5-minute night game on a fixed mount (2026-10-14, recording
       `78618588`, 21 segments per phone, run locally off the phones):
       - Audio sync locks in every segment of the game (most 4 s windows
-        clean). Clock drift is a steady -9 ppm (~50 ms per game, ~2.5 ms
-        per 5-minute segment), so one offset per segment is enough.
+        clean). Clock drift is not constant: the per-segment fit reads
+        -3.9 ppm in segment 0, -7.8 by segment 4, -8.0 by 5, then -8.2 to
+        -9.4 for the rest of the game (the phones warming up?); the
+        5-minute field clip read -5.9 and -4.6. Still <= ~2.5 ms per
+        5-minute segment, so one offset per segment is enough
+        (`footage/rec3/phase0/report.json`).
+      - Whiten only 150 Hz-8 kHz (partial PHAT, beta 0.8): AAC leaves
+        almost nothing outside that band, and whitening it made a false
+        peak at zero lag that the search returned as its answer (desk
+        test, 2026-10-12).
       - Re-sync every segment by audio. The offset jumps by up to 390 ms
         at segment switches (the phones lose different amounts), and
         `startedAtDeviceMs` doesn't show it: BLE+metadata was 10 ms off
-        for segment 0 and 309 ms off by segment 20.
+        for segment 0 and 309 ms off by segment 20. At the start BLE is
+        within about a frame (5 ms at segment 0 of the field clip; 22 and
+        31 ms on two short desk tests, unverified); on the game its error
+        grows with every switch (-59 ms by segment 5, -119 by 13, -309
+        by 20), so it only seeds the audio search.
       - Stitch: OpenCV's panorama stitcher (estimated focal lengths and
         rotations, graph-cut seam, multi-band blend). One calibration from
         segment 0 held for the whole mounted game: overlap points moved
@@ -26,10 +38,71 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         (45-57 deg apart), so the pipeline needs a rigid mount or a
         periodic re-estimate. Single-pair estimates of the angle are
         noisy at night (78.8-86.8 deg); compare homographies instead.
+        The stitcher's own per-segment re-estimate failed in 9 of 21
+        night segments (calibration used 5 of 8 pairs), so "every
+        segment" is the homography check, whose overlap points moved
+        1-4 px median and up to 6-28 px at worst (near-field rows; the
+        maxima unverified).
       - A homography fitted on field points did worse than the stitcher:
         turf texture gives mostly false matches.
       - 97.5 min of 4K on battery: thermal nominal throughout; battery
         100 to 74% (Pixel 11) and 55% (11 Pro); ~24 GB per phone.
+      - Second night game (rec4, 2026-10-21, 115 min, 25 segments per
+        phone; Pixel 11 Main, Pixel 11 Pro Secondary mounted upside
+        down): audio sync locks in every segment, drift -5.6 ppm. The
+        offset climbs at every switch, 69 ms (seg 0) to 2.93 s (seg 24),
+        ~120 ms per switch; BLE+metadata is 22 ms off at seg 0 and 776 ms
+        by seg 24. Stitch 79.6 deg apart on 3 of 8 pairs; per-segment
+        estimates 76.6-87.9 deg in 11 of 25 segments plus one degenerate
+        (169 deg). Refined on 394 matches: 11.6 -> 5.0 px median at 4K.
+      - First iPhone + Pixel game (rec5, 2026-10-28; Pixel 11 Main, iPhone
+        14 Pro Secondary; 2026-10-29): the Pixel cuts segments at ~285 s,
+        the iPhone at 300 s, so Main's segment k and Secondary's k drift
+        15 s apart per segment. Index pairing froze the iPhone half for the
+        first 30-135 s of each segment (~23 of 92 min). The start stamps
+        were 1.8 s off at the start and 3.9 s by the end (1737 + 107.5 ms
+        per segment, residuals <= 17 ms), past sync's +-2 s search, so
+        sync failed (sharpness 0.7-1.2 from segment 3). Now phase0.py
+        pairs each Main segment with the file that overlaps it most,
+        searches around the previous segment's stamp error (+-8 s for the
+        first), lists a second overlapping file as secondaryPieces that
+        game_stream switches to mid-segment, and counts a sync as
+        confident when it is sharp (>= 3) or most 4 s windows agree. All
+        20 pairs lock, leftover stamp error <= 42 ms; drift +14 ppm. Raw
+        rec5 matches the hand-built rec5-game (offsets within 0.02 ms,
+        frames across a switch identical); rec2-rec4 pair as before
+        (7cfd1f2).
+      - The stitcher failed on rec5: 0/8 pairs over the game, 1/8 on
+        segments 7, 12 and 17 (focal 415/449 px, 72.8 deg apart), with
+        overlap features in 3 of 20 segments. The phones overlap on a
+        narrow strip of turf and the iPhone half is out of focus. The
+        cameras were set by hand (2026-10-29): Main from the manifest's
+        FOV and gravity sensor, the angle between the phones from the
+        touchline and halfway paint (~81 deg), then rotation, k1 and the
+        7 cm lens offset fitted jointly on the overlap; agreement in the
+        overlap went from 0.25 / 0.68 / 0.86 to 0.90 / 0.90 / 0.85 near /
+        middle / far (unverified: the scripts were not kept), and a
+        0.75 deg step at the far goal went away. A game whose views barely
+        overlap needs a wider overlap at setup or a calibration from the
+        pitch.
+      - rec7 (2026-11-04, Pixel 11 + iPhone 14 Pro, 99.95 min): sync locks
+        but sharp matches are rarer (mostly 1.5-3 against 3-9 on rec6);
+        stamp error ~-2.2 s by the end. Stitch ok on 3/8 pairs, 79.2 deg
+        apart, the angle 77.7-87.1 deg over 14/22 segments. phase0.py had
+        calibrated from the last settings lock of the whole game (rec7
+        re-locked at ~52 and ~75 min), so in effect from all of segment 0,
+        warm-up included; rec6 the same. It now takes the last lock within
+        segment 0 (rec7 249.5 / 254.9 s, rec6 37.4 s; 1a12e90). rec6's and
+        rec7's cameras were made the old way and not rebuilt (that would
+        void their pitch fits and taps); it may explain part of rec7's
+        weak stitch.
+      - iPhone focus (2026-11-03): rec5's iPhone half was soft throughout
+        (focus forced to lensPosition 1.0, past infinity on the Pro
+        ultra-wide). With the app's settle-then-sweep lock, a tester's
+        40 s iPhone 14 Pro clip locked at lens 0.85 (autofocus had settled
+        at 0.851) and the locked stretch is as sharp as the best autofocus
+        frames, corners included; the lock came only at 34.6 s of 40.
+        Unverified (scratch measurements); not yet seen on a game.
 - [ ] Pixel 11 Pro reports a 108.8 deg horizontal field of view but its
       recorded frame is ~104 deg (stitcher's focal estimate); the Pixel
       11's 103.6 deg matches. Check `CameraSelection.horizontalFovDeg`
@@ -42,7 +115,17 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
       absorbs it in the taps refit). Holding Main's lens at rec6's value
       and refitting only Secondary straightened the near touchline but
       broke the far end and centre (overlap error 5.0 -> 8.4 px at 4K):
-      both lenses need to be known, not one. Plan:
+      both lenses need to be known, not one. Earlier evidence (rec4,
+      2026-10-22): refitting k1/k2 so the painted near touchline and
+      halfway line come out straight works with focal free (off-plane
+      16-20 -> 2-8 px at 4K, stitch 5.1 px) but with focal held the
+      stitch degrades to 17.3 px. Factory intrinsics (`dumpsys
+      media.camera`, unverified): Pixel 11 752.8 px @ 1920, matching the
+      stitcher; Pixel 11 Pro 670.1 @ 1920, but the stitch wants ~726
+      (21.3 px transfer at 670, 7.4 at 726) and the touchline/halfway
+      angle on the ground is 90 deg at 726-730, 79.5 at 670. rec4cal
+      uses Main's factory focal, 726 px for the Pro, no distortion,
+      levelled to Main's gravity sensor (the fixture README). Plan:
       - Prior first: `follow.refine` pulls each focal toward the
         manifest's `video.horizontalFovDeg` (f = 960 / tan(hfov / 2) @
         1920: Pixel 11 755.3, iPhone 14 Pro 720.8) instead of fixing it;
@@ -64,7 +147,8 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
       two-band blend hides the exposure step. Warping and blending run on
       the GPU (`gpu.py`, PyTorch: MPS locally, CUDA in the cloud), NV12 from
       hardware decode to hardware encode; 20 s of video in 64 s on an
-      M-series Mac. Still to do: cross segment boundaries.
+      M-series Mac. Crosses segment boundaries since 2026-10-16
+      (game_stream, decoder pre-roll).
 - [ ] Follow cam aim, judged by eye on 2 minutes of the night game
       (segment 9, 60-180 s; 2026-10-15). Best so far: "A",
       `follow.py ... play goalkick,goalframe,unsure` (hotspot + goal kicks
@@ -74,7 +158,10 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
       clip; check another stretch of the game. What each step fixed:
       - Speed-weighted players beat the median of all players (caught a
         quick counter; in play.py's test, ball in a 60 deg view 100% vs
-        66%), but an average of 3-6 runners jumps between groups.
+        66%), but an average of 3-6 runners jumps between groups. The
+        point the runners converge on did best at 50 deg on a 20 s test
+        (78% vs 63-65%) but jumps more (aim error 12 vs 9.7 deg),
+        scored against the early tracker only (509c43a); not wired in.
       - Hotspot of running (pooled +-0.5 s, weighted by speed, sticky:
         another spot must be 50% stronger for 0.7 s): followed the attack
         to the left goal; aim jumps > 40 deg/s dropped 435 -> 73 frames.
@@ -83,6 +170,8 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
       - Aim only from people inside the lines; spots by a touchline
         occupied >= 10% of the time (bench, subs) are ignored.
       - Lull hold: <= 1 runner for 1 s keeps the aim from just before.
+        The background model learns over ~1 min instead of ~10 s, so
+        still keepers stay visible longer (only partly: see roles).
       - goalframe: >= 4 players within 20 m of a detected goal while the
         hotspot is elsewhere: frame both and the goal mouth (<= 75 deg).
         Only worked once goals were detected (pitch.py goals): with the
@@ -155,15 +244,31 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
       moment every 2 s along each clip, 120 moments, reviewed): with
       `balleval.py` the tracker is measured directly. Found at labelled
       moments, seg 9 / seg 3: as it was 32% / 26% (wrong 9 / 12); with
-      the static filter at 30 s, a 2-hit minimum, judge >= 0.3 and a
-      0.6 s gap: 54% / 62% (wrong 1 / 8; with a looser tolerance 57% /
-      66%, wrong 0 / 4). Now the defaults. Of the remaining misses about
+      the static filter at 30 s (at 4 s the ball placed for a goal kick
+      was removed as a spare: 12 -> 18/37 on seg 9 alone, 6027fc8), a
+      2-hit minimum, judge >= 0.3 and a 0.6 s gap: 54% / 62% (wrong 1 /
+      8; with a looser tolerance 57% / 66%, wrong 0 / 4). Now the
+      defaults. Label provenance: both clip sets were pre-marked by
+      Claude from the detector and judge, then reviewed (on seg 9 the
+      review moved 17 of 31 ball marks by 20-110 px, removed 2 and added
+      13; unverified). 20 of seg 9's 118 frame labels and 33 of seg 3's
+      102 still carry `draftBy: claude` (unedited drafts, mostly where
+      the ball was too small to be sure), so the clip scores lean on the
+      detector's own view in those frames. Still unmeasured on the
+      labels: ball.py's body filter (BODY_FRAC 0.8, candidates in the top
+      80% of a person's box dropped), though half of motion's misses are
+      a ball against a player. Of the remaining misses about
       half have no detector candidate near the ball at all, the rest are
       balls on the near touchline just outside the pitch margin, in a
       player's hands (the judge scores those ~0), or in tracks the chain
       didn't pick. Also fixed: ballclip.py only read the first segment
       file, so seg 3's candidates stopped at 1:00; with the full clip
-      A + ball + goalin captures 10/13 play boxes.
+      A + ball + goalin captures 10/13 play boxes with the old tracker
+      settings (mean coverage 93%), and 8/13 (90%) with the label-tuned
+      ones (the seg 3 throw-in at 105 s 100 -> 37%: the judge rejects a
+      ball in the thrower's hands; unverified). The trade was accepted
+      because the labels measure the tracker directly and 13 boxes
+      don't; round two below recovered the boxes.
       Search-window detector (`ballwin.py`, 2026-10-16): an online track
       on the pitch, a native 640 px window plus a 2x zoom window for
       small balls in each phone, full scans every 2 s or when lost. Same
@@ -224,6 +329,13 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
       off by default.
       The view never crosses the canvas's left/right edge: it stops there
       and zooms in instead (EDGE_MARGIN_DEG 2, floor EDGE_MIN_HFOV 40).
+      MIN_HFOV, SMOOTH_S, MAX_PAN_DEG_S and BALL_HOLD_S 2-6 were all
+      neutral at 11/13 then.
+      Ball stage cheaper (2026-10-17; transcript figures, no log kept):
+      every other frame (5 fps) finds 16/37 and 30/53 against 18/37 and
+      31/53, play boxes 10/13 against 11 (the 1:45 throw-in lost); full
+      scans every 4 s (1 s when lost) instead of 2 s: seg 9 15/37 (41%
+      vs 49%) at 4.6 tiles per frame. Neither adopted.
       Multi-frame heatmap detectors (2026-10-18, `ballheat.py`, scored
       per labelled frame on both phones: a candidate within 12 px or 1.5
       ball diameters of the label): WASB and TrackNetV2 with their
@@ -395,7 +507,13 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
       or two for 17-38% more ball-stage time, and the far band nothing.
       Orange ball (2026-10-29/30): rec5's match ball is orange, and the
       judge, trained on rec3's white ball, rejected it (5% of frames
-      judged ball, path 7% of rec5 0-10 min). 98 labels on rec5's Pixel
+      judged ball, path 7% of rec5 0-10 min when rescored with today's
+      ball.py; the render itself aimed at the ball 3% of the time). On-
+      pitch candidates in 26% of rec5's frames against 52-59% on rec4cal
+      (conf >= 0.7: 7% vs 23-29%); 300 confident candidates the judge
+      scored < 0.1 were crisp crops of the orange ball. Rescored without
+      the judge the path covered 43% of the 10 minutes (unverified): the
+      judge was the main block. 98 labels on rec5's Pixel
       (labelset.py ball mode; 71 ball) went into a detector trained on
       rec3 + rec5 (rec5 x3, ballmerge.py; 275 white boxes, 54 orange) and
       a judge on rec3's crops + rec5's (x3, `balljudge.py merge`). rec5
@@ -418,7 +536,35 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
       balleval 67 -> 63/90 found, wrong 6 -> 3. The new detector with
       the old judge was worse (rec6 29%, rec3 58/90), so they go
       together. Standard since 2026-11-01 (footage/models/). rec3 seg3
-      lost 4 found (46 -> 42/53): watch white-ball games.
+      lost 4 found (46 -> 42/53): watch white-ball games. judge_v3's
+      effective mix was rec3 x4, rec5 x9, rec6 x2 (the merge bug below).
+      Judge with the expected ball size (2026-11-01): the pitch map's
+      expected ball diameter at the candidate as an extra judge input,
+      trained with the same seed and weights as without it. Found on the
+      way: `balljudge.py merge` read rec5-game's crops.npz, itself a
+      merge, so the standard judge_v3 trained on rec3 x4, rec5 x9, rec6
+      x2, with duplicates across valid/test (fixed in 95eeac3:
+      crops_<rec>.npz). v3 / fixed mix (v3b) / fixed + size (v3d): rec6
+      path 52 / 49 / 48%, rec5 39 / 41 / 40%, rec4cal boxes 10/15 each
+      (aim 36/19, 30/18, 40/21%), rec3 boxes 20 / 20 / 21/26, found 63 /
+      65 / 65 of 90 (wrong 3 / 2 / 4); held-out clip AP 0.915 / 0.915 /
+      0.936 (`footage/benchscan/judge_dist.log`). No clear gain: the size
+      input was dropped, the merge fix kept, judge_v3 stays the standard.
+      Yellow ball (2026-11-05, rec7: white vs yellow kits, yellow match
+      ball, night): the first render aimed at the ball in 0-1% of each
+      10-minute piece, and 0/5 reviewed play boxes on piece 2 (set
+      seg0-1484). The detector finds the yellow ball (conf 0.7-0.86); the
+      judge, which had never seen one, scores it 0 (752 of 805 on-pitch
+      candidates at 0). 119 frames labelled on both phones (labels_seg6:
+      seg 6, 100-220 s; 72 balls) and a judge_v4 trained on rec3 + rec5 x3
+      + rec6 x2 + rec7 x4 (valid AP 0.896, held-out clip 0.92). Confident
+      candidates passing the judge: 0-5% -> 55-57%. Piece 2 (contains the
+      labelled clip, so not independent): aim at the ball 1% -> 64%, play
+      boxes 0/5 -> 4/5 (unverified; the miss, 3:21, is a lost track).
+      Re-rendered with OSB_JUDGE=judge_v4 from piece 2: aim 40, 28, 43,
+      48, 63, 46, 61% on pieces 3-9. judge_v4 is not benched on rec3,
+      rec4cal or rec6 and is not the standard; each new ball colour has
+      so far needed its own labels.
       Offline path tracker (2026-10-19, `ballpath.py`; the default
       in balleval.py and follow.py, OSB_BALL_CHAIN=1 for the chain): the clip is on disk
       before tracking runs, so instead of ball.py's greedy online chain
@@ -514,6 +660,23 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
       Next: the close-pairs rule as a second vote, team as a matching
       cost in the player tracker, keeper bearings as a ball witness with
       the real keeper. When the margin is small, ask once in the app.
+      Other games: automatic sides failed on every one since. rec4
+      (2026-10-22, red vs white): the split picked two shades of red as
+      the two sides, since the saturation floor drops white kits; set by
+      eye in `teams/seg9/sides.json` (red vs white, the teal keeper in
+      with white, yellow referee). The warm-up chunk's roles are
+      lopsided (training gear, not kits). rec5 (2026-10-29, blue vs
+      white, soft iPhone half): one kit component (white under the
+      saturation floor), "fewer than two kit components"; set by eye.
+      Over 10 min roles gave white ~2x blue, so the white group also
+      takes subs and spectators. rec7 (2026-11-05, white vs yellow): with
+      5 components the two kits merged (white reads yellowish under
+      floodlights); with 8, kits [0] and [2] at 10.6 vs 5.8 a moment,
+      still wrong by eye; set by hand (A white [0,7], B yellow [1,2],
+      keeper/referee [5,6]); on unseen footage (segment 10) white still
+      runs low. roles.py now runs without goals.json (goal-line
+      centres). The kit-component thresholds need more than one game;
+      asking in the app is the fallback.
 - [ ] Camera-log review of the second full render (2026-10-18/19,
       `camlog.txt`: one line per change of the rule driving the camera):
       - 25:05 framed a goal kick at the right end during open play at
@@ -538,7 +701,9 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         after the keeper gathered) were correct.
       Follow-up: restart_taker flashes 95 deg wide for 0.4-2 s in short
       lulls (54:27-54:50); gate it like the goal kick (far-ball veto,
-      minimum lull length). The ball-stage changes mean a full re-render
+      minimum lull length). Done differently on 2026-10-23: the taker
+      must be where play just was (rec4 follow cam item below). The
+      ball-stage changes mean a full re-render
       needs the ball candidates regenerated (~45 min per 10 min chunk).
 - [ ] Play boxes, round three (2026-10-19): 13 more reviewed moments
       from the first 23 minutes (sets seg0-0, seg0-600, seg0-1200; the
@@ -584,6 +749,79 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
       x -49..-34, 40 m beyond the hotspot: a positional trigger (the
       forward-most players bunched far from the hotspot) would target
       7:34 and 7:51. Not built.
+- [ ] rec4 follow cam (2026-10-22/23; must-see boxes drawn by the user:
+      10:00-20:00 six moments, 20:00-30:00 nine; TESTING-PROCESSING.md
+      section 2). Pitch and cameras for this game are in the lens and
+      pitch-map items.
+      - First run (first camera model, rec3's detector and judge): 0/6
+        at 10:00-20:00 (unverified); ball stage 62-68 min per 10-minute
+        chunk (rec3 42-58). Re-planned with the corrected cameras, the
+        h26 pitch and fitted goals: 3/6 (16:54's false goal kick gone:
+        off-pitch people by the near touchline had counted as on the
+        pitch).
+      - The rec3-trained detector loses the ball for 4.5-6 s at a time
+        before 16:37 and 17:11; the judge rejects nearly every candidate
+        (1 in 30 above 0.5); a spare ball sits by the far touchline.
+      - Pass A's motion tracks see 7-12 of the 24-29 people roles.py
+        detects; at 17:11 three players breaking toward the right goal
+        are untracked. roles.py runs at half resolution: far-touchline
+        players are ~20 px tall, 161 detections there in 10 min against
+        ~34,700 mid-pitch. Full resolution for the far band not tried.
+      - peoplesurge (c57d4d8): surge on roles.py's people (no referees
+        or keepers), each with a velocity from the nearest person 0.5 s
+        before and after within 4 m (~18 per roles frame). At 17:11 the
+        tracks' front sat at x -14..+16, the real front at +40..+44.
+        10:00-20:00: 5/6 against 3/6 (16:37 and 17:11 gained; 18:27
+        still a false far-left ball); surge chooses the aim in 10.5% of
+        frames, ~1 s per chunk. Needs roles; off by default (fullgame.py's
+        default features lack it).
+      - The overnight full-game run with peoplesurge scored 0/8 on
+        20:00-30:00 (28% best); a cold start on 25:00-30:00 alone 5/8
+        without peoplesurge, 4/8 with (both unverified). Cause: the loiter
+        filter is computed per clip, and its 4 m grid, dilated a cell,
+        reached ~7 m into the pitch by the near bench: it dropped 32% of
+        detections over 10 minutes and 49% over 5
+        (`footage/rec4cal_cmp/follow_*.log`). Replaced (494ffdc) by bands
+        along the lines: only detections outside a line or < 0.5 m inside
+        (2 m on the far touchline) in a 4 m stretch busy >= 10% of frames;
+        ball.py's static spots use the same test. On 25:00-30:00 it drops
+        nothing; 25:10 gained, 29:56 lost to a restart "taker" that was a
+        leftover background blob 50 m from play.
+      - Two balls (fa81780): at 20:25 the path jumped 55 m in 1 s from the
+        match ball to a second ball a group in pink bibs kicked in the
+        empty half, and the ball rule followed it for 5 s. Runs <= 3 s
+        apart (JUMP_GAP_S) whose join needs > 35 m/s keep only the one
+        nearer the players. On four rec4 chunks it cut jumps of 55, 75
+        and 91 m/s and kept all up to 32 m/s (refined 2026-10-27 with
+        JUMP_PLAY_MARGIN_M, above).
+      - Restart taker must be where play just was (aa2dff1): play = the
+        ball seen in the 5 s before the lull, else the held hotspot; a
+        throw-in taker within 20 m of it along the line, a corner taker
+        at its end, a goal-kick taker at its end with play within 30 m of
+        that goal line. At 25:20 the right keeper, alone 40 m from
+        everyone, had been framed as a goal kick while play was at the
+        left end. Restart time on 20:00-30:00 30 -> 18 s. Alone it loses
+        rec3 seg 9 0:12-0:13 (captured before only because an idle
+        keeper's 95 deg framing happened to cover play).
+      - Surge frames its runners (0c96b43): the front five of everyone
+        included subs on the near touchline and a lone player upfield
+        (28:47: three subs 30 m from any runner), so it aimed at empty
+        ground. Now it frames the runners heading the surge's way plus
+        5 m, dropping the rearmost to fit 70 deg. Alone: rec3 21/26 vs 20
+        (13:50), rec4 20:00-30:00 1/9 vs 0 (28:47), 10:00-20:00 4/6 vs 5
+        (16:37 at 95%, captured before by a sub widening the view).
+      - Each change alone, peoplesurge on (rec3 /26, rec4 10-20 /6, 20-30
+        /9): committed 20, 5, 0 = 25/41; loiter 21, 5, 2; jump 20, 5, 0;
+        restart 18, 5, 0; surge 21, 4, 1; all four 20, 4, 5 = 29/41. Jump
+        and restart only pay off together (20:27 and 25:20 captured only
+        with all four). Without peoplesurge 28/41. A full render with the
+        four (fullgame_v2, 3.7 h with ball and roles reused) scores the
+        same as the bench on both rec4 sets. Still missed: 18:27 (false
+        far-left ball), 26:31 (a second ball by the left touchline),
+        26:49, 28:04 (29%), 29:56.
+      - Scoring caveat: a box counts as captured when 98% of it is
+        anywhere in view (16:57 sat in the left quarter). A centred or
+        minimum-size test was proposed, not built.
 - [ ] Local footage removed (2026-10-21): the phones' segments (48 GB,
       in S3, checked byte-for-byte), both full renders, the clip and
       comparison videos and the spare training checkpoints went to the
@@ -600,6 +838,22 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
       two stages are ~68 min per 10 min chunk). Two hangs seen at the
       end of the last segment file (the decoder at EOF): the last chunk
       now stops 1 s short, and the stages exit hard after writing.
+      rec5 whole game (2026-10-30/31, 92.3 min, rec3 + rec5 models, sides
+      by hand): 11.0 h on the Mac, ball stage 44-82 min per 10-minute
+      chunk. Aim at the ball by chunk 36, 45, 39, 29, 36, 31, 23, 32, 25,
+      27% (against 3% on the first 10 min with the night-game models).
+      Weaker after the hour (light fading on the orange ball, or
+      scrappier play: not checked). No play boxes for rec5, so the share
+      is coverage, not accuracy.
+      rec7 (2026-11-05, 95.2 min from segment 1, standard models): ball
+      stage 70-75 min per 10-minute chunk, follow 27-29 min, ~2x
+      rec4cal's pace (cause unchecked: the iPhone half, or the ball lost
+      more and scanned more). With judge_v4 the ball
+      stage fell to 38-51 min (a held track needs fewer full scans, 6.5
+      vs 9.2 tiles per frame). labelset.py clip and playeval.py make had
+      read Secondary from the file with Main's segment number; with a
+      300 s iPhone that is often the wrong file. Both now use
+      follow.phone_at (1a12e90).
 - [ ] Follow cam: clip further in from the left and right edges. The edge
       rule stops at the canvas boundary (where a phone's frame ends, less
       2 deg), but the last several degrees of each phone are poor: lens
@@ -630,19 +884,104 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
       and other pitches' fail). The goals then correct the map: the right
       end was ~20 m off before. Night game: 109.3 x 60.5 m, camera 2.7 m
       up, goals 7.6 and 7.4 x 2.44 m. Still one-off parts:
-      - The starting pose is hand-read from the panorama. Automate it
-        (centre circle ellipse + halfway line give distance and height),
-        with a tap-two-points fallback in the app (centre spot, a corner).
+      - The starting pose was hand-read from the panorama (a guess can be
+        passed as pitch.py's third argument since 845c4a5). Since
+        2026-11-05 (1a12e90) pitch.py tries START_POSE at camera heights
+        1.9-10 m and keeps the plausible fit that lies best on the paint:
+        rec7 6 m (+0.39, the others <= +0.16), the same fit as a hand
+        start; rec6 4 m, 105.0 x 71.4 m, nearer its taps fit than 1.9 m's
+        84.9 x 61.3. map_pitch (the fixtures) still starts at 1.9 m. Still
+        to automate from the centre circle ellipse + halfway line, with a
+        tap-two-points fallback in the app (centre spot, a corner).
       - Assumes a regulation layout and full-size goals; youth and
-        small-sided pitches need a pitch type or more free sizes.
-      - Thresholds tuned on one game; test other venues and daylight.
+        small-sided pitches need a pitch type or more free sizes. The
+        lines alone don't fix the scale: with the markings' size free the
+        night game fits equally well as 88 x 43 m with markings x0.61
+        (5.0 vs 4.8 px; unverified), so the regulation 9.15 m circle sets
+        it (ec9cefb). A youth pitch with scaled markings needs the scale
+        from elsewhere (gravity tilt, a tapped distance, or goal size).
+      - Thresholds tuned on one game; every other field so far needed
+        taps (below).
       - Goals moved mid-game (portable) would need a per-segment re-check.
+      rec4 (2026-10-22): from rec3's START_POSE the fit settles in a wrong
+      minimum (98.7 x 62.7 m, the near touchline off); a start guess gives
+      100.7 x 61.1 m at 2.09 m up, but with the camera 0.7 m behind the
+      near touchline (really ~3 m) and the model touchline off the
+      panorama's edges. The far paint was mostly lost by the mask (far-band
+      line pixels 10,200 against rec3's 53,500; unverified): thin far lines
+      stay saturated (S < 60 dropped them) and Main's colour cast put far
+      grass at hue 25-30, outside turf() (> 30). line_mask now uses S < 100
+      and hue > 20 (637b3ba; this is what broke the regression test,
+      below). Goals detected as 6.0 x 2.0 and 5.2 x 1.7 m, rejected. The
+      painted near touchline is a great circle on Main's half (0.03 deg
+      rms) but bends 1-3 deg on the Pro's.
+      Taps (2026-10-22, 8c77fbf; the pitchtap page, 12 at the ends then 15
+      with the centre): automatic junctions found only the right 18-yard
+      box, so the ends come from taps. With them the ends are right but
+      the near touchline falls inside its paint; one height offset for the
+      whole near touchline explains it (-39 cm, rms 3.54 -> 0.24 deg, both
+      phones within 3 cm; not lens, not a crown: wrong sign). The mount was
+      measured at 2.6 m. Height held at 2.6 m ("h26"): 105.5 x 62.3 m,
+      markings 3.4% large, near touchline and ends right, centre circle
+      ~19 px (0.6 deg) off; a crown term (+6 cm) doesn't fix it; heights
+      2.6-2.9 m trade circle for ends. With all 15 taps and height free:
+      3.11 m, circle and ends right, near touchline off. No flat pitch
+      holds both: the near touchline sits 2.6 m below the camera, the
+      centre and ends 3.1 m. h26 is used (follow.py has no curvature).
+      Goals fitted to the white posts from the tapped post base: 7.67 x
+      2.64 and 7.78 x 2.68 m, so h26's scale at the ends is 5-9% small
+      (the night-2026-10-21 fixture README and baseline_scores.txt).
+      Other fields need taps too (2026-10-29/31). rec5 (yellow paint,
+      portable spare goals): lines-only fits run off; with 11 taps 88.3 x
+      59.3 m, camera 2.27 m up, most taps within 0-10 px but the right 18-
+      and 6-yard corners 44-50 px off (unverified): those boxes are
+      shallower than regulation and the model scales all boxes and the
+      circle by one markingScale. Goals not run (`pitch.py goals` would
+      overwrite the taps refit, and spare goals stand along the far side).
+      rec6 (daylight): the lines-only fit diverged (camera 0.94 m up, 84.9
+      x 61.3 m); from taps 104.7 x 68.9 m, camera 2.43 m up, after swapping
+      two circle taps the page had recorded the wrong way round. The near
+      touchline still sits a little outside its paint at the bottom of the
+      panorama.
+      rec7 (2026-11-05, camera ~6.2 m up after the taps refit): from START_POSE (1.9 m) the
+      lines-only fit ran off (camera 0.58 m up); the multi-height start
+      above fixes that. With 15 taps and w3 (a depression term in the
+      warp, fbf3655): near touchline within 0.27 m (was 0.5 m), worst tap
+      21.5 -> 16.1 px, mean 7.5 -> 6.6, camera 6.6 -> 6.2 m, w3 6.2 deg
+      (expected ~1; it trades with the camera height, so it is not a lens
+      measurement). Free in the lines-only fit, w3 ran the pitch to 136 x
+      69.5 m, so it is fitted only with taps. Fit 102.3 x 60.5 m. Goals:
+      frames found at x +-50.8 m, both rejected (end lines 10.0 / 4.9 px
+      off); the fallback goal-line centres are within 0.35 m, so left as
+      is.
       Regression test: `processing/tests/test_pitch_regression.py` reruns
       the whole mapping on saved background panoramas and checks goals,
       size, camera and 15 key points (<= 0.1 deg) against results checked
       by eye. Fixtures hold footage, so they stay out of git
       (`footage/fixtures/pitch/<name>`, made by `pitch.py <rec> fixture
-      <dir>`; back them up privately). One so far: the night game.
+      <dir>`; back them up privately). One so far: the night game
+      (`night-2026-10-14`). It has failed 4 checks since 637b3ba
+      (2026-10-22): the right goal 7.8 m wide against 7.4, length +1.1 m,
+      lines-only key points up to 0.37 deg; the fixture's left goal was
+      updated to the new mask (7.6 -> 7.4 m), the right kept until the
+      right goal is sorted out.
+      Coloured paint (2026-10-29, b74f2a1; rec5: football in yellow beside
+      red and blue lines for other sports): colour_mask finds paint of any
+      colour in PAINTS by its Lab direction against the turf;
+      pitch/paint.json sets it, white without one (the night game's white
+      mask bit-identical). Under floodlights the far yellow paint differs
+      from the haze by 1-3 b* units, so only the near touchline and most
+      of halfway are found, and a yellow lines-only fit runs off (202.7 x
+      49.2 m, camera below the ground). Choosing the colour by which
+      finder fits best picked white on all three games, wrong on rec5
+      (white catches pale far yellow and floodlight noise); scoring only
+      the near markings tied on two games. What works: take the best
+      plausible fit of any colour for where the lines are, then measure
+      the paint under its near markings against the turf beside it: b*
+      -10 (rec3) and -12 (rec4) -> white, +3 (rec5) -> yellow (cut-off +1:
+      a small margin). With yellow and a hand start pose the fit converges
+      (86.2 x 54.4 m, camera 2.0 m). The tap page shows the choice for
+      confirmation. Orange, red and blue are untested on real fields.
 - [ ] Ball labelling: `labelset.py` (300 random moments, RF-DETR
       suggestions, stitched panoramas; unlabelled frames turned into
       both-phone moments) and `label/server.py` (local page: panorama
@@ -665,7 +1004,10 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         match balls at conf >= 0.1 with 1.1 wrong per frame (stock: 69%
         with 10.5); the top suggestion is the match ball 69% of the time
         (stock 40%). On training moments 96%: overfit to this game, so
-        label a second game before training more.
+        label a second game before training more. Its confidence means
+        something: ~60% of match balls still found at 0.4-0.6, 57% at 0.7
+        (stock 36%); it finds fewer of the spare balls (all balls 73% vs
+        81% at 0.1). Unverified (transcript output).
       - Next: the tuned detector as a judge of motion candidates, and a
         tracker with ball physics (ground rolls, lofted balls projecting
         long).
@@ -689,6 +1031,12 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         split a game across instances by segment.
 - [ ] Clap test on the mount: confirm audio sync also aligns video (each
       phone's audio-to-video offset in the file is assumed equal).
+      Indirect check (2026-10-15, unverified): matching motion across the
+      overlap agreed with the audio offset within ~1 frame where it
+      correlated clearly (4 of 9 probes), noise elsewhere. Capture-side,
+      untested: the phones expose up to half a frame apart and the
+      upside-down phone's rolling shutter runs the other way (60 fps or
+      both phones the same way up would shrink both).
 
 ## Phase 3: processing pipeline
 

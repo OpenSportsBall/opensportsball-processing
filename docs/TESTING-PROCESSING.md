@@ -37,7 +37,13 @@ Tolerances: both goals found and within 0.3 m; goal frames within 1.5 px of
 the white structure and end markings within 3.5 px of the paint; pitch
 length and width within 1 m, camera height within 0.2 m; 15 key points
 (corners, centre and penalty spots, post bases and tops) within 0.1 deg,
-the lines-only fit within 0.3 deg. One fixture so far: the night game.
+the lines-only fit within 0.3 deg. One fixture so far: the night game
+(`night-2026-10-14`, rec3). It has failed 4 checks since 637b3ba
+(2026-10-22), the line-mask change that recovered rec4's faint far paint:
+rec3's right goal comes out 7.8 m wide against 7.4, the length +1.1 m, and
+the lines-only key points up to 0.37 deg. The fixture's left goal was
+updated to the new mask (7.6 -> 7.4 m); the right was kept until the right
+goal is sorted out.
 
 ### Marked-field benchmark
 
@@ -86,12 +92,16 @@ rec4 (the 2026-10-21 night game) has two sets, `footage/rec4cal/playeval/seg0-60
 `footage/rec4cal/playeval/seg0-1200` (game 20:00-30:00: 20:27, 25:10, 25:20, 25:59, 26:31, 26:49,
 28:04, 28:47, 29:56; preview `play-eval-rec4cal-1200`). 20:27 has a second ball in play in the empty
 half, kicked by a group in pink bibs. Their panoramas
-and boxes are in the corrected camera model (factory focal lengths, levelled to gravity; `cameras.json`
+and boxes are in the corrected camera model (factory focal length for Main, 726 px fitted for the Pixel 11
+Pro, no distortion, levelled to Main's gravity sensor; `cameras.json`
 in the set), the same one as the pitch benchmark `night-2026-10-21`, so score only paths made with those
 cameras. Both have a `clip.json`, so `playbench.py footage/rec3 footage/rec4cal` benches all 41 moments
 together (the pass-A caches for both clips are in `footage/rec4cal/follow/`). `footage/rec4/playeval/seg0-600`
 holds the same boxes in the first camera model and is kept only to score the first full-game run (no
 `clip.json`: not benched).
+
+rec7 has one set, `footage/rec7/playeval/seg0-1484` (5 moments on the full-game run's piece 2; a
+`clip.json`, but not part of the standard bench), scored against that run's path files.
 
 Bench of both recordings on 2026-10-23 (after the loiter-band, ball-jump, restart and surge changes):
 `goalkick,goalframe,unsure,ball,goalin,ballhold,roles,kickoff,peoplesurge` captures 29/41 (rec3 20/26,
@@ -203,6 +213,9 @@ the play boxes.
 Sets: `footage/rec3/labels_<name>/` (`items.json`, `images/`, `pano/`,
 `labels.json` with every ball marked and the match ball flagged). Two sets
 of 60 moments: `seg9` (37 with the match ball on the pitch) and `seg3` (53).
+Both were pre-marked by Claude from the detector and judge and then
+reviewed; 20 of seg 9's 118 frame labels and 33 of seg 3's 102 still carry
+`draftBy: claude` (never edited, mostly tiny far balls).
 The clip's candidates come from the files below; the set's suggestions are
 drawn from them.
 
@@ -237,8 +250,10 @@ Every game uses one standard detector and judge, `footage/models/ball_detector.p
 and `ball_judge.pt` (provenance and bench scores in `footage/models/README.md`):
 `fullgame.py` runs `ballwin.py` with the detector (`--detector` to override), and
 `balljudge.load_judge` reads the judge unless a model name picks
-`<recording>/balljudge/<name>.pt`. Since 2026-10-30 these are the rec3 + rec5
-models (white and orange balls); before, rec3's. The benches pass a detector
+`<recording>/balljudge/<name>.pt`. Since 2026-11-01 these are the rec3 + rec5
++ rec6 models (white, orange and daylight; detector balltrain_v3, judge
+judge_v3); from 2026-10-30 the rec3 + rec5 pair; before, rec3's. A run can pick
+another judge with `OSB_JUDGE` (rec7's yellow-ball `judge_v4`, not the standard). The benches pass a detector
 explicitly; their candidate files keep the judge scores they were made with.
 
 `ballpath.py` links the same filtered candidates as one minimum-cost path
@@ -375,7 +390,8 @@ Checked when the store was made (2026-10-29): every segment matches its
 manifest's sha256, the play bench gives 29/41 (rec3 20/26, rec4cal 9/15)
 as on the working recordings, balleval matches them, and ballwin decodes
 the rec4cal video. The pitch regression test fails 4/4 on both copies of
-its fixtures alike (a regression since 2026-10-21, not the store).
+its fixtures alike (since the line-mask change of 2026-10-22, 637b3ba; section 1),
+not the store.
 
 The benches write their outputs (paths, candidate files, caches) into the
 store as they do into any recording; don't push scratch variants to S3.
