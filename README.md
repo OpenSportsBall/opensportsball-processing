@@ -25,8 +25,7 @@ with it, only data:
 
 | Path | What |
 |---|---|
-| `processing/` | GPU pipeline: sync, stitch, track, render; Phase 0 spikes |
-| `ml/` | Labeling, training, evaluation |
+| `processing/` | GPU pipeline: sync, stitch, track, render; Phase 0 spikes, including the labelling tools and model training (`processing/spikes/`) |
 | `schemas/` | Pinned copy of the main repo's manifest schema |
 | `docs/` | Findings, data layout, how processing is tested, backlog |
 | `footage/`, `datasets/` | Local only, never committed; see [docs/DATA.md](docs/DATA.md) |
