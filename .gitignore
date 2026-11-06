@@ -11,8 +11,6 @@
 *.aac
 footage/
 datasets/
-ml/data/
-ml/runs/
 *.pt
 *.onnx
 *.engine

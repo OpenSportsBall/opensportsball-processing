@@ -5,6 +5,11 @@ Footage shows people, some possibly minors: nothing here goes in git
 Mac under `footage/` and backed up to the footage bucket in S3
 (`FootageBucket` in the main repo's `infra/cdk-outputs.json`).
 
+Trained weights (`*.pt`, `*.onnx`) stay out of git too. Before training
+on a public dataset (SoccerNet included), check its license, and record
+which datasets every released model was trained on (for the standard
+models, in `footage/models/`'s README).
+
 ## Layout
 
 On the Mac:
