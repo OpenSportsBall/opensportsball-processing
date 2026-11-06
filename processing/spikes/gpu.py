@@ -39,9 +39,17 @@ class TorchCamera:
         self.f, self.cx, self.cy, self.k1, self.k2 = c.f, c.cx, c.cy, c.k1, c.k2
         self.w, self.h, self.r2_max, self.rot180 = c.w, c.h, c.r2_max, rot180
         self.R = torch.tensor(c.R, dtype=torch.float32, device=dev)
+        self.t = torch.tensor(c.t, dtype=torch.float32, device=dev) if c.t.any() else None
+        self.far_h = c.far_h
 
     def project(self, d: torch.Tensor):
-        """World directions (..., 3) -> raw pixel coordinates and validity."""
+        """World directions (..., 3) from Main's lens -> raw pixel
+        coordinates and validity (follow.Camera.project, lens offset included)."""
+        if self.t is not None:
+            u = d / d.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+            dy = u[..., 1:2]
+            dist = torch.where(dy > 1 / self.far_h, 1 / dy.clamp_min(1e-12), torch.full_like(dy, self.far_h))
+            d = u * dist - self.t
         c = d @ self.R
         z = c[..., 2]
         ok = z > 1e-6

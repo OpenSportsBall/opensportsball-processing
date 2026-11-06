@@ -96,6 +96,29 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         rec7's cameras were made the old way and not rebuilt (that would
         void their pitch fits and taps); it may explain part of rec7's
         weak stitch.
+      - Line fit (2026-11-05, rec7, measured only; nothing re-rendered):
+        the paint didn't line up at the seam (centre circle split up to
+        ~10 px at 4K, worst toward the phones' frame edges). refine() fits
+        SIFT matches, mostly sky, trees and false turf matches, never the
+        paint. `follow.refine_lines` now fits paint centrelines (median
+        background per phone, top-hat + skeleton, pieces >= 150 px) in
+        both directions by distance transform, with both lenses, a lens
+        offset Camera.t (in camera heights; parallax on a level ground,
+        so no pitch map is needed) and a Secondary rotation per sampled
+        segment. Held out (segments 6 and 15, fitted on 0/4/8/13/17):
+        1.80 -> 0.76 and 2.57 -> 0.82 px median at 4K. Offset alone on
+        segment 6: 0.79 -> 0.64 px, 6.6 cm across (the far rows gain
+        most, 1.16 -> 0.45). Fitting the ground's tilt too didn't help
+        (0.67). Fit on segment 1 vs 6: each 0.6 px on its own and
+        ~5.8 px on the other, Secondary rolled ~0.4 deg between them
+        (the mount moved early in the game, after the calibration
+        window). The kept rotation is the one most segments agree with;
+        the others are listed in cameras.json "lineFit.mountMoved".
+        Adds ~2-3 min to building cameras.json.
+- [ ] Per-segment Secondary rotation in rendering: refine_lines already
+      fits one per sampled segment, but every caller of setup_cameras
+      (and game_stream across segment switches) uses one camera pair.
+      rec7 segments 0-1 are ~5 px off with the game's rotation.
       - iPhone focus (2026-11-03): rec5's iPhone half was soft throughout
         (focus forced to lensPosition 1.0, past infinity on the Pro
         ultra-wide). With the app's settle-then-sweep lock, a tester's
