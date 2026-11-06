@@ -44,7 +44,11 @@ Goal positions come from `pitch.py <recording> goals` when it has run.
 
 The stitcher's cameras are refined at 1920 px on matches from frames
 across the game (focal lengths, two radial terms, Secondary's rotation),
-which roughly halves the alignment error at 4K.
+which roughly halves the alignment error at 4K, then on the painted lines
+(refine_lines): the lenses, the ~7 cm between them (parallax on the
+ground), and Secondary's rotation from the stretch of the game most
+segments agree on. On rec7 that took the paint at the seam from ~2-2.6 to
+~0.8 px median at 4K on segments the fit didn't see.
 
 Both passes warp and blend on the GPU (gpu.py: Apple's GPU locally, CUDA
 in the cloud), in NV12 from the hardware decoder to the hardware encoder.
@@ -96,24 +100,39 @@ PLAYER_COST = 3.0       # seam cost on a detected player, per pixel
 
 # --------------------------------------------------------------- geometry
 
+FAR_H = 60.0  # points off the ground (above the horizon) are taken this many camera heights away
+
+
 class Camera:
     """One phone: world direction (y down) <-> pixel, at a given width.
 
     Pinhole plus two radial distortion terms. Parameters are held at
     REF_W and scaled to the width asked for.
+
+    World directions are seen from Main's lens. `t` is this phone's lens
+    position relative to Main's, in the world frame, in units of the
+    camera height (Main's is zero). With a nonzero `t` a direction is
+    taken to the point it reaches, the ground (a level plane one camera
+    height below, y = 1) or FAR_H heights away above the horizon, and
+    looked at from this lens: the phones' lenses sit ~7 cm apart, which
+    on rec7 put the paint up to a few pixels apart at 4K (parallax a
+    rotation can't absorb). Only the ratio of the offset to the height
+    matters, so the stitch doesn't need to know the height.
     """
 
-    def __init__(self, f, cx, cy, k1, k2, R, width=REF_W):
+    def __init__(self, f, cx, cy, k1, k2, R, width=REF_W, *, t=None):
         s = width / REF_W
         self.f, self.cx, self.cy = f * s, cx * s, cy * s
         self.k1, self.k2, self.R = k1, k2, R
+        self.t = np.zeros(3) if t is None else np.asarray(t, float)
+        self.far_h = FAR_H
         self.w, self.h = width, round(width * 9 / 16)
         self.ref = (f, cx, cy, k1, k2, R)
         # The radial model folds back beyond the image: directions far
         # outside would land inside it. Only trust radii up to the corners.
         corners = np.array([[0, 0], [self.w - 1, 0], [0, self.h - 1], [self.w - 1, self.h - 1]], float)
-        c = self.unproject(corners) @ self.R
-        self.r2_max = 1.05 * float(((c[:, 0] / c[:, 2]) ** 2 + (c[:, 1] / c[:, 2]) ** 2).max())
+        c = self._rays(corners)
+        self.r2_max = 1.05 * float((c[:, 0] ** 2 + c[:, 1] ** 2).max())
 
     @classmethod
     def from_stitcher(cls, cam):
@@ -122,10 +141,22 @@ class Camera:
         return cls(K[0, 0], K[0, 2], K[1, 2], 0.0, 0.0, cam.R.astype(np.float64))
 
     def at(self, width):
-        return Camera(*self.ref, width=width)
+        return Camera(*self.ref, width=width, t=self.t)
+
+    def to_json(self) -> list:
+        return [*self.ref[:5], self.R.tolist()]
+
+    def _from_lens(self, d: np.ndarray) -> np.ndarray:
+        """Directions from Main's lens -> directions from this one (see the class doc)."""
+        u = d / np.maximum(np.linalg.norm(d, axis=-1, keepdims=True), 1e-12)
+        dy = u[..., 1:2]
+        dist = np.where(dy > 1 / FAR_H, 1 / np.maximum(dy, 1e-12), FAR_H)
+        return u * dist - self.t
 
     def project(self, d: np.ndarray):
         """World directions (..., 3) -> pixel maps and validity."""
+        if self.t.any():
+            d = self._from_lens(np.asarray(d, float))
         c = d @ self.R  # R^T d, row-vector form
         z = c[..., 2]
         ok = z > 1e-6
@@ -139,8 +170,8 @@ class Camera:
         ok &= (px >= 0) & (px <= self.w - 1) & (py >= 0) & (py <= self.h - 1)
         return px.astype(np.float32), py.astype(np.float32), ok
 
-    def unproject(self, px: np.ndarray) -> np.ndarray:
-        """Pixels (N, 2) -> world directions (N, 3)."""
+    def _rays(self, px: np.ndarray) -> np.ndarray:
+        """Pixels (N, 2) -> rays in this camera's frame, (x, y, 1)."""
         xd = (px[:, 0] - self.cx) / self.f
         yd = (px[:, 1] - self.cy) / self.f
         x, y = xd, yd
@@ -148,7 +179,19 @@ class Camera:
             r2 = x * x + y * y
             g = 1 + self.k1 * r2 + self.k2 * r2 * r2
             x, y = xd / g, yd / g
-        return np.stack([x, y, np.ones_like(x)], -1) @ self.R.T
+        return np.stack([x, y, np.ones_like(x)], -1)
+
+    def unproject(self, px: np.ndarray) -> np.ndarray:
+        """Pixels (N, 2) -> world directions (N, 3), from Main's lens."""
+        d = self._rays(px) @ self.R.T
+        if not self.t.any():
+            return d
+        # The point the ray from this lens reaches, seen from Main's.
+        u = d / np.linalg.norm(d, axis=-1, keepdims=True)
+        dy = u[:, 1:2]
+        reach = (1 - self.t[1]) / np.maximum(dy, 1e-12)
+        dist = np.where((dy > 0) & (reach < FAR_H), reach, FAR_H)
+        return self.t + u * dist
 
     def edge_weight(self, x, y, ok):
         """Feather weight for the detection panorama: distance to the
@@ -206,6 +249,160 @@ def refine(cm: Camera, cs: Camera, matches, gate=40.0):
     v0 = np.array([fm, fs, 0, 0, 0, 0, 0, 0, 0], float)
     sol = least_squares(resid, v0, loss="soft_l1", f_scale=2.0, x_scale="jac")
     return cams(sol.x), int(keep.sum())
+
+
+# ------------------------------------------------- line fit (painted lines)
+#
+# SIFT matches in the overlap are mostly trees, floodlights and turf texture
+# (much of it false), so refine() can leave the painted lines a few pixels
+# apart at the seam, worst across the overlap where the phones' frame edges
+# are (rec7: 2-3 px median at 4K, up to ~10 on the centre circle). The fit
+# below aligns the lines themselves: centrelines of bright paint in each
+# phone's background (median over frames, so no players), each phone's
+# carried into the other through the model and scored by its distance to
+# the nearest paint there. It also fits the lenses' offset (Camera.t),
+# which rec7 put at 6.6-6.9 cm across, and gives Secondary its own rotation
+# in each sampled segment, because mounts shift: rec7's phones turned
+# ~0.4 deg against each other between segments 1 and 6, and a fit on
+# either stretch was 0.6 px on its own and ~5.8 px on the other.
+
+LINE_SEGMENTS = 6       # segments sampled across the game (the same ones refine's frames come from)
+LINE_BG_FRAMES = 9      # median over this many frames per segment: players move, paint doesn't
+LINE_TOPHAT_PX = 31     # at 4K: wider than any line's width, narrower than the gaps between them
+LINE_CONTRAST = 25      # paint is at least this much brighter than the turf around it (grey levels)
+LINE_MIN_LEN_PX = 150   # a centreline piece this long (4K) is paint, shorter ones are texture
+LINE_POINTS = 8000      # points per phone per segment
+LINE_GATE_PX = (25.0, 8.0)  # fit on points within this of paint at 4K, twice, tightening
+LINE_MIN_POINTS = 1500  # fewer in a segment's overlap: leave it out
+MOUNT_OK_PX = 1.5       # a segment whose lines agree to this median (4K) is on the chosen mount
+
+
+def phone_backgrounds(rec: Path, devs: dict, report: dict, flip: list[bool], seg: int,
+                      width: int = SRC_W) -> tuple[np.ndarray, np.ndarray] | None:
+    """Median frames of Main and Secondary over one segment (each in its
+    own image, upright), or None for a segment too short to sample."""
+    o = report["segments"][seg]["offsetS"]
+    ms, ss = devs["main"]["segments"][seg], devs["secondary"]["segments"][seg]
+    dur = min(ms["durationMs"], ss["durationMs"]) / 1000 - abs(o)
+    if dur < 60:
+        return None
+    t0 = max(0.0, -o) + 10
+    out = []
+    for key, off, fl in ((ms["objectKey"], 0.0, flip[0]), (ss["objectKey"], o, flip[1])):
+        st = [f for t in np.linspace(t0, t0 + dur - 20, LINE_BG_FRAMES)
+              if (f := phase0.frame_at(rec / key, t + off, width, fl)) is not None]
+        if len(st) < 3:
+            return None
+        out.append(np.median(np.stack(st), 0).astype(np.uint8))
+    return out[0], out[1]
+
+
+def paint_lines(bg: np.ndarray) -> np.ndarray:
+    """Centreline pixels of bright paint on the turf: (N, 2) x, y."""
+    s = bg.shape[1] / SRC_W
+    g = cv2.cvtColor(bg, cv2.COLOR_BGR2GRAY)
+    k = max(3, int(LINE_TOPHAT_PX * s) | 1)
+    m = (cv2.morphologyEx(g, cv2.MORPH_TOPHAT, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+         > LINE_CONTRAST).astype(np.uint8)
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    # Only on the turf: paint is surrounded by it (not floodlights, kits, sky).
+    hsv = cv2.cvtColor(bg, cv2.COLOR_BGR2HSV)
+    grass = ((hsv[..., 0] > 30) & (hsv[..., 0] < 95) & (hsv[..., 1] > 50)).astype(np.uint8)
+    kk = max(3, int(61 * s) | 1)
+    m &= cv2.morphologyEx(grass, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kk, kk)))
+    skel = np.zeros_like(m)
+    el, x = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3)), m.copy()
+    while x.any():  # morphological skeleton: the line's middle, whatever its width
+        e = cv2.erode(x, el)
+        skel |= x - cv2.dilate(e, el)
+        x = e
+    n, lab, st, _ = cv2.connectedComponentsWithStats(cv2.dilate(skel, np.ones((3, 3), np.uint8)), connectivity=8)
+    long_ = np.zeros(n, bool)
+    long_[1:] = np.maximum(st[1:, cv2.CC_STAT_WIDTH], st[1:, cv2.CC_STAT_HEIGHT]) >= LINE_MIN_LEN_PX * s
+    return np.argwhere((skel > 0) & long_[lab])[:, ::-1].astype(float)
+
+
+class LineData:
+    """One segment's paint in both phones, at SRC_W."""
+
+    def __init__(self, seg: int, main_bg: np.ndarray, sec_bg: np.ndarray):
+        self.seg = seg
+        rng = np.random.default_rng(seg)
+        pts, dts = [], []
+        for bg in (main_bg, sec_bg):
+            p = paint_lines(bg)
+            m = np.ones(bg.shape[:2], np.uint8)
+            m[p[:, 1].astype(int), p[:, 0].astype(int)] = 0
+            dts.append(np.minimum(cv2.distanceTransform(m, cv2.DIST_L2, 5), 40.0).astype(np.float32))
+            pts.append(p[rng.permutation(len(p))[:LINE_POINTS]])
+        self.pm, self.ps = pts
+        self.dtm, self.dts = dts
+
+
+def line_errors(cm: Camera, cs: Camera, d: LineData) -> tuple[np.ndarray, np.ndarray]:
+    """Distance (px at SRC_W) from each phone's paint, carried into the
+    other phone, to the paint there; NaN where it leaves the other frame."""
+    a, b = cm.at(SRC_W), cs.at(SRC_W)
+    out = []
+    for src, dst, pts, dt in ((a, b, d.pm, d.dts), (b, a, d.ps, d.dtm)):
+        x, y, ok = dst.project(src.unproject(pts))
+        e = cv2.remap(dt, x.reshape(-1, 1), y.reshape(-1, 1), cv2.INTER_LINEAR,
+                      borderMode=cv2.BORDER_CONSTANT, borderValue=40.0).ravel()
+        out.append(np.where(ok, e, np.nan))
+    return out[0], out[1]
+
+
+def line_median(cm: Camera, cs: Camera, d: LineData) -> tuple[float, int]:
+    e = np.concatenate(line_errors(cm, cs, d))
+    e = e[np.isfinite(e) & (e < LINE_GATE_PX[0])]
+    return (float(np.median(e)) if len(e) else np.inf), len(e)
+
+
+def refine_lines(cm: Camera, cs: Camera, data: list[LineData]) -> tuple[Camera, Camera, dict]:
+    """Both lenses (focal, k1, k2), the lens offset, and Secondary's
+    rotation per segment, fitted on the paint; then the one rotation that
+    agrees with the most segments. Main stays the world reference."""
+    fm, cxm, cym = cm.ref[:3]
+    fs, cxs, cys = cs.ref[:3]
+    R0, ns = cs.R, len(data)
+
+    def cams(v, i):
+        # v: fm, fs, k1m, k1s, k2m, k2s, offset (3, in % of the camera height), then a rotation per segment
+        t = 0.01 * v[6:9]
+        rs = cv2.Rodrigues(v[9 + 3 * i: 12 + 3 * i])[0] @ R0
+        return Camera(v[0], cxm, cym, v[2], v[4], cm.R), Camera(v[1], cxs, cys, v[3], v[5], rs, t=t)
+
+    v = np.r_[fm, fs, cm.k1, cs.k1, cm.k2, cs.k2, 0, 0, 0, np.zeros(3 * ns)]
+    for gate in LINE_GATE_PX:
+        keep = []
+        for i, d in enumerate(data):
+            em, es = line_errors(*cams(v, i), d)
+            keep.append((em < gate, es < gate))  # NaN compares False: off the other frame
+
+        def resid(x):
+            r = []
+            for i, (d, (km, ks)) in enumerate(zip(data, keep)):
+                sub = LineData.__new__(LineData)
+                sub.pm, sub.ps, sub.dtm, sub.dts = d.pm[km], d.ps[ks], d.dtm, d.dts
+                em, es = line_errors(*cams(x, i), sub)
+                r += [np.nan_to_num(em, nan=40.0), np.nan_to_num(es, nan=40.0)]
+            r.append(2 * 20 * x[2:6])  # keep distortion modest (refine's prior, at 4K)
+            return np.concatenate(r)
+
+        v = least_squares(resid, v, loss="soft_l1", f_scale=2.0, x_scale="jac", diff_step=1e-3).x
+
+    # One Secondary rotation for the whole game: the segment's whose lines
+    # agree with the most other segments (rec7's first segments are on a
+    # different mount from the rest).
+    table = [[line_median(*cams(np.r_[v[:9], np.tile(v[9 + 3 * i: 12 + 3 * i], ns)], j), d)[0]
+              for j, d in enumerate(data)] for i in range(ns)]
+    best = min(range(ns), key=lambda i: (-sum(e <= MOUNT_OK_PX for e in table[i]), sum(table[i])))
+    a, b = cams(v, best)
+    info = {"offsetHeights": [round(float(x), 5) for x in b.t],
+            "segments": [d.seg for d in data], "rotationFrom": data[best].seg,
+            "medianPx4k": [round(e, 2) for e in table[best]],
+            "mountMoved": [d.seg for d, e in zip(data, table[best]) if e > MOUNT_OK_PX]}
+    return a, b, info
 
 
 def direction(yaw, pitch):
@@ -452,11 +649,15 @@ class NV12Encoder:
 def setup_cameras(rec: Path, report: dict, devs: dict, flip: list[bool]) -> tuple[Camera, Camera]:
     """Main's and Secondary's cameras, for upright frames: the panorama
     stitcher on segment 0, refined at REF_W on matches from frames across
-    the game. Cached in phase0/cameras.json (delete it to recompute)."""
+    the game, then on the painted lines (refine_lines). Cached in
+    phase0/cameras.json (delete it to recompute; files from before the
+    line fit have no lens offset and load as before)."""
     cache = rec / "phase0" / "cameras.json"
     if cache.exists():
         j = json.loads(cache.read_text())
-        return tuple(Camera(*c[:5], np.array(c[5])) for c in (j["main"], j["secondary"]))
+        t = (j.get("lineFit") or {}).get("offsetHeights")
+        return (Camera(*j["main"][:5], np.array(j["main"][5])),
+                Camera(*j["secondary"][:5], np.array(j["secondary"][5]), t=t))
     s0 = report["segments"][0]
     m0 = devs["main"]["segments"][0]
     sec0 = devs["secondary"]["segments"][0]
@@ -474,7 +675,8 @@ def setup_cameras(rec: Path, report: dict, devs: dict, flip: list[bool]) -> tupl
     cm, cs = Camera.from_stitcher(cams[1]), Camera.from_stitcher(cams[0])
     nseg = len(report["segments"])
     fit_pairs = []
-    for sg in sorted({round(x) for x in np.linspace(0, nseg - 1, 6)}):
+    sampled = sorted({round(x) for x in np.linspace(0, nseg - 1, LINE_SEGMENTS)})
+    for sg in sampled:
         o = report["segments"][sg]["offsetS"]
         dur = min(devs["main"]["segments"][sg]["durationMs"], devs["secondary"]["segments"][sg]["durationMs"]) / 1000
         for t in (40.0, 140.0):
@@ -492,7 +694,29 @@ def setup_cameras(rec: Path, report: dict, devs: dict, flip: list[bool]) -> tupl
     near = before < 40
     print(f"refined on {n} matches: median error {2 * np.median(before[near]):.1f} ->"
           f" {2 * np.median(after[near]):.1f} px at 4K; k1 {cm.k1:.4f}/{cs.k1:.4f}")
-    cache.write_text(json.dumps({k: [*c.ref[:5], c.R.tolist()] for k, c in (("main", cm), ("secondary", cs))}))
+
+    data = []
+    for sg in sampled:
+        bgs = phone_backgrounds(rec, devs, report, flip, sg)
+        if bgs is None:
+            continue
+        d = LineData(sg, *bgs)
+        err, n = line_median(cm, cs, d)
+        print(f"segment {sg}: {n} paint points in the overlap, {err:.2f} px median at 4K after refine")
+        if n >= LINE_MIN_POINTS:
+            data.append(d)
+    out = {"main": cm.to_json(), "secondary": cs.to_json()}
+    if len(data) >= 2:
+        cm, cs, info = refine_lines(cm, cs, data)
+        out = {"main": cm.to_json(), "secondary": cs.to_json(), "lineFit": info}
+        print(f"line fit: lenses {100 * np.linalg.norm(cs.t):.2f}% of the camera height apart,"
+              f" focal {cm.f:.1f}/{cs.f:.1f} @ {REF_W}, Secondary's rotation from segment {info['rotationFrom']};"
+              f" paint {info['medianPx4k']} px median at 4K in segments {info['segments']}")
+        if info["mountMoved"]:
+            print(f"WARNING: the mount moved: segments {info['mountMoved']} don't line up with this calibration")
+    else:
+        print("line fit skipped: too little paint in the overlap")
+    cache.write_text(json.dumps(out))
     return cm, cs
 
 
