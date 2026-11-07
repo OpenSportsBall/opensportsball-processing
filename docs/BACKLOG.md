@@ -1034,6 +1034,77 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
       - Next: the tuned detector as a judge of motion candidates, and a
         tracker with ball physics (ground rolls, lofted balls projecting
         long).
+- [ ] Ball and roles stage speed, from a profile (2026-11-06). One
+      10-minute chunk (rec4 0 1800 600, `fullgame.py`'s arguments: ball
+      at 10 fps, roles `seg9` at 4 fps), run on a scratch copy of the
+      recording with GPU-synchronised timers wrapped around the spikes
+      (no source changes). An App Store install was using CPU during
+      the run; the stages are GPU-bound.
+      - ballwin.py, 42.4 min (Oct 22's run of the same chunk: 39.7 min at
+        5.9 crops per frame pair, now 8.7). RF-DETR 34.3 min (network
+        30.8): 52,106 crops in 12,746 calls. Full scans (42 crops per
+        frame pair, 984 of them) are ~41k of the crops; windows and zooms
+        ~11k, mostly one crop per call. NV12 -> RGB of the whole 4K frame
+        on the GPU 4.5 min (~23 ms per call); the frame copied to the CPU
+        for judge crops 2.6 min; the judge itself 0.2 min; waiting for
+        decode 0.02 min.
+      - roles.py, 23.8 min: RF-DETR (stock Medium, 8 crops of the
+        half-resolution frame per phone) 22.6 min; teams.features 0.6
+        min; CPU colour conversion and resize 0.1 min; decode wait
+        0.02 min.
+      - follow.py could not run (rec4 segment 0 is no longer on disk; the
+        exposure match reads it). rec7's chunks of 2026-11-05: ~25 min per
+        10 minutes, pass B render ~880 s (48 ms/frame), pass A warp+blend
+        ~320 s, seam ~150 s, background ~90 s, encode ~28 s.
+      - RF-DETR network per crop on MPS (random input, after warm-up):
+
+        | Model | batch 1 | batch 8 | batch 16 | batch 8 fp16 |
+        |---|---|---|---|---|
+        | Medium (576) | 46.0 ms | 32.5 | 30.7 | 28.1 |
+        | Small (512) | 38.3 | 24.9 | 23.5 | 21.6 |
+        | Nano (384) | 24.6 | 14.1 | 13.1 | 12.6 |
+
+      Ideas, each to be checked on the play boxes and ball labels:
+      - Fewer full scans: the lost-ball rescans (every 0.5 s) fire for
+        much of the clip, and scans are ~79% of the detector's crops. The
+        4 s / 1 s cadence already exists as env settings; a cheaper lost
+        scan (only the band where the ball can be, or the last-seen area
+        first) is the larger lever.
+        Benched 2026-11-07 on all 46 must-see moments (rec3, rec4, rec7),
+        fresh candidates per cadence (`OSB_FULL_EVERY_S` / `OSB_LOST_SCAN_S`):
+
+        | Full / lost scan | Captured (rec3/rec4/rec7) | Ball stage, 8 clips | Full scans | Labels seg3 / seg9 |
+        |---|---|---|---|---|
+        | 2 s / 0.5 s (today) | 33/46 (21/8/4) | 235 min | 4,386 | 81% / 62% |
+        | 4 s / 1 s | 32/46 (19/9/4) | 178 min (-24%) | 2,365 | 75% / 62% |
+        | 2 s / 1 s | 32/46 (19/9/4) | 195 min (-17%) | 2,834 | 77% / 59% |
+        | 2 s / 2 s | 32/46 (19/9/4) | 166 min (-29%) | 1,920 | 72% / 57% |
+
+        The same moments change in all three: rec3 14:05 lost (100 -> 0),
+        rec3 7:51 lost (100 -> 95), rec4 18:27 gained (0 -> 100). At 14:05
+        the ball is kicked ~45 degrees across at 14:03; the 0.5 s rescan at
+        14:04.5 finds it, the 1 s rescans each find a parked ball by the
+        sideline (yaw 84, judge 1.0) and the windows lock onto that until
+        14:09. Next: 4 s full scans with the lost scan kept at 0.5 s, to
+        see how much of the speedup survives without that loss; and keep a
+        static, off-play ball from winning the lost scan.
+      - roles.py on RF-DETR Small or Nano in fp16 (~1.5-2.6x faster
+        detector), or at 2 fps.
+      - ballwin.py: convert only the windows and tiles from NV12, not the
+        whole frame; cut judge crops on the GPU instead of copying the
+        4K frame to the CPU (~7 of the 42 min together).
+      - All of one frame pair's crops in one `predict` call (both phones,
+        window and zoom); a small gain, as the scans are already batched.
+      - fp16 for the ball detector (~10-14%); a smaller ball detector is
+        riskier, as Nano's 384 px input shrinks far balls further.
+      - Peak memory (2026-11-07, rec7 2-minute clip, `footprint` sampled
+        every 2 s, GPU included): ball 5.2 GB (Python 4.3, GPU 3.1; each
+        ffmpeg decoder ~0.6), roles 3.4 GB (GPU 1.2), render 3.3 GB (GPU
+        1.0); ball stage and render overlapped 8.4 GB, with the render 2x
+        slower (89 -> 171 s) and the ball stage 9% slower. Levers if a
+        smaller cloud GPU needs them: smaller detector batches, fp16, the
+        NV12 crop above, running the stages one after another. The render
+        keeps per-frame data, so check its peak on a full 10-minute chunk.
 - [ ] Follow cam speed, further ideas (a full game is ~2.5 h locally
       today, half in each pass):
       - Pass A (detection, seam) at 10 fps, reusing results for the frames
