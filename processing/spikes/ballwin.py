@@ -86,6 +86,8 @@ FAR_ZOOM = os.environ.get("OSB_FAR_ZOOM", "")  # "lost": scans while the ball is
 SCAN_PLAN = os.environ.get("OSB_SCAN_PLAN", "geom")  # "geom": full scans planned from the pitch map; "grid": all tiles
 SCAN_HALF_PX = float(os.environ.get("OSB_SCAN_HALF_PX", 20.0))  # a ball at least this wide is scanned at half size
 SCAN_SAMPLE = 40        # the plan samples the frame this many px apart
+CROP_RGB = os.environ.get("OSB_CROP_RGB", "1") != "0"  # NV12 -> RGB only where crops read, not the whole frame
+JUDGE_CHECK = bool(os.environ.get("OSB_JUDGE_CHECK"))  # also cut the judge crops from the whole frame and count mismatches
 FAR_STEP = 280          # far-band crops (ZOOM_CROP) start this far apart (40 px overlap)
 WASB = bool(os.environ.get("OSB_WIN_WASB"))
 WASB_STEER = bool(os.environ.get("OSB_WASB_STEER"))  # WASB's candidates also update the online track (moves RF-DETR's windows)
@@ -235,13 +237,37 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
         x, y, ok = cams[phone].project(follow.direction(yaw, pit)[None])
         return (float(x[0]), float(y[0])) if ok[0] and 0 <= x[0] < W and 0 <= y[0] < H else None
 
+    class Frame:
+        """One phone's frame on the GPU as RGB, converted from NV12 whole, or
+        (CROP_RGB) only where a crop reads it."""
+        def __init__(self, planes, flipped: bool, whole: bool):
+            self.planes, self.fl, self.img = planes, flipped, None
+            if whole:
+                self.whole()
+
+        def whole(self) -> torch.Tensor:
+            if self.img is None:
+                im = detect.nv12_to_rgb(*self.planes)
+                self.img = im.flip(1, 2) if self.fl else im
+            return self.img
+
+        def region(self, x: int, y: int, w: int, h: int) -> torch.Tensor:
+            w, h = min(w, W - x), min(h, H - y)
+            if self.img is not None:
+                return self.img[:, y:y + h, x:x + w]
+            if self.fl:  # the frame is turned 180 degrees: read the mirrored region and turn it
+                return detect.nv12_crop_to_rgb(*self.planes, W - x - w, H - y - h, w, h).flip(1, 2)
+            return detect.nv12_crop_to_rgb(*self.planes, x, y, w, h)
+
+    judge_same: list = []
+
     def run(img, boxes_xy, scale=1.0):
-        """Detector on crops of `img` (CHW float) at the given top-left
+        """Detector on crops of `img` (a Frame) at the given top-left
         corners; returns rows [x1, y1, x2, y2, conf] in frame pixels."""
         crops = []
         for x, y in boxes_xy:
             side = int(WIN / scale)
-            c = img[:, y:y + side, x:x + side]
+            c = img.region(x, y, side, side)
             if scale != 1.0:
                 c = F.interpolate(c[None], size=(WIN, WIN), mode="bilinear", align_corners=False)[0]
             crops.append(c)
@@ -356,7 +382,7 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
                 im = detect.nv12_to_rgb(*gpu.upload_nv12(b, W, H, dev))
                 return im.flip(1, 2) if fl else im
 
-            img = rgb(buf)
+            img = Frame(gpu.upload_nv12(buf, W, H, dev), fl, whole=not CROP_RGB or bool(wasb))
             rows = []
             if full:
                 for tl, sc in plans[phone]:
@@ -375,7 +401,7 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
                 else:
                     corners = [wasb.window_corner(H, W, px, 2 if diam_at(roles[phone], *px) < ZOOM_BELOW_PX else 4)]
                     wsrc = "wasbwin"
-                peaks = [(c, wsrc) for c in wasb(torch.stack([rgb(bufs[0]), img, rgb(bufs[2])]), corners,
+                peaks = [(c, wsrc) for c in wasb(torch.stack([rgb(bufs[0]), img.whole(), rgb(bufs[2])]), corners,
                                                   background(phone, t))]
                 t_wasb += time.time() - tw0
             if px is not None:
@@ -404,10 +430,13 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
                 kept = np.vstack([kept, extra])
             if not len(kept):
                 continue
-            bgr = (img.permute(1, 2, 0).cpu().numpy()[..., ::-1] * 255).astype(np.uint8)
-            crops = np.stack([balljudge.crop_at(bgr, (x1 + x2) / 2, (y1 + y2) / 2,
-                                                diam_at(roles[phone], (x1 + x2) / 2, (y1 + y2) / 2))
-                              for x1, y1, x2, y2, _ in kept])
+            pts = [((x1 + x2) / 2, (y1 + y2) / 2, diam_at(roles[phone], (x1 + x2) / 2, (y1 + y2) / 2))
+                   for x1, y1, x2, y2, _ in kept]
+            crops = balljudge.crops_from(img.region, W, H, pts)
+            if JUDGE_CHECK:
+                bgr = (img.whole().permute(1, 2, 0).cpu().numpy()[..., ::-1] * 255).astype(np.uint8)
+                ref = np.stack([balljudge.crop_at(bgr, *p) for p in pts])
+                judge_same.extend(int(np.array_equal(a, b)) for a, b in zip(crops, ref))
             scores = judge(crops)
             for (x1, y1, x2, y2, sc), js in zip(kept, scores):
                 yaw, pit = detect.to_angles(cams[phone], np.array([[(x1 + x2) / 2, (y1 + y2) / 2]]))[0]
@@ -469,6 +498,9 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
           f" vs {2 * len(detect.tiles(H, W))} for full scans; {n_full} full scans"
           + (f"; WASB {wasb.tiles / n:.1f} tiles per frame pair, {t_wasb / 60:.1f} min" if wasb else "")
           + f" -> {path.name}", flush=True)
+    if judge_same:
+        print(f"judge check: {sum(judge_same)} of {len(judge_same)} crops identical to cutting them from the whole frame",
+              flush=True)
     os._exit(0)  # the output is written; interpreter teardown (MPS, decoder threads) has hung for hours
 
 

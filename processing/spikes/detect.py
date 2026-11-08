@@ -56,6 +56,22 @@ def nv12_to_rgb(y: torch.Tensor, uv: torch.Tensor) -> torch.Tensor:
     return bgr.flip(-1).permute(2, 0, 1).float() / 255
 
 
+def nv12_crop_to_rgb(y: torch.Tensor, uv: torch.Tensor, x: int, y0: int, w: int, h: int) -> torch.Tensor:
+    """nv12_to_rgb(y, uv)[:, y0:y0 + h, x:x + w] without converting the rest
+    of the frame: the chroma is upsampled from a region one chroma pixel
+    wider on each side (edge-clamped like the whole-frame upsample)."""
+    fh, fw = y.shape[-2:]
+    ux0, uy0 = x // 2 - 1, y0 // 2 - 1
+    ux1, uy1 = (x + w + 1) // 2 + 1, (y0 + h + 1) // 2 + 1
+    ix = torch.arange(ux0, ux1, device=uv.device).clamp(0, fw // 2 - 1)
+    iy = torch.arange(uy0, uy1, device=uv.device).clamp(0, fh // 2 - 1)
+    sub = uv.float()[:, :, iy][:, :, :, ix]
+    up = F.interpolate(sub, scale_factor=2, mode="bilinear", align_corners=False)[0]
+    ox, oy = x - 2 * ux0, y0 - 2 * uy0
+    bgr = gpu.nv_to_bgr(y[0, 0, y0:y0 + h, x:x + w].float(), up[:, oy:oy + h, ox:ox + w])
+    return bgr.flip(-1).permute(2, 0, 1).float() / 255
+
+
 def tiles(h: int, w: int):
     ys = list(range(BAND_TOP, h - TILE, 530)) + [h - TILE]
     xs = list(range(0, w - TILE, STRIDE)) + [w - TILE]
