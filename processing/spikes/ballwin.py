@@ -26,6 +26,15 @@ and otherwise on one window around the prediction (2x when the ball is
 expected small, else 4x). Heatmap peaks become candidates with the peak
 as their confidence, unless an RF-DETR box already holds the same ball.
 
+Each phone's full scan is planned from the pitch map at the start (and
+printed): the fewest 640 px tiles that cover every on-pitch pixel where the
+ball would be under SCAN_HALF_PX, then the fewest 1280 px crops shrunk to
+640 that cover the rest of the pitch (the near side, where the ball is
+large). Tiles that see no pitch are dropped. On the must-see bench this
+cut the ball stage 22% and captured 34/46 moments against 33 for the plain
+grid (docs/BACKLOG.md, 2026-11-07). OSB_SCAN_PLAN=grid tiles the whole band
+below BAND_TOP at full resolution instead.
+
 OSB_FAR_ZOOM=lost (or full) adds a 2x pass over the far band (the crops
 where the ball would be under ZOOM_BELOW_PX) to the scans while the ball is
 lost (or to every full scan). One more labelled ball in 90 for ~30% more
@@ -74,6 +83,9 @@ WIN = 640
 ZOOM_CROP = 320
 FAR_ZOOM = os.environ.get("OSB_FAR_ZOOM", "")  # "lost": scans while the ball is lost add 2x tiles of the far band
                                               # (where the ball would be under ZOOM_BELOW_PX); "full": every scan
+SCAN_PLAN = os.environ.get("OSB_SCAN_PLAN", "geom")  # "geom": full scans planned from the pitch map; "grid": all tiles
+SCAN_HALF_PX = float(os.environ.get("OSB_SCAN_HALF_PX", 20.0))  # a ball at least this wide is scanned at half size
+SCAN_SAMPLE = 40        # the plan samples the frame this many px apart
 FAR_STEP = 280          # far-band crops (ZOOM_CROP) start this far apart (40 px overlap)
 WASB = bool(os.environ.get("OSB_WIN_WASB"))
 WASB_STEER = bool(os.environ.get("OSB_WASB_STEER"))  # WASB's candidates also update the online track (moves RF-DETR's windows)
@@ -262,6 +274,63 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
                     break
         return out
     far = [far_band(ph) for ph in (0, 1)] if FAR_ZOOM else [[], []]
+
+    def scan_plan(phone):
+        """[(corners, scale)] for this phone's full scan. geom: full-size
+        tiles covering the on-pitch pixels where the ball would be under
+        SCAN_HALF_PX, half-size crops (1280 px shrunk to WIN) covering the
+        rest of the pitch. grid: every detect.tiles tile at full size."""
+        full_tiles = detect.tiles(H, W)
+        if SCAN_PLAN == "grid":
+            return [(full_tiles, 1.0)]
+        small, large = [], []   # on-pitch sample pixels by expected ball size
+        for sy in range(detect.BAND_TOP + SCAN_SAMPLE // 2, H, SCAN_SAMPLE):
+            for sx in range(SCAN_SAMPLE // 2, W, SCAN_SAMPLE):
+                yaw, pit = detect.to_angles(cams[phone], np.array([[sx, sy]], float))[0]
+                gx, gz = pose.to_pitch(yaw, pit)
+                if np.isnan(gx) or abs(gx) > hl or abs(gz) > hw:
+                    continue
+                (small if diam_at(roles[phone], sx, sy) < SCAN_HALF_PX else large).append((sx, sy))
+        small, large = np.array(small).reshape(-1, 2), np.array(large).reshape(-1, 2)
+        if not len(small) and not len(large):
+            print(f"scan plan {roles[phone]}: no pitch in view, scanning the whole grid", flush=True)
+            return [(full_tiles, 1.0)]
+        n_small, n_large = len(small), len(large)
+
+        def inside(pts, x, y, side):
+            return (pts[:, 0] >= x) & (pts[:, 0] < x + side) & (pts[:, 1] >= y) & (pts[:, 1] < y + side)
+
+        def cover(pts, corners, side):
+            """Greedy: the fewest of `corners` (squares of `side`) holding every point."""
+            left, out = np.ones(len(pts), bool), []
+            while left.any():
+                gain = [int((inside(pts, x, y, side) & left).sum()) for x, y in corners]
+                k = int(np.argmax(gain))
+                if gain[k] == 0:
+                    break
+                out.append(corners[k])
+                left &= ~inside(pts, *corners[k], side)
+            return out
+        # a ball within ~half its size of a crop edge is cut; the tiles overlap 64 px (128 half size)
+        keep = sorted(cover(small, full_tiles, WIN), key=lambda c: (c[1], c[0]))
+        if len(large) and keep:
+            covered = np.zeros(len(large), bool)
+            for x, y in keep:
+                covered |= inside(large, x + 32, y + 32, WIN - 64)
+            large = large[~covered]
+        half = []
+        if len(large):
+            side, step = 2 * WIN, 2 * WIN - 128
+            ys = sorted(set(range(detect.BAND_TOP, H - side, step // 4)) | {H - side})
+            xs = sorted(set(range(0, W - side, step // 4)) | {W - side})
+            half = sorted(cover(large, [(x, y) for y in ys for x in xs], side), key=lambda c: (c[1], c[0]))
+        if len(keep) + len(half) >= len(full_tiles):
+            keep, half = full_tiles, []
+        plan = [(keep, 1.0), (half, 0.5)]
+        print(f"scan plan {roles[phone]}: {len(keep)} full-size tiles of {len(full_tiles)}, {len(half)} half-size"
+              f" (ball >= {SCAN_HALF_PX:.0f} px); pitch samples {n_small} small-ball, {n_large} large-ball", flush=True)
+        return plan
+    plans = [scan_plan(ph) for ph in (0, 1)]
     if FAR_ZOOM:
         print(f"far band: {len(far[0])} + {len(far[1])} crops at 2x ({FAR_ZOOM} scans)", flush=True)
 
@@ -290,9 +359,10 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
             img = rgb(buf)
             rows = []
             if full:
-                tl = detect.tiles(H, W)
-                rows += [(r, "scan") for r in run(img, tl)]
-                tiles_total += len(tl)
+                for tl, sc in plans[phone]:
+                    if tl:
+                        rows += [(r, "scan") for r in run(img, tl, scale=sc)]
+                        tiles_total += len(tl)
                 if FAR_ZOOM == "full" or (FAR_ZOOM == "lost" and (ball_xz is None or lost >= LOST_S)):
                     rows += [(r, "far") for r in run(img, far[phone], scale=2.0)]
                     tiles_total += len(far[phone])

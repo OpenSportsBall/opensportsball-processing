@@ -1088,6 +1088,28 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         14:09. Next: 4 s full scans with the lost scan kept at 0.5 s, to
         see how much of the speedup survives without that loss; and keep a
         static, off-play ball from winning the lost scan.
+      - [x] Smaller full scans, planned from the pitch map (2026-11-07,
+        now `ballwin.py`'s default). 93% / 77% / 61% of rec3 / rec4 / rec7's
+        accepted balls sit in the top tile row (y 760-1100, 6-11 px wide);
+        below y 1400 they are 24-73 px wide but cost 14 of the 21 tiles.
+        The plan: the fewest 640 px tiles covering every on-pitch pixel
+        where the expected ball is under 20 px (`OSB_SCAN_HALF_PX`), the
+        fewest 1280 px crops shrunk to 640 covering the rest of the pitch,
+        nothing off the pitch. rec7's phones see the ball small further
+        down the frame, so it keeps more full-size tiles.
+
+        | Scan | Cadence | Crops per scan (rec3/rec4/rec7, both phones) | Captured | Ball stage, 8 clips | Labels seg3 / seg9 |
+        |---|---|---|---|---|---|
+        | grid | 2 s / 0.5 s | 42 / 42 / 42 | 33/46 | 235 min | 81% / 62% |
+        | pitch map | 2 s / 0.5 s | 22 / 19 / 33 | 34/46 | 183 min (-22%) | 83% / 65% |
+        | pitch map | 4 s / 0.5 s | 22 / 19 / 33 | 33/46 | 176 min (-25%) | 81% / 65% |
+
+        Per recording at 2 s / 0.5 s: rec3 -21%, rec4 -30%, rec7 -10%. No
+        moment got worse; rec3 seg3 5:30 rose 0 -> 100 and rec7's second
+        moment 33 -> 80. With 4 s full scans rec3 7:51 fell 100 -> 90 for 3
+        more points of speed, so the cadence stays at 2 s / 0.5 s. Most
+        scans are now lost-ball rescans; a cheaper rescan (near the last
+        sighting first) is the next lever.
       - roles.py on RF-DETR Small or Nano in fp16 (~1.5-2.6x faster
         detector), or at 2 fps.
       - ballwin.py: convert only the windows and tiles from NV12, not the
