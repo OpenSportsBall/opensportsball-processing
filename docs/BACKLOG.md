@@ -1110,6 +1110,28 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         more points of speed, so the cadence stays at 2 s / 0.5 s. Most
         scans are now lost-ball rescans; a cheaper rescan (near the last
         sighting first) is the next lever.
+      - [x] ~~Local lost-ball rescans~~ (2026-11-07, tried, not adopted;
+        prototype on branch `ballwin-local-rescan`, `OSB_LOST_LOCAL=1`).
+        With the pitch-map scan, the ball is seen in 36% of frames, missing
+        under 1 s in 26% and lost (>= 1 s) in 38%; 77% of full scans are
+        lost-ball rescans (rec4 20:00-30:00: 93%). The prototype limited
+        those rescans to the crops seeing pitch within R0 + V x seconds
+        lost of the last sighting, with a whole scan still every 2 s.
+
+        | Rescan | Clips | Local scans | Ball stage | Captured | Labels seg3 / seg9 |
+        |---|---|---|---|---|---|
+        | whole (default) | 8 | - | 10,959 s | 34/46 | 83% / 65% |
+        | local, 10 m + 10 m/s | 8 | 2,557 of 4,360 | 11,020 s (+0.6%) | 34/46 | 83% / 65% |
+        | local, 5 m + 5 m/s | first 4 of 8 (stopped) | 634 of 1,314 | 3,792 s vs 3,878 (-2%) | - | - |
+
+        Every moment's coverage matched the default. Tiles per frame pair
+        fell 5-9%, but time did not follow: after the pitch-map plan, scans
+        are only ~half the detector's crops (~1.9 of ~3.9 per frame pair;
+        the rest are the tracking windows), and per-frame work (decode, the
+        whole-frame NV12 -> RGB, the 4K copy to the CPU for the judge, the
+        windows) now dominates at ~0.28 s per frame pair. Further cuts to
+        the scans have little left to give; the NV12 crop and GPU judge
+        crops above are the next speed levers.
       - roles.py on RF-DETR Small or Nano in fp16 (~1.5-2.6x faster
         detector), or at 2 fps.
       - ballwin.py: convert only the windows and tiles from NV12, not the
