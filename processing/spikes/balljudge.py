@@ -73,6 +73,26 @@ def crop_at(img: np.ndarray, x: float, y: float, diam: float) -> np.ndarray:
     return cv2.resize(c, (SIZE, SIZE), interpolation=cv2.INTER_AREA)
 
 
+def crops_from(region, w: int, h: int, pts) -> np.ndarray:
+    """crop_at for each (x, y, diam) in pts, reading only the pixels each crop
+    needs. region(x, y, w, h) returns the frame's RGB there (3 x h x w in
+    [0, 1], on the GPU); the frame is w x h. Same pixels as crop_at on the
+    whole frame converted to BGR uint8, so the same crops."""
+    out = []
+    for x, y, diam in pts:
+        side = int(max(CROP_MIN, CROP * diam))
+        x0, y0 = int(round(x - side / 2)), int(round(y - side / 2))
+        ix, iy = np.arange(x0, x0 + side), np.arange(y0, y0 + side)
+        ix = np.where(ix < 0, -ix - 1, ix); ix = np.where(ix >= w, 2 * w - ix - 1, ix)  # BORDER_REFLECT
+        iy = np.where(iy < 0, -iy - 1, iy); iy = np.where(iy >= h, 2 * h - iy - 1, iy)
+        rx0, ry0 = int(ix.min()), int(iy.min())
+        reg = region(rx0, ry0, int(ix.max()) + 1 - rx0, int(iy.max()) + 1 - ry0)
+        bgr = (reg.permute(1, 2, 0).cpu().numpy()[..., ::-1] * 255).astype(np.uint8)
+        c = bgr[np.ix_(iy - ry0, ix - rx0)]
+        out.append(cv2.resize(c, (SIZE, SIZE), interpolation=cv2.INTER_AREA))
+    return np.stack(out)
+
+
 def frames_with_split(rec: Path):
     lab_dir = rec / "labels"
     if not (lab_dir / "labels.json").exists():  # a recording with clip sets only

@@ -1134,9 +1134,33 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         crops above are the next speed levers.
       - roles.py on RF-DETR Small or Nano in fp16 (~1.5-2.6x faster
         detector), or at 2 fps.
-      - ballwin.py: convert only the windows and tiles from NV12, not the
-        whole frame; cut judge crops on the GPU instead of copying the
-        4K frame to the CPU (~7 of the 42 min together).
+      - Done (2026-11-08): ballwin.py converts only the windows, tiles
+        and judge crops from NV12 (`detect.nv12_crop_to_rgb`, each region
+        with a 1-pixel chroma margin so it matches the whole-frame
+        conversion bit for bit), and the judge's crops are copied to the
+        CPU as small patches (`balljudge.crops_from`) instead of the 4K
+        frame. Default; `OSB_CROP_RGB=0` for the old path. The ball
+        output is unchanged: 1,078 of 1,078 judge crops identical to
+        cutting them from the whole frame, and the candidates of rec3m
+        3:45 and 1:00 (2 min each) identical to the pitch-map default's,
+        so the must-see bench is unchanged (34/46) by construction. Time:
+        those two clips 524 s against 687 (-24%); the 2-minute rec3m
+        10:00 profile 3.9 min against 6.2 (-37%): NV12 -> RGB of the
+        crops 0.18 min, judge crops 0.03, and the detector's network now
+        77% of the stage.
+        Tried first: the judge's crops cut and resized on the GPU (INTER_AREA
+        as weight matrices, as MPS has no area pooling at uneven sizes).
+        Judge scores within 0.021 of the CPU's (3 of 1,711 crops crossed
+        0.3), the ball stage -20% over the 8 bench clips (8,730 s against
+        10,959) but 32/46 captured against 34. The accepted ball differed in
+        only 54 of 20,400 frames, yet the camera follower carries state
+        forward: a 5 s difference at rec3m 10:03 changed the camera path
+        from 12:00 on (up to 60 degrees; the follower itself is
+        deterministic) and lost 14:05 (100 -> 0), with 7:51 100 -> 95 and
+        10:02 10 -> 38. Not adopted; the exact patches are faster anyway
+        (4.3 min on the profile clip against 3.9). The bench's single
+        moments are fragile to tiny ball changes, so compare variants on
+        captures over all 46, not moment by moment.
       - All of one frame pair's crops in one `predict` call (both phones,
         window and zoom); a small gain, as the scans are already batched.
       - fp16 for the ball detector (~10-14%); a smaller ball detector is
