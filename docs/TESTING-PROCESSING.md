@@ -7,7 +7,7 @@ history of what was tried and the main repo's `docs/TESTING-APPS.md` for the pho
 
 ## Principles
 
-- **Footage is private.** It shows people, some possibly minors. Every label
+- **Footage is private.** It shows identifiable adult players. Every label
   set, fixture and rendered clip lives under `footage/` (gitignored) and never
   enters the repository. Back them up privately; the tooling and the numbers
   are what the repo keeps.
@@ -399,8 +399,9 @@ store as they do into any recording; don't push scratch variants to S3.
 | Step | Command |
 |---|---|
 | Check the video every set needs is there and matches the manifest | `uv run processing/spikes/benchstore.py [footage/bench/<rec>] [--quick]` |
+| Get it as a contributor (gated; see DATA.md, "Sharing with contributors") | `uv run processing/spikes/sharedata.py fetch` |
 | Restore it on a new machine | `aws s3 sync --profile sbv s3://<footage bucket>/bench/ footage/bench/` |
-| Save changes to it | `aws s3 sync --profile sbv footage/bench/ s3://<footage bucket>/bench/` |
+| Save changes to it | `aws s3 sync --profile sbv footage/bench/ s3://<footage bucket>/bench/`, then `sharedata.py upload` |
 
 Adding a set: make it on the full recording (section 2 or 3), copy its
 directory and the files it needs (candidates, pass A cache, roles) into

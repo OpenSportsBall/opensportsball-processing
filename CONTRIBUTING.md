@@ -29,6 +29,14 @@ Thanks for helping. Before you open a pull request:
 
 ## Footage and privacy
 
-Game footage shows minors. Never commit video, frames, or labeled datasets
-to this repository; `.gitignore` blocks common video formats. Share test
-footage privately and only with the consent of the families involved.
+Our test footage shows adult players, who can still be identified. Never
+commit video, frames, or labeled datasets to this repository; `.gitignore`
+blocks common video formats. Share test footage privately, never publicly.
+
+To run the benchmarks you need the benchmark data: request access to the
+gated [`OpenSportsBall/bench`](https://huggingface.co/datasets/OpenSportsBall/bench)
+dataset on Hugging Face, and once a maintainer approves it, run
+`hf auth login` and `uv run processing/spikes/sharedata.py fetch`. Its terms
+(no redistribution, no publishing recognisable frames, no attempts to
+identify anyone) are on the dataset's page; see
+[docs/DATA.md](docs/DATA.md#sharing-with-contributors).

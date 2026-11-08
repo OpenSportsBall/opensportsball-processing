@@ -1,6 +1,6 @@
 # Data: where recordings, labels and models live
 
-Footage shows people, some possibly minors: nothing here goes in git
+Footage shows identifiable adult players: nothing here goes in git
 (`footage/` is ignored) or anywhere public. Everything is on the working
 Mac under `footage/` and backed up to the footage bucket in S3
 (`FootageBucket` in the main repo's `infra/cdk-outputs.json`).
@@ -76,8 +76,31 @@ needed, with the manifest's object keys:
 
     aws s3 cp --profile sbv --recursive s3://<footage bucket>/accounts/<account>/games/<game>/recordings/<recording>/ footage/<rec>/
 
+## Sharing with contributors
+
+Contributors get the benchmark data from a gated Hugging Face dataset,
+[`OpenSportsBall/bench`](https://huggingface.co/datasets/OpenSportsBall/bench):
+its card is public, but each person's access request needs a maintainer's
+approval, and they accept the terms in the card ([DATASET_CARD.md](DATASET_CARD.md))
+when they ask. It mirrors `footage/` path for path and holds `bench/`,
+`models/`, and the pitch maps and ball label sets of the recordings outside
+the bench (`sharedata.py`'s `ANNOTATED`), about 37 GB. Full recordings stay in
+S3 only.
+
+    uv run processing/spikes/sharedata.py fetch [--annotations-only]   # contributors, after approval and `hf auth login`
+    uv run processing/spikes/sharedata.py list                         # what upload would send
+    uv run processing/spikes/sharedata.py upload                       # maintainers: after changing any of it
+
+Approve or reject requests on the dataset's **Settings → Gated user access**
+page (Hugging Face emails the maintainers about new ones). Approve people you
+know are working on the project; removing someone there stops further
+downloads but can't recall a copy they already have. To share a new label set
+or pitch map, add it to `ANNOTATED` (or to the bench store) and run `upload`.
+
 ## A new recording
 
 1. Download it: `aws s3 cp` as above, into `footage/rec<N>/`.
 2. `phase0.py`, then whatever it is for (labels, pitch, a full game).
 3. Add it to the table above and run `footagestore.py backup`.
+4. Once it has labels or a pitch map worth sharing, add it to
+   `sharedata.py`'s `ANNOTATED` and run `sharedata.py upload`.
