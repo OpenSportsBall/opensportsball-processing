@@ -1216,8 +1216,20 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         25-35% faster overall. Candidate files hold the same values,
         apart from 36 of ~104k that differ in the last rounded digit
         (up to 0.01); play boxes 33/46 and seg3 / seg9 labels 44/53 and
-        24/37 for both. Not yet tried: roles, a full game, the render
-        running alongside.
+        24/37 for both.
+        Roles too (2026-11-08): the wrapper moved to
+        `detect.CoreMLDetector` and also takes uint8 RGB tiles;
+        `OSB_PEOPLE_COREML=<folder of the stock model's fp32 exports>`
+        (footage/onnxbench/people_fp32) in roles.py. On the 451 tiles in
+        calls of 8 at roles' 0.4: all 2,253 detections (1,771 people)
+        match, same classes, confidence within 0.001; 28.8 vs 40.4 ms a
+        tile (always full batches of 8, where PyTorch is at its best).
+        On the must-see clips: rec3 seg 3 730 -> 500 s, seg 9 679 -> 481
+        s, rec4 10:00-20:00 at 4 fps 1346 -> 949 s (detector 21.6 -> 15.0
+        min), 29-32% faster; the same people (113,837 both ways) and the
+        same role tallies apart from one person in seg 9 (B -> other);
+        play boxes 33/46 for both. Not yet tried: a full game, the
+        render running alongside.
         The ONNX Runtime CPU figure (~5.8x slower than the GPU) is a first
         hint for a machine without a usable GPU.
       - Peak memory (2026-11-07, rec7 2-minute clip, `footprint` sampled
