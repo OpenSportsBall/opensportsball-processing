@@ -28,7 +28,22 @@ with it, only data:
 | `processing/` | GPU pipeline: sync, stitch, track, render; Phase 0 spikes, including the labelling tools and model training (`processing/spikes/`) |
 | `schemas/` | Pinned copy of the main repo's manifest schema |
 | `docs/` | Findings, data layout, how processing is tested, backlog |
-| `footage/`, `datasets/` | Local only, never committed; see [docs/DATA.md](docs/DATA.md) |
+| `footage/`, `datasets/` | Local only, never committed; benchmark data comes from Hugging Face (below); see [docs/DATA.md](docs/DATA.md) |
+
+## Benchmark data
+
+The video, labels, pitch maps and models the benchmarks run on are in the
+gated Hugging Face dataset
+[OpenSportsBall/bench](https://huggingface.co/datasets/OpenSportsBall/bench).
+The footage shows identifiable people, so request access there and a
+maintainer will approve it. Then:
+
+    hf auth login
+    uv run processing/spikes/sharedata.py fetch
+
+See [docs/DATA.md](docs/DATA.md#sharing-with-contributors) for what's in it
+and [docs/TESTING-PROCESSING.md](docs/TESTING-PROCESSING.md) for the
+benchmarks.
 
 ## License
 

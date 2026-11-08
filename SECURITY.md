@@ -6,7 +6,7 @@ through GitHub:
 (the repository's **Security** tab → **Report a vulnerability**). Only the
 maintainers see it.
 
-This repository processes game footage of children, so issues that could
+This repository processes game footage of identifiable people, so issues that could
 expose footage, or let a crafted recording or manifest run code or read
 other files, are especially important. Include what you found, how to
 reproduce it, and what an attacker could do with it. We'll acknowledge

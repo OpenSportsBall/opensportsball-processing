@@ -1,4 +1,4 @@
-# Footage and datasets: never commit (footage shows minors)
+# Footage and datasets: never commit (footage shows identifiable people)
 *.mp4
 *.mov
 *.m4v
