@@ -35,6 +35,12 @@ cut the ball stage 22% and captured 34/46 moments against 33 for the plain
 grid (docs/BACKLOG.md, 2026-11-07). OSB_SCAN_PLAN=grid tiles the whole band
 below BAND_TOP at full resolution instead.
 
+OSB_LOST_LOCAL=1 makes the rescans while the ball is lost (every
+LOST_SCAN_S) local: only the scan crops that see pitch within
+LOCAL_R0_M + LOCAL_V_MS x the time lost of the last sighting. The full
+scan every FULL_EVERY_S stays whole, so a ball kicked far is still found
+within that.
+
 OSB_FAR_ZOOM=lost (or full) adds a 2x pass over the far band (the crops
 where the ball would be under ZOOM_BELOW_PX) to the scans while the ball is
 lost (or to every full scan). One more labelled ball in 90 for ~30% more
@@ -86,6 +92,9 @@ FAR_ZOOM = os.environ.get("OSB_FAR_ZOOM", "")  # "lost": scans while the ball is
 SCAN_PLAN = os.environ.get("OSB_SCAN_PLAN", "geom")  # "geom": full scans planned from the pitch map; "grid": all tiles
 SCAN_HALF_PX = float(os.environ.get("OSB_SCAN_HALF_PX", 20.0))  # a ball at least this wide is scanned at half size
 SCAN_SAMPLE = 40        # the plan samples the frame this many px apart
+LOST_LOCAL = bool(os.environ.get("OSB_LOST_LOCAL"))  # lost-ball rescans only near the last sighting (see above)
+LOCAL_R0_M = float(os.environ.get("OSB_LOCAL_R0_M", 10.0))   # their radius on the pitch: this ...
+LOCAL_V_MS = float(os.environ.get("OSB_LOCAL_V_MS", 10.0))   # ... plus this x the seconds lost
 FAR_STEP = 280          # far-band crops (ZOOM_CROP) start this far apart (40 px overlap)
 WASB = bool(os.environ.get("OSB_WIN_WASB"))
 WASB_STEER = bool(os.environ.get("OSB_WASB_STEER"))  # WASB's candidates also update the online track (moves RF-DETR's windows)
@@ -331,17 +340,46 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
               f" (ball >= {SCAN_HALF_PX:.0f} px); pitch samples {n_small} small-ball, {n_large} large-ball", flush=True)
         return plan
     plans = [scan_plan(ph) for ph in (0, 1)]
+
+    def footprints(phone):
+        """Per plan crop: (corners, scale, pitch xz of the on-pitch sample pixels inside it)."""
+        pix, gxz = [], []
+        for sy in range(detect.BAND_TOP + SCAN_SAMPLE // 2, H, SCAN_SAMPLE):
+            for sx in range(SCAN_SAMPLE // 2, W, SCAN_SAMPLE):
+                yaw, pit = detect.to_angles(cams[phone], np.array([[sx, sy]], float))[0]
+                gx, gz = pose.to_pitch(yaw, pit)
+                if not np.isnan(gx) and abs(gx) <= hl and abs(gz) <= hw:
+                    pix.append((sx, sy)); gxz.append((gx, gz))
+        pix, gxz = np.array(pix).reshape(-1, 2), np.array(gxz).reshape(-1, 2)
+        out = []
+        for corners, sc in plans[phone]:
+            side = WIN / sc
+            for x, y in corners:
+                m = (pix[:, 0] >= x) & (pix[:, 0] < x + side) & (pix[:, 1] >= y) & (pix[:, 1] < y + side)
+                out.append(((x, y), sc, gxz[m]))
+        return out
+    feet = [footprints(ph) for ph in (0, 1)] if LOST_LOCAL else None
+
+    def local_plan(phone, centre, r):
+        """The plan's crops that see pitch within r m of centre, as [(corners, scale)]."""
+        by_scale: dict = {}
+        for corner, sc, g in feet[phone]:
+            if len(g) and np.min(np.hypot(g[:, 0] - centre[0], g[:, 1] - centre[1])) <= r:
+                by_scale.setdefault(sc, []).append(corner)
+        return [(c, sc) for sc, c in by_scale.items()]
     if FAR_ZOOM:
         print(f"far band: {len(far[0])} + {len(far[1])} crops at 2x ({FAR_ZOOM} scans)", flush=True)
 
     frames_out, t0 = [], time.time()
     ball_xz, ball_v, last_seen, last_full = None, np.zeros(2), -10 ** 9, -10 ** 9
-    tiles_total, n_full = 0, 0
+    last_whole = -10 ** 9   # the last whole (not local) scan
+    tiles_total, n_full, n_local = 0, 0, 0
     for i, (fa, fb) in enumerate(zip(*streams)):
         t = i / fps
         lost = (i - last_seen) / fps
         since_full = (i - last_full) / fps
         full = since_full >= FULL_EVERY_S or ((ball_xz is None or lost >= LOST_S) and since_full >= LOST_SCAN_S)
+        local = (LOST_LOCAL and full and ball_xz is not None and (i - last_whole) / fps < FULL_EVERY_S)
         if ball_xz is not None:
             pred = ball_xz + ball_v * min((i - last_seen) / fps, LOST_S)  # beyond LOST_S: stay near the last sighting
             pred = np.clip(pred, [-pose.L / 2 - 3, -pose.W / 2 - 3], [pose.L / 2 + 3, pose.W / 2 + 3])
@@ -359,7 +397,7 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
             img = rgb(buf)
             rows = []
             if full:
-                for tl, sc in plans[phone]:
+                for tl, sc in (local_plan(phone, ball_xz, LOCAL_R0_M + LOCAL_V_MS * lost) if local else plans[phone]):
                     if tl:
                         rows += [(r, "scan") for r in run(img, tl, scale=sc)]
                         tiles_total += len(tl)
@@ -420,7 +458,9 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
                               "box": [round(float(v)) for v in (x1, y1, x2, y2)],
                               "src": src_of.get(tuple(np.round([x1, y1, x2, y2])), "scan")})
         if full:
-            last_full, n_full = i, n_full + 1
+            last_full, n_full, n_local = i, n_full + 1, n_local + local
+            if not local:
+                last_whole = i
         merged = merge_phones(found)
         # Online track: the surest on-pitch candidate near the prediction (or anywhere after a scan).
         # WASB's candidates don't steer it unless OSB_WASB_STEER: RF-DETR's windows go where they would without WASB.
@@ -467,6 +507,7 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
                                 "frames": frames_out}))
     print(f"{n} frame pairs in {(time.time() - t0) / 60:.1f} min; {tiles_total / n:.1f} tiles per frame pair"
           f" vs {2 * len(detect.tiles(H, W))} for full scans; {n_full} full scans"
+          + (f" ({n_local} of them local)" if LOST_LOCAL else "")
           + (f"; WASB {wasb.tiles / n:.1f} tiles per frame pair, {t_wasb / 60:.1f} min" if wasb else "")
           + f" -> {path.name}", flush=True)
     os._exit(0)  # the output is written; interpreter teardown (MPS, decoder threads) has hung for hours
