@@ -1165,6 +1165,61 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         window and zoom); a small gain, as the scans are already batched.
       - fp16 for the ball detector (~10-14%); a smaller ball detector is
         riskier, as Nano's 384 px input shrinks far balls further.
+      - The ball detector exported to ONNX and Core ML (2026-11-08, M2 Pro,
+        macOS 27.0.1, rfdetr 1.11.2, torch 2.15, onnxruntime 1.31.1,
+        coremltools 9.0; script, logs and exported models in
+        `footage/onnxbench/`). All five exports worked first time
+        (`model.export`, 3-12 s each). Network only, random input, ms per
+        crop (3 warm-up + 12 timed calls, as in the table above):
+
+        | Backend | batch 1 | batch 8 | load |
+        |---|---|---|---|
+        | PyTorch MPS fp32 (today) | 44.9 | 31.5 | - |
+        | PyTorch MPS fp16 | 43.1 | 27.2 | - |
+        | Core ML fp32, GPU | **25.8** | **21.8** | 0.5 s |
+        | Core ML fp16, GPU | 23.0 | 18.1 | 0.4 s |
+        | Core ML fp16, all units / Neural Engine | 29.6-29.7 | 33.5-33.9 | 4-24 s |
+        | Core ML fp32, Neural Engine | 79.2 | 77.6 | 0.7 s |
+        | ONNX Runtime, Core ML provider (GPU or all) | 31.0 | 26.5 | 27-44 s |
+        | ONNX Runtime, Core ML provider, Neural Engine | 84.8 | 85.7 | 28 s |
+        | ONNX Runtime, CPU | 180.8 | 181.7 | 0.3 s |
+
+        Parity on the 451 tiles of `balldata_rec3_rec5_rec6/valid` (113
+        balls), every backend's raw outputs decoded the same way at
+        FLOOR 0.1 and compared with PyTorch MPS fp32 (74 / 58 / 51 balls
+        found at 0.1 / 0.3 / 0.5; the top detection is the ball on 66 of
+        71 tiles): Core ML fp32 and every ONNX Runtime backend give the
+        same 150 detections with the same confidences (to 4 places).
+        PyTorch fp16 matches 149/150 (confidence within 0.009). Core ML
+        fp16 drifts: 133-144 of 150 matched, up to 13 new ones,
+        confidence off by up to 0.63, balls found at 0.5 down to 47-50.
+        So Core ML fp32 on the GPU is the candidate: 1.74x faster at
+        batch 1 (the tracking windows), 1.44x at batch 8 (scans, roles),
+        same answers. ONNX Runtime's Core ML provider runs 940 of 946
+        nodes in Core ML but is slower than native and recompiles on
+        every load (its model cache was not tried). The Neural Engine is
+        no use for this model. Estimated effect from the per-frame
+        numbers above (~1.9 scan and ~2 window crops per frame pair at
+        ~0.28 s): ball stage about -20%, roles about -30%. Not measured
+        in the pipeline: crops would leave PyTorch as CPU arrays (8 x 576
+        x 576 x 3 floats is 32 MB a batch; unified memory, but a copy and
+        a sync per call), so check it in ballwin.py before adopting.
+        Checked in ballwin.py (2026-11-08): `OSB_DETECTOR_COREML=<folder
+        of the b1 and b8 fp32 exports>` (run with `--with coremltools`)
+        swaps the detector for Core ML, batch 8 for calls over 6 crops,
+        batch 1 otherwise. On the 451 tiles in ballwin-sized calls it
+        matches `predict()` 150/150 (confidence within 0.00003), 29.8 vs
+        48.8 ms per crop including preprocessing and the copy. On the
+        must-see clips, same settings as the crop variant, back to back:
+        rec3 seg 3 237 -> 157 s, rec3 seg 9 301 -> 227 s, rec4 10:00-20:00
+        1355 -> 888 s (detector 21.9 -> 13.9 min); the ball stage is
+        25-35% faster overall. Candidate files hold the same values,
+        apart from 36 of ~104k that differ in the last rounded digit
+        (up to 0.01); play boxes 33/46 and seg3 / seg9 labels 44/53 and
+        24/37 for both. Not yet tried: roles, a full game, the render
+        running alongside.
+        The ONNX Runtime CPU figure (~5.8x slower than the GPU) is a first
+        hint for a machine without a usable GPU.
       - Peak memory (2026-11-07, rec7 2-minute clip, `footprint` sampled
         every 2 s, GPU included): ball 5.2 GB (Python 4.3, GPU 3.1; each
         ffmpeg decoder ~0.6), roles 3.4 GB (GPU 1.2), render 3.3 GB (GPU
