@@ -1230,6 +1230,16 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         same role tallies apart from one person in seg 9 (B -> other);
         play boxes 33/46 for both. Not yet tried: a full game, the
         render running alongside.
+        Now the default on a Mac (2026-11-08): `detect.coreml_detector`
+        exports fp32 on first use (~10 s a batch size) to
+        ~/Library/Caches/opensportsball/coreml, keyed by the checkpoint
+        (size, mtime) and rfdetr's version, and falls back to PyTorch
+        with a message if anything fails. `OSB_DETECTOR_COREML` /
+        `OSB_PEOPLE_COREML` = "0" keeps PyTorch, a folder uses the exports
+        there. coremltools is in both scripts' dependencies on macOS
+        only. Checked with plain `uv run` on a 20 s clip: ball
+        candidates byte-identical to PyTorch, roles the same people and
+        roles; a bad folder falls back.
         The ONNX Runtime CPU figure (~5.8x slower than the GPU) is a first
         hint for a machine without a usable GPU.
       - Peak memory (2026-11-07, rec7 2-minute clip, `footprint` sampled

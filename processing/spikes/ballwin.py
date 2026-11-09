@@ -4,7 +4,7 @@
 # /// script
 # requires-python = ">=3.11,<3.14"
 # dependencies = ["numpy>=1.26", "scipy>=1.13", "opencv-python-headless>=4.10", "torch>=2.4",
-#                 "rfdetr>=1.11", "pyyaml>=6"]
+#                 "rfdetr>=1.11", "pyyaml>=6", "coremltools>=8,<10; sys_platform == 'darwin'"]
 # ///
 """Ball candidates for a clip with the detector run in search windows.
 
@@ -98,7 +98,7 @@ WASB_MIN = float(os.environ.get("OSB_WASB_MIN", 0.3 if WASB_CKPT else 0.05))  # 
                         # candidates (stock: ballheat.py's PEAK_MIN; a fine-tuned model is surer) ...
 WASB_TOP = 30           # ... at most this many per phone and frame, the strongest
 WASB_SAME_DIAM = 1.5    # a peak within this many ball diameters (or 8 px) of an RF-DETR box is that ball
-COREML = os.environ.get("OSB_DETECTOR_COREML")  # a folder of Core ML exports of the checkpoint (batch 1 and 8)
+# OSB_DETECTOR_COREML: Core ML for the detector on a Mac unless "0" (detect.coreml_detector)
 
 
 class Wasb:
@@ -208,8 +208,8 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
 
     dev = gpu.device()
     model = rfdetr.RFDETRMedium(pretrain_weights=str(ckpt))
-    if COREML:
-        model = detect.CoreMLDetector(Path(COREML), model)
+    model = detect.coreml_detector(model, "OSB_DETECTOR_COREML",
+                                   lambda: rfdetr.RFDETRMedium(pretrain_weights=str(ckpt)), ckpt=Path(ckpt))
     t_det = 0.0
     W, H = follow.SRC_W, follow.SRC_H
     wasb = Wasb(dev, Path(WASB_CKPT) if WASB_CKPT else None) if WASB else None
@@ -504,7 +504,7 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
     print(f"{n} frame pairs in {(time.time() - t0) / 60:.1f} min; {tiles_total / n:.1f} tiles per frame pair"
           f" vs {2 * len(detect.tiles(H, W))} for full scans; {n_full} full scans"
           + (f"; WASB {wasb.tiles / n:.1f} tiles per frame pair, {t_wasb / 60:.1f} min" if wasb else "")
-          + f"; detector {t_det / 60:.1f} min ({'Core ML' if COREML else 'PyTorch'})"
+          + f"; detector {t_det / 60:.1f} min ({'Core ML' if isinstance(model, detect.CoreMLDetector) else 'PyTorch'})"
           + f" -> {path.name}", flush=True)
     if judge_same:
         print(f"judge check: {sum(judge_same)} of {len(judge_same)} crops identical to cutting them from the whole frame",
