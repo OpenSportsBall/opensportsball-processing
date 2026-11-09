@@ -58,7 +58,8 @@ class CoreMLDetector:
     `*b1*/*.mlpackage` (rfdetr's `export(format="coreml", batch_size=...,
     coreml_precision="float32")`; fp16 changes the detections). Class ids
     come out as predict()'s: 0-based for a fine-tuned checkpoint, COCO ids
-    for the stock one. Needs coremltools (`uv run --with coremltools`).
+    for the stock one. Needs coremltools (in ballwin.py's and roles.py's
+    dependencies on macOS); `coreml_detector` picks or makes the exports.
     Measured 2026-11-08: footage/onnxbench, BACKLOG.md."""
 
     def __init__(self, folder: Path, rf):
@@ -105,6 +106,46 @@ class CoreMLDetector:
                 out.append(self.decode(boxes[j], logits[j], (w, h), threshold, background_class_id=None))
             i += k
         return out
+
+
+def coreml_detector(rf, env: str, make, ckpt: Path | None = None, batches=(1, 8)):
+    """`rf` run by Core ML (CoreMLDetector) where that is the default, else
+    `rf` itself. The environment variable `env` decides: "0" keeps PyTorch,
+    a folder uses the exports there, unset (the default) uses Core ML on a
+    Mac with fp32 exports cached in ~/Library/Caches/opensportsball/coreml,
+    made on first use from `make()` (a fresh model of `ckpt`, None for stock;
+    ~10 s a batch size) and keyed by the checkpoint and rfdetr's version.
+    Anything failing falls back to PyTorch with a message: same detections
+    either way (BACKLOG.md, 2026-11-08), Core ML ~30% faster per stage."""
+    v = os.environ.get(env, "")
+    if v == "0" or (not v and sys.platform != "darwin"):
+        return rf
+    try:
+        if v:
+            folder = Path(v)
+        else:
+            from importlib.metadata import version
+            ck = Path(ckpt) if ckpt else None  # None: the stock COCO model
+            key = (f"{ck.stem}-{ck.stat().st_size}-{int(ck.stat().st_mtime)}" if ck else "stock-medium") \
+                + f"-rfdetr{version('rfdetr')}-fp32"
+            folder = Path.home() / "Library/Caches/opensportsball/coreml" / key
+            for b in batches:
+                if not list(folder.glob(f"b{b}/*.mlpackage")):
+                    import shutil, tempfile
+                    folder.mkdir(parents=True, exist_ok=True)
+                    tmp = Path(tempfile.mkdtemp(dir=folder))
+                    m, t = make(), time.time()
+                    r = m.model.resolution
+                    m.export(output_dir=str(tmp), format="coreml", batch_size=b, shape=(r, r),
+                             coreml_precision="float32", verbose=False)
+                    shutil.rmtree(folder / f"b{b}", ignore_errors=True)
+                    tmp.rename(folder / f"b{b}")
+                    print(f"Core ML export, batch {b}: {time.time() - t:.0f} s -> {folder / f'b{b}'}", flush=True)
+                    del m
+        return CoreMLDetector(folder, rf)
+    except Exception as e:  # noqa: BLE001 -- PyTorch gives the same detections, only slower
+        print(f"Core ML unavailable ({type(e).__name__}: {e}); using PyTorch", flush=True)
+        return rf
 
 
 def nv12_to_rgb(y: torch.Tensor, uv: torch.Tensor) -> torch.Tensor:
