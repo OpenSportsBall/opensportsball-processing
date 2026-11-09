@@ -162,6 +162,40 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         play bench no worse. Rebuilding cameras.json changes every
         panorama angle: existing pitch fits and taps.json need redoing
         (taps can be carried across through the phone pixels).
+      - Joint fit (2026-11-09, `processing/spikes/jointfit.py`): taps
+        carried into each phone's 4K pixels (`pitch/taps_src.json`), then
+        one least squares over both lenses (focal, k1, k2), Secondary's
+        rotation, the lens offset (metres) and the pitch pose, on each
+        phone's own median background (one segment: rec7 11, rec4cal 12,
+        rec6 2, rec5-game 10) and its paint, with the taps. No warp terms.
+        Priors: focal from the lens table or the manifest FOV (10% with
+        taps), k1/k2 sd 0.01, lens offset sd 3 cm. ~15 s per fit once the
+        backgrounds are cached. Tap error at 4K, median / worst (current
+        -> joint): rec7 6.9 / 20.6 -> 1.8 / 7.6, rec4cal 2.5 / 35.4 ->
+        1.2 / 3.4, rec6 4.9 / 16.5 -> 2.7 / 7.0, rec5-game 6.5 / 49.6 ->
+        2.9 / 45.2. rec4 traced benchmark at 4K (`jointfit.py bench`):
+        all markings 4.5 -> 3.0 median, centre circle 22.8 -> 1.5, boxes
+        ~2.5 -> <1, near touchline 7.0 -> 9.2. rec4cal's camera comes out
+        at 3.0 m up against the measured 2.6 (the field drops away, see
+        FINDINGS). Lens table (`lenses.json`, fitted with taps): Pixel 11
+        747.5 +- 3.4 px @ 1920 (n=4, factory 752.8), Pixel 11 Pro 740.9
+        +- 5.2 (n=2), iPhone 14 Pro 718.5 +- 13.1 (n=2; rec5-game's
+        iPhone half is out of focus). Without taps, priors from the
+        table with the recording left out: rec7 3.1 / 9.5 px, rec6 6.4 /
+        16.0, rec4cal 35.3 / 78.0 (length runs to 117 m; 4.1 px with a 1%
+        different prior, so unstable), rec5-game fails. The lens table
+        doesn't make untapped games reliable: the far ends' paint does.
+        Next:
+        - Use it: write the joint cameras.json / pitch.json into phase0/
+          and pitch/ for one recording, rebuild the panorama, rerun the
+          play bench and a follow render. Per-segment Secondary
+          rotation still applies (rec7 segments 0-1).
+        - Paint in the phones' frames: line_mask's scales were tuned on
+          the 0.03 deg panorama; rec5-game's far yellow lines and rec6's
+          over-wide white mask (97% of model points "on paint") need a
+          look before untapped fits can work.
+        - More recordings with taps per phone model (iPhone 14 Pro has two,
+          one of them soft).
 - [ ] Players-only follow: `processing/spikes/follow.py` renders a 1080p
       virtual camera straight from both 4K sources. Cameras refined at
       1920 px (median error 11 to 4 px at 4K); each pixel comes from one
