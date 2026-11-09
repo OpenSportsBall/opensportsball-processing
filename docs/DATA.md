@@ -72,9 +72,16 @@ copying it to `data/<rec>/`.
 
 brings back `data/` and `bench/` into `footage/` and recreates the
 symlinks. Raw video still in `accounts/` is downloaded per recording when
-needed, with the manifest's object keys:
+needed, through the footage CloudFront distribution (its first TB a month
+is free; S3's transfer out is not), checked against the manifest's sizes
+and SHA-256:
 
-    aws s3 cp --profile sbv --recursive s3://<footage bucket>/accounts/<account>/games/<game>/recordings/<recording>/ footage/<rec>/
+    uv run processing/spikes/footagestore.py fetch <rec> [--segs a-b]
+
+It needs `footage/<rec>/manifest.json` and AWS access that can read the
+signing key in SSM (`/OpenSportsBall/footage-signing-key`). A variant
+whose phone folders link to another recording (`rec5-game` -> `rec5`) gets
+its video by fetching that one.
 
 ## Sharing with contributors
 
@@ -99,7 +106,10 @@ or pitch map, add it to `ANNOTATED` (or to the bench store) and run `upload`.
 
 ## A new recording
 
-1. Download it: `aws s3 cp` as above, into `footage/rec<N>/`.
+1. Copy its manifest (a few KB, so straight from S3), then fetch its video
+   as above:
+   `aws s3 cp --profile sbv s3://<footage bucket>/accounts/<account>/games/<game>/recordings/<recording>/manifest.json footage/rec<N>/`
+   and `footagestore.py fetch rec<N>`.
 2. `phase0.py`, then whatever it is for (labels, pitch, a full game).
 3. Add it to the table above and run `footagestore.py backup`.
 4. Once it has labels or a pitch map worth sharing, add it to
