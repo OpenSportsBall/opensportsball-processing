@@ -851,6 +851,30 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
       Trash (128 GB). The benches, the tracker scorer and the pitch test
       run without them (docs/TESTING-PROCESSING.md section 5); renders,
       new detectors and new label sets need segments back from S3.
+- [ ] Skip what isn't play (`phases.py`, 2026-11-08). `features` makes a
+      CPU + hardware-decode pass (Main's audio for whistles; both phones
+      at 1 fps / 640 px, motion per pitch cell, NX x NZ = 6 x 3, and
+      contact sheets every 15 s); `segment` splits pre / half / break /
+      half / post and writes phases/phases.json. Truth by eye in
+      phases/truth.json (rec7 whole; rec3 kick-off 1:05; rec5, rec6 begin
+      in play). Next:
+      - Whole games to test on: only rec7 has all its video on disk (rec3
+        0-6, rec4 2-6, rec5 0-2, rec6 0-2 of their segments; ~50 GB per
+        game, 23 GB free). Fetch segment by segment and delete, or run
+        the pass where the video is.
+      - Half ends run late (rec7 +107 s, full time +97 s once kept to the
+        end): players walking off and huddling by the mount read as play.
+        End-of-half whistles come in clusters (rec7 50:07, 50:16, 50:17
+        1.0 s); a cluster score, or the pitch emptying over the next
+        minutes, may place them.
+      - Whistle pitch on short or quiet recordings: rec4-6 partials chose
+        2.2-2.7 kHz. Require a minimum count, fall back to motion alone.
+      - Pass cost: decoding every frame for 1 fps is ~22 min a game; try
+        keyframes only (`-skip_frame nokey`) once the phones' keyframe
+        interval is known.
+      - Wire into `fullgame.py` as ranges to render (it has only
+        `--start`), padded (60 s used here) and never cutting inside a
+        half.
 - [ ] Full-game runner (`fullgame.py`): name each piece by the
       configuration it was rendered with (a hash of the feature string
       and the constants it uses, plus the candidate and roles file
