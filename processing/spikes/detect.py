@@ -27,6 +27,7 @@ with detections drawn.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -46,6 +47,64 @@ TILE, STRIDE = 640, 576     # 64 px overlap between tiles
 BAND_TOP = 760              # first frame row tiled (4K); above it is sky and trees
 THRESH = {PERSON: 0.35, BALL: 0.15}
 MERGE_DEG = {PERSON: 0.6, BALL: 0.4}  # same object seen by both phones
+
+
+class CoreMLDetector:
+    """RF-DETR run by Core ML instead of PyTorch, with predict()'s
+    preprocessing (resize without antialias, ImageNet normalisation) and
+    rfdetr's export decoder, so it is a drop-in for `model.predict` on a
+    list of crops: 3xHxW tensors in [0, 1] (ballwin.py) or HxWx3 uint8 RGB
+    arrays (teams.py). `folder` holds `*b8*/*.mlpackage` and optionally
+    `*b1*/*.mlpackage` (rfdetr's `export(format="coreml", batch_size=...,
+    coreml_precision="float32")`; fp16 changes the detections). Class ids
+    come out as predict()'s: 0-based for a fine-tuned checkpoint, COCO ids
+    for the stock one. Needs coremltools (`uv run --with coremltools`).
+    Measured 2026-11-08: footage/onnxbench, BACKLOG.md."""
+
+    def __init__(self, folder: Path, rf):
+        import coremltools as ct
+        from rfdetr.export._runtime.decode import decode_detections
+        self.decode = decode_detections
+        self.res, self.means, self.stds = rf.model.resolution, rf.means, rf.stds
+        self.units = os.environ.get("OSB_COREML_UNITS", "CPU_AND_GPU")  # coremltools ComputeUnit name
+        self.models = {}
+        for b in (1, 8):
+            found = sorted(folder.glob(f"*b{b}*/*.mlpackage"))
+            if not found:
+                continue
+            m = ct.models.MLModel(str(found[0]), compute_units=getattr(ct.ComputeUnit, self.units))
+            d = m.get_spec().description
+            self.models[b] = (m, d.input[0].name, [o.name for o in d.output])
+            print(f"Core ML detector, batch {b}: {found[0]} on {self.units}", flush=True)
+        if 8 not in self.models:
+            raise FileNotFoundError(f"no *b8*/*.mlpackage in {folder}")
+
+    def _run(self, b: int, x: np.ndarray):
+        m, inp, outs = self.models[b]
+        r = m.predict({inp: x})
+        a = [np.asarray(r[o], dtype=np.float32) for o in outs]
+        return (a[0], a[1]) if a[0].shape[-1] == 4 else (a[1], a[0])  # (boxes cxcywh, logits)
+
+    def predict(self, crops, threshold):
+        import torchvision.transforms.functional as TF
+        crops = [torch.from_numpy(np.ascontiguousarray(c)).permute(2, 0, 1).float() / 255
+                 if isinstance(c, np.ndarray) else c for c in crops]
+        x = torch.stack([TF.resize(c, [self.res, self.res], antialias=False) for c in crops])
+        x = TF.normalize(x, self.means, self.stds).float().cpu().numpy()
+        out, i = [], 0
+        while i < len(x):
+            left = len(x) - i
+            # batch 8 costs ~8 x 21.8 ms even when padded; batch 1 ~25.8 ms a crop
+            b, k = (8, min(8, left)) if left > 6 or 1 not in self.models else (1, 1)
+            chunk = x[i:i + k]
+            if k < b:
+                chunk = np.concatenate([chunk, np.zeros((b - k, *chunk.shape[1:]), np.float32)])
+            boxes, logits = self._run(b, chunk)
+            for j in range(k):
+                h, w = crops[i + j].shape[1:]
+                out.append(self.decode(boxes[j], logits[j], (w, h), threshold, background_class_id=None))
+            i += k
+        return out
 
 
 def nv12_to_rgb(y: torch.Tensor, uv: torch.Tensor) -> torch.Tensor:

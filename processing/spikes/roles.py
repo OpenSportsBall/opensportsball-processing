@@ -25,6 +25,7 @@ frame, people as {xz, role, conf}. follow.py's "roles" feature reads it.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -44,6 +45,7 @@ KEEPER_X_M = 22.0
 KEEPER_Z_M = 25.0
 FAR_MIN_PX = 12            # near a goal, people this tall still get a colour (keepers are far and small) ...
 FAR_SAT = 30.0             # ... and a saturated torso there (not a kit colour) is the keeper
+COREML = os.environ.get("OSB_PEOPLE_COREML")  # a folder of Core ML exports of the stock model (batch 8; see detect.CoreMLDetector)
 
 
 def main(rec: Path, seg: int, start: float, seconds: float, tset: str, fps: float) -> None:
@@ -74,10 +76,12 @@ def main(rec: Path, seg: int, start: float, seconds: float, tset: str, fps: floa
         return int(np.argmax(ll))
 
     model = rfdetr.RFDETRMedium()
+    if COREML:
+        model = detect.CoreMLDetector(Path(COREML), model)
     W, H = follow.SRC_W, follow.SRC_H
     streams = [follow.prefetch(follow.game_stream(rec, devs, report, ph, seg, start, seconds, W, fps=fps))
                for ph in (0, 1)]
-    frames_out, t0 = [], time.time()
+    frames_out, t0, t_det = [], time.time(), 0.0
     from collections import Counter
     tally = Counter()
     for i, (fa, fb) in enumerate(zip(*streams)):
@@ -88,7 +92,9 @@ def main(rec: Path, seg: int, start: float, seconds: float, tset: str, fps: floa
                 bgr = cv2.rotate(bgr, cv2.ROTATE_180)
             small = cv2.resize(bgr, (HALF, HALF * 9 // 16), interpolation=cv2.INTER_AREA)
             rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+            td = time.time()
             boxes = teams.person_boxes(model, rgb, band_top=detect.BAND_TOP // 2)
+            t_det += time.time() - td
             band = bgr[760::16, ::16].reshape(-1, 3)
             hsv = cv2.cvtColor(band.reshape(-1, 1, 3), cv2.COLOR_BGR2HSV).reshape(-1, 3)
             g = band[(hsv[:, 0] > 30) & (hsv[:, 0] < 95) & (hsv[:, 1] > 40)]
@@ -129,8 +135,8 @@ def main(rec: Path, seg: int, start: float, seconds: float, tset: str, fps: floa
     path = rec / "detect" / f"roles_{seg}_{start:g}_{seconds:g}.json"
     path.parent.mkdir(exist_ok=True)
     path.write_text(json.dumps({"segment": seg, "fps": fps, "teams": tset, "frames": frames_out}))
-    print(f"{len(frames_out)} frames in {(time.time() - t0) / 60:.1f} min; roles {dict(tally)} -> {path.name}", flush=True)
-    import os
+    print(f"{len(frames_out)} frames in {(time.time() - t0) / 60:.1f} min; roles {dict(tally)} -> {path.name}; "
+          f"detector {t_det / 60:.1f} min ({'Core ML' if COREML else 'PyTorch'})", flush=True)
     os._exit(0)  # the output is written; teardown has hung (decoder threads)
 
 
