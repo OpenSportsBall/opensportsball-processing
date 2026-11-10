@@ -500,6 +500,7 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
     tag = os.environ.get("OSB_WIN_TAG", "win")  # output name; e.g. "win4" for a cadence experiment
     path = rec / "detect" / f"ball_{seg}_{start:g}_{seconds:g}.{tag}.json"
     path.write_text(json.dumps({"segment": seg, "fps": fps, "model": str(ckpt), "mode": "window", "wasb": WASB,
+                                "judge": os.environ.get("OSB_JUDGE") or "standard",  # rec7's need judge_v4
                                 "frames": frames_out}))
     print(f"{n} frame pairs in {(time.time() - t0) / 60:.1f} min; {tiles_total / n:.1f} tiles per frame pair"
           f" vs {2 * len(detect.tiles(H, W))} for full scans; {n_full} full scans"

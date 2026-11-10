@@ -214,15 +214,15 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
           standard bench baselines). ballwin rerun on the bench clips with
           today's code and each clip's original checkpoint, on both
           geometries (the old one in footage/rec4cal-old, rec7-old, built
-          from pre_joint/): best variant rec4cal 11/15 -> 13/15 (mean
-          coverage 73 -> 91%), rec7 0/5 both. Candidates per clip the same
-          on both geometries (rec7 2205 / 2213), so the geometry doesn't
-          change what ballwin finds.
-        - Open, not the geometry: today's ballwin finds 2205 candidates on
-          rec7's seg0-1484 clip against 5093 in the 2026-11-05 file, and the
-          bench there falls from 4/5 to 0/5 on either geometry. Since then:
-          the scan plan from the pitch map (2026-11-07) and Core ML as the
-          default detector (bb6051a).
+          from pre_joint/; rec7 with OSB_JUDGE=judge_v4, as its 2026-11-05
+          files were made): best variant rec4cal 11/15 -> 13/15 (mean
+          coverage 73 -> 91%), rec7 4/5 both (85 -> 88%, aim at the ball
+          64% both); 15/20 -> 17/20. Candidates per clip about the same on
+          both geometries (rec7 5303 / 5336), so the geometry doesn't change
+          what ballwin finds. (A first rec7 rerun with the standard judge
+          gave ~2200 candidates and 0/5 on both geometries; d9634ff blamed
+          ballwin's scan plan or Core ML for that, wrongly. ballwin now
+          writes the judge into each ball file.)
         - Next: per-segment Secondary rotation (rec7 segments 0-1).
         - Paint in the phones' frames: line_mask's scales were tuned on
           the 0.03 deg panorama; rec5-game's far yellow lines and rec6's
