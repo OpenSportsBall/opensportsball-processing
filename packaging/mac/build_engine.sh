@@ -63,7 +63,11 @@ cp -R "$REPO/schemas" "$OUT/engine/schemas"
 cp "$MODELS/ball_detector.pth" "$MODELS/ball_judge.pt" "$MODELS/README.md" "$OUT/engine/footage/models/"
 cp "$RFDETR_MEDIUM" "$OUT/rf_home/rf-detr-medium.pth"
 cp "$REPO/LICENSE" "$OUT/LICENSES/osb-engine-AGPL-3.0.txt"
-"$PY" -m compileall -q "$OUT/engine/processing/spikes"
+# Compiled ahead, with hashes rather than times (still valid after a copy
+# into the app): inside a signed app the engine must not write its own
+# folder, and with these it never needs to.
+"$PY" -m compileall -q -j 0 --invalidation-mode unchecked-hash "$OUT/engine/processing/spikes" "$OUT/python/lib" \
+  || echo "(some files did not compile, e.g. packages' Python 2 test data; they are never imported)"
 
 echo "== launcher"
 cat > "$OUT/osb-engine" <<'LAUNCH'
@@ -73,6 +77,7 @@ cat > "$OUT/osb-engine" <<'LAUNCH'
 HERE=$(cd "$(dirname "$0")" && pwd)
 unset PYTHONPATH PYTHONHOME VIRTUAL_ENV
 export PYTHONNOUSERSITE=1
+export PYTHONDONTWRITEBYTECODE=1   # never write into the engine's folder (inside the signed app)
 export OSB_PYTHON="$HERE/python/bin/python3"
 export OSB_FFMPEG_DIR="$HERE/bin"
 export RF_HOME="$HERE/rf_home"
