@@ -1567,8 +1567,6 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         unaided (does it mark keypoints within a few pixels? does it
         judge the kit groups as a person does?), scored against the
         answers given by hand on rec4, rec5 and rec7.
-  - [ ] The schema copies here are ahead of the pin until the main
-        repo's `shared/schemas/` has the same change (README pin).
 - [x] Engine side of the checks and contributions (step B), 2026-11-09:
       `label ball` / `label moments` sets from a finished game, label
       answers stored as `labels.json` / `boxes.json`, `share` lists per
