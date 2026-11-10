@@ -173,6 +173,10 @@
       "properties": {
         "event": {
           "const": "status"
+        },
+        "next": {
+          "type": "string",
+          "description": "The command to run next (or that the game is done)."
         }
       }
     },

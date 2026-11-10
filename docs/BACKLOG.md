@@ -1551,6 +1551,22 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
       answers as files, `run`, `status`; platform choices in `accel.py`.
       rec7 from a fresh copy, with a stop and resume, to `game.mp4` with
       no hand edits (FINDINGS section 7).
+- [x] The engine for a script or a model with no app (main repo
+      `docs/MAC-APP-PLAN.md`, "Using it without the GUI"), 2026-11-10:
+      every question says in words what is asked and how to answer
+      (`ask`, `howToAnswer`); each pitch keypoint has a close-up with the
+      fit drawn on it and each kit group one contact sheet; `questions`
+      prints what is pending as one document, `answer` writes an answer
+      from flags (a keypoint as a pixel of its close-up, groups by
+      number), checked against the question, with sharing off unless
+      asked for; `status` names the next command
+      ([ENGINE-AGENTS.md](ENGINE-AGENTS.md)). Questions written from
+      rec7's pitch and kit groups read well as pictures; unit tests only
+      otherwise.
+  - [ ] Not yet tried: a model answering a whole game's questions
+        unaided (does it mark keypoints within a few pixels? does it
+        judge the kit groups as a person does?), scored against the
+        answers given by hand on rec4, rec5 and rec7.
 - [x] Engine side of the checks and contributions (step B), 2026-11-09:
       `label ball` / `label moments` sets from a finished game, label
       answers stored as `labels.json` / `boxes.json`, `share` lists per

@@ -11,6 +11,8 @@ the Mac app, the cloud job and a terminal alike.
     uv run processing/spikes/engine.py prepare job.json [--answers answers.json]
     uv run processing/spikes/engine.py run     job.json --answers answers.json
     uv run processing/spikes/engine.py status  job.json
+    uv run processing/spikes/engine.py questions job.json
+    uv run processing/spikes/engine.py answer  job.json pitch --approve
     uv run processing/spikes/engine.py label   job.json ball [--count 50]
     uv run processing/spikes/engine.py label   job.json moments [--at 61.5,1834] [--random 3]
     uv run processing/spikes/engine.py label   job.json --answers labels.json
@@ -53,7 +55,20 @@ prepare and run check every segment file against the manifest's size and
 SHA-256 (footage_corrupt: download it again); a file is hashed once, then
 remembered by its size and modification time (engine/verified.json).
 
-status: what's done and what's pending, as one JSON line.
+status: what's done and what's pending, and the command to run next, as
+one JSON line.
+
+questions, answer: the same questions for a script or a model with no app
+to draw them (docs/ENGINE-AGENTS.md). Every question in questions.json
+says in words what is asked and how to answer (ask, howToAnswer), each
+pitch keypoint has a close-up picture and each kit group one contact
+sheet. `questions` prints what is pending as one JSON document made to be
+read (absolute image paths, no polylines); `answer` writes one question's
+answer into <recording>/engine/answers.json from flags, checked against
+what was asked (pitch points as a pixel of a close-up, groups by number),
+and prints the prepare command that applies it. It records share as
+false unless --share is given: sharing is the user's choice. These two
+print a JSON document, not progress events.
 
 label (after run, for users who agree to share): makes a label set in
 <recording>/engine/labels/<set>/set.json (schemas/engine-labelset.schema.json).
@@ -113,6 +128,10 @@ SPLIT_K = TEAMS_K + 2         # after the user says a group holds two kits
 CROPS_PER_GROUP = 24          # people shown per kit group
 STAT_MIN_HEIGHT_PX = 45       # teams.py: people this tall (on the pitch) shape the groups; shown first
 CROP_H = 160                  # crop height in the question, px
+SHEET_COLS, SHEET_CELL_W = 8, 110  # a kit group's contact sheet: crops per row, px per crop
+CLOSEUP_DEG = (9.0, 6.0)      # a keypoint's close-up: this much panorama (yaw, pitch) around it
+CLOSEUP_SCALE = 3             # close-up pixels per panorama pixel
+QUESTIONS = ("cameras", "pitch", "kits")
 HEARTBEAT_S = 60.0
 # Failures a user can understand, found by the line a step ends with.
 KNOWN_FAILURES = [
@@ -565,6 +584,7 @@ def cameras_question(job: Job, st: dict) -> dict | None:
         q["leftPhone"] = c["leftPhone"]
     if c.get("reason"):
         q["reason"] = c["reason"]
+    q.update(ASK["cameras"])
     return q
 
 
@@ -599,6 +619,10 @@ def write_questions(job: Job, st: dict) -> dict:
         pitch_q["approveAllowed"] = False
     if st["pitch"].get("problem"):
         pitch_q["problem"] = st["pitch"]["problem"]
+    closeups = point_closeups(job, st["pitch"]["round"], review)
+    pitch_q["points"] = {n: {**p, **({"closeup": closeups[n]} if n in closeups else {})}
+                         for n, p in review["points"].items()}
+    pitch_q.update(ask_pitch(pitch_q.get("approveAllowed", True)))
     guess = job.dir / "pitch_guess.json"
     if st["pitch"]["round"] == 1 and not guess.exists():
         # Our first guess, before any correction: shared next to the final fit.
@@ -655,9 +679,9 @@ def write_questions(job: Job, st: dict) -> dict:
         proposed = ("A" if c in sides.get("A", []) else "B" if c in sides.get("B", [])
                     else "keeperOrReferee" if c in sides.get("keeperOrReferee", []) else "other")
         groups.append({"component": c, "people": len(mine), "perMoment": per_moment[c], "proposed": proposed,
-                       "crops": crops})
+                       "crops": crops, **kit_sheet(rec, crop_dir, c, crops)})
     kits_q = {"round": rnd, "status": st["kits"]["status"], "k": st["kits"]["k"], "groups": groups,
-              "splitAllowed": st["kits"]["k"] == TEAMS_K}
+              "splitAllowed": st["kits"]["k"] == TEAMS_K, **ask_kits(st["kits"]["k"] == TEAMS_K)}
     if st["kits"].get("problem"):
         kits_q["problem"] = st["kits"]["problem"]
     (job.dir / f"kits_round{rnd}.json").write_text(json.dumps(kits_q, indent=1))  # what was shown, for share
@@ -666,6 +690,349 @@ def write_questions(job: Job, st: dict) -> dict:
     if cams_q:
         q["cameras"] = cams_q
     return save_questions(job, q)
+
+
+# ------------------------------------------- questions a model can answer
+#
+# The app draws the questions itself. A script or a model driving the engine
+# has only the files, so each question also says in words what is asked and
+# how to answer it (ask, howToAnswer), and comes with pictures made to be
+# looked at one at a time: a close-up of every pitch keypoint and one contact
+# sheet per kit group.
+
+SHARE_NOTE = ("Sharing is the user's choice: `answer` records share as false unless --share is given. "
+              "Pass --share only when the user has agreed to share this result.")
+ASK = {"cameras": {
+    "ask": ("The two phones' views couldn't be stitched. panoramas.mainLeft and panoramas.secondaryLeft show the "
+            "pitch drawn with Main on the left and with Secondary on the left. Which one shows the pitch in one "
+            "piece? The wrong one shows two broken halves: lines meeting in a V, the halfway line at both edges."),
+    "howToAnswer": ["Main on the left: osb-engine answer <job> cameras --left main",
+                    "Secondary on the left: osb-engine answer <job> cameras --left secondary",
+                    "Then apply it: osb-engine prepare <job> --answers <recording>/engine/answers.json. "
+                    "The pitch question follows, and its points must be marked before it can be approved."]}}
+
+
+def ask_pitch(approve_allowed: bool) -> dict:
+    how = []
+    if approve_allowed:
+        how.append("The lines sit on the paint everywhere: osb-engine answer <job> pitch --approve")
+    else:
+        how.append("Approving isn't allowed yet (approveAllowed is false): mark the points first.")
+    how += [
+        "They don't: say where keypoints really are, at least four spread over both ends of the pitch. "
+        "osb-engine answer <job> pitch --closeup 'NAME=X,Y' ... with X,Y the pixel in that point's close-up image "
+        "(points.NAME.closeup.image) where the keypoint really is; or --pano 'NAME=X,Y' in the background "
+        "image's pixels; or --point 'NAME=YAW,PITCH' in panorama degrees.",
+        "--keep NAME for a point the fit already has right (it then holds the fit there); "
+        "--skip NAME for one that can't be seen. Points not named are left out of the refit.",
+        "Then apply it: osb-engine prepare <job> --answers <recording>/engine/answers.json. The engine refits "
+        "and asks again with the next round; approve once the lines sit on the paint.",
+        SHARE_NOTE]
+    return {"ask": ("overlay is the empty pitch (background) with the fitted pitch drawn on it in red. Do the red "
+                    "lines sit on the painted lines everywhere: touchlines, goal lines, penalty and goal areas, "
+                    "halfway line, centre circle? Each point's close-up shows one named keypoint enlarged, with "
+                    "the fitted lines in red and a ring where the fit puts the keypoint (closeup.fit). "
+                    "A wrong pitch spoils everything after it, so look at both ends and the far side."),
+            "howToAnswer": how}
+
+
+def ask_kits(split_allowed: bool) -> dict:
+    how = [
+        "Every kit has exactly one group (the usual answer): osb-engine answer <job> kits --ok",
+        "Two or more groups are the same kit: --merge 0,7 (repeat --merge for another kit).",
+        ("One group holds two kits: --split 3. The engine regroups and asks again, once." if split_allowed else
+         "Splitting was already used (splitAllowed is false): merge and mark the groups as they are."),
+        "A group that is keepers or the referee: --keeper 5,6. A group that isn't a kit at all (spectators, "
+        "subs in bibs, coaches, shadows): --not-kit 3,4. Without --keeper the engine keeps its own guess.",
+        "People in the wrong group, or not players in kit, by the id under their picture: --tapped c0_03,c2_11. "
+        "This only scores the grouping; it doesn't move anyone.",
+        "The flags combine in one command. Then apply it: osb-engine prepare <job> --answers "
+        "<recording>/engine/answers.json. At least two kit groups must be left.",
+        SHARE_NOTE]
+    return {"ask": ("People seen on the pitch were grouped by what they wear. Each group's sheet shows up to "
+                    f"{CROPS_PER_GROUP} of its people, chosen at random, with an id under each. Is every group one "
+                    "kit, and does every kit have one group? proposed is the engine's guess: A and B are the two "
+                    "sides (in no order; there is no 'your team'), keeperOrReferee, or other."),
+            "howToAnswer": how}
+
+
+def point_closeups(job: Job, rnd: int, review: dict) -> dict:
+    """A close-up of the background around each keypoint, the fitted lines in
+    red and a ring where the fit puts the point: engine/pitch_points/round<n>/.
+    Per point: the image, where the fit is in it, and its pixels in panorama
+    degrees (yaw = yaw0 + x * degPerPx, pitch = pitch0 + y * degPerPx), so a
+    correction can be given as a pixel of the close-up. A point the fit puts
+    off the panorama has none."""
+    import cv2
+    import numpy as np
+
+    pano = review.get("panorama")
+    if not pano or not review.get("points"):
+        return {}
+    bg = cv2.imread(str(job.rec / "pitch" / pano["image"]))
+    if bg is None:
+        return {}
+    dpp, yaw0, pitch0 = pano["degPerPx"], pano["yawRange"][0], pano["pitchRange"][0]
+    H, W = bg.shape[:2]
+    w, h = min(W, round(CLOSEUP_DEG[0] / dpp)), min(H, round(CLOSEUP_DEG[1] / dpp))
+    s = CLOSEUP_SCALE
+    lines = []
+    for ln in review.get("lines", []):
+        a = np.asarray(ln, float).reshape(-1, 2)
+        a = a[np.isfinite(a).all(1)]
+        if len(a) >= 2:
+            lines.append(np.c_[(a[:, 0] - yaw0) / dpp, (a[:, 1] - pitch0) / dpp])
+    out_dir = job.dir / "pitch_points" / f"round{rnd}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = {}
+    for name, p in review["points"].items():
+        cx, cy = (p["yaw"] - yaw0) / dpp, (p["pitch"] - pitch0) / dpp
+        if not (0 <= cx < W and 0 <= cy < H):
+            continue
+        x1 = int(min(max(round(cx - w / 2), 0), W - w))
+        y1 = int(min(max(round(cy - h / 2), 0), H - h))
+        cut = cv2.resize(bg[y1:y1 + h, x1:x1 + w], None, fx=s, fy=s, interpolation=cv2.INTER_CUBIC)
+        for ln in lines:
+            near = ((ln[:, 0] > x1 - w) & (ln[:, 0] < x1 + 2 * w) & (ln[:, 1] > y1 - h) & (ln[:, 1] < y1 + 2 * h))
+            if near.any():
+                pts = np.round((ln - [x1, y1]) * s).astype(np.int32)
+                cv2.polylines(cut, [pts], False, (0, 0, 255), 1, cv2.LINE_AA)
+        fx, fy = round((cx - x1) * s), round((cy - y1) * s)
+        cv2.circle(cut, (fx, fy), 16, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.circle(cut, (fx, fy), 16, (0, 255, 255), 1, cv2.LINE_AA)
+        path = out_dir / (name.replace(" ", "_").replace("/", "_") + ".jpg")
+        cv2.imwrite(str(path), cut, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        out[name] = {"image": str(path.relative_to(job.rec)), "width": cut.shape[1], "height": cut.shape[0],
+                     "fit": [fx, fy], "degPerPx": round(dpp / s, 6), "yaw0": round(yaw0 + x1 * dpp, 4),
+                     "pitch0": round(pitch0 + y1 * dpp, 4)}
+    return out
+
+
+def kit_sheet(rec: Path, crop_dir: Path, c: int, crops: list[dict]) -> dict:
+    """One picture of a kit group's crops in rows, each with its id under it:
+    {"sheet": path} (nothing when the group has no crops)."""
+    import cv2
+    import numpy as np
+
+    label_h = 22
+    cells = []
+    for cr in crops:
+        img = cv2.imread(str(rec / cr["image"]))
+        if img is None:
+            continue
+        if img.shape[1] > SHEET_CELL_W or img.shape[0] != CROP_H:
+            k = min(SHEET_CELL_W / img.shape[1], CROP_H / img.shape[0])
+            img = cv2.resize(img, (max(1, round(img.shape[1] * k)), max(1, round(img.shape[0] * k))),
+                             interpolation=cv2.INTER_AREA)
+        cell = np.full((CROP_H + label_h, SHEET_CELL_W, 3), 255, np.uint8)
+        x0 = (SHEET_CELL_W - img.shape[1]) // 2
+        cell[:img.shape[0], x0:x0 + img.shape[1]] = img
+        cv2.putText(cell, cr["id"], (4, CROP_H + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
+        cells.append(cell)
+    if not cells:
+        return {}
+    cells += [np.full_like(cells[0], 255)] * (-len(cells) % SHEET_COLS)
+    rows = [np.hstack(cells[i:i + SHEET_COLS]) for i in range(0, len(cells), SHEET_COLS)]
+    path = crop_dir / f"sheet_c{c}.jpg"
+    cv2.imwrite(str(path), np.vstack(rows), [cv2.IMWRITE_JPEG_QUALITY, 90])
+    return {"sheet": str(path.relative_to(rec))}
+
+
+def load_questions(job: Job) -> dict:
+    try:
+        return json.loads((job.dir / "questions.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        raise Failed("not_prepared", "no questions yet: run prepare first", exit_code=EXIT_BAD_INPUT)
+
+
+def next_step(job: Job, st: dict | None) -> str:
+    """What to do next, for status and the briefs."""
+    job_arg = "<job>"
+    if (job.rec / "fullgame" / "game.mp4").exists() and (job.rec / "fullgame" / "done.json").exists():
+        return "done: the game video is written"
+    if not (job.dir / "questions.json").exists():
+        return f"osb-engine prepare {job_arg}"
+    pending = pending_questions(st)
+    if pending:
+        return (f"osb-engine questions {job_arg}, then osb-engine answer {job_arg} {pending[0]} ..., then "
+                f"osb-engine prepare {job_arg} --answers {job.dir / 'answers.json'}")
+    return f"osb-engine run {job_arg} (hours: run it in the background and read its progress lines)"
+
+
+def questions_brief(job: Job) -> int:
+    """`questions`: what is waiting for an answer, as one JSON document on
+    stdout made to be read: the words, the pictures (absolute paths) and the
+    numbers an answer needs, without the polylines the app draws from."""
+    q = load_questions(job)
+    rec = job.rec
+    full = lambda p: str(rec / p) if p else None  # noqa: E731
+    out = {"recording": str(rec), "pending": q["pending"], "questions": []}
+    for name in q["pending"]:
+        d = q[name]
+        b = {"question": name, "round": d["round"], "ask": d.get("ask"), "howToAnswer": d.get("howToAnswer")}
+        if d.get("problem"):
+            b["problem"] = d["problem"]
+        if name == "cameras":
+            b["panoramas"] = {k: full(v) for k, v in d["panoramas"].items()}
+            if d.get("reason"):
+                b["reason"] = d["reason"]
+        elif name == "pitch":
+            b.update(overlay=full(d["overlay"]), background=full(d["background"]), fit=d["fit"],
+                     approveAllowed=d.get("approveAllowed", True), panorama=d.get("panorama"))
+            if d.get("lineColour"):
+                b["lineColour"] = d["lineColour"]
+            b["points"] = {n: {"yaw": p["yaw"], "pitch": p["pitch"],
+                               **({"closeup": {**p["closeup"], "image": full(p["closeup"]["image"])}}
+                                  if p.get("closeup") else {"closeup": None})}
+                           for n, p in d["points"].items()}
+        else:
+            b.update(k=d["k"], splitAllowed=d["splitAllowed"])
+            b["groups"] = [{"group": g["component"], "people": g["people"], "perMoment": g["perMoment"],
+                            "proposed": g["proposed"], "sheet": full(g.get("sheet")),
+                            "crops": [c["id"] for c in g["crops"]]} for g in d["groups"]]
+        out["questions"].append(b)
+    out["next"] = next_step(job, job.state() if job.state_path.exists() else None)
+    print(json.dumps(out, indent=1), flush=True)
+    return EXIT_OK
+
+
+def _pairs(values: list[str], flag: str) -> dict[str, tuple[float, float]]:
+    """--closeup / --pano / --point values: 'NAME=A,B'."""
+    out = {}
+    for v in values:
+        name, _, rest = v.rpartition("=")
+        try:
+            a, b = (float(x) for x in rest.split(","))
+        except ValueError:
+            raise Failed("bad_answers", f"{flag} takes 'NAME=A,B', not {v!r}", exit_code=EXIT_BAD_INPUT)
+        if not name:
+            raise Failed("bad_answers", f"{flag} takes 'NAME=A,B', not {v!r}", exit_code=EXIT_BAD_INPUT)
+        out[name.strip()] = (a, b)
+    return out
+
+
+def _ints(values: list[str] | str | None, flag: str) -> list[int]:
+    vals = [values] if isinstance(values, str) else (values or [])
+    try:
+        return [int(x) for v in vals for x in v.split(",") if x.strip()]
+    except ValueError:
+        raise Failed("bad_answers", f"{flag} takes group numbers separated by commas", exit_code=EXIT_BAD_INPUT)
+
+
+def build_answer(q: dict, question: str, a) -> dict:
+    """One question's answer (engine-answers.schema.json) from `answer`'s
+    flags, checked against what was asked."""
+    def bad(message: str):
+        return Failed("bad_answers", message, exit_code=EXIT_BAD_INPUT)
+
+    if question not in QUESTIONS:
+        raise bad(f"answer takes one of {', '.join(QUESTIONS)}, not {question!r}")
+    if question not in q["pending"]:
+        raise bad(f"{question} isn't waiting for an answer (pending: {', '.join(q['pending']) or 'nothing'})")
+    d = q[question]
+    ans: dict = {"round": d["round"]}
+    if question == "cameras":
+        if a.left not in ("main", "secondary"):
+            raise bad("cameras needs --left main or --left secondary")
+        ans["leftPhone"] = a.left
+        return ans
+    ans["share"] = bool(a.share)
+    if question == "pitch":
+        at, pano_px, deg = _pairs(a.closeup, "--closeup"), _pairs(a.pano, "--pano"), _pairs(a.point, "--point")
+        named = [*at, *pano_px, *deg, *a.keep, *a.skip]
+        if a.approve:
+            if named:
+                raise bad("--approve stands alone: approve the pitch as drawn, or give points to refit it")
+            if d.get("approveAllowed") is False:
+                raise bad("the pitch can't be approved yet: mark its points first (approveAllowed is false)")
+            ans["approve"] = True
+            return ans
+        if not named:
+            raise bad("pitch needs --approve, or points (--closeup, --pano, --point, --keep, --skip)")
+        twice = sorted({n for n in named if named.count(n) > 1})
+        unknown = sorted(set(named) - set(d["points"]))
+        if twice:
+            raise bad(f"given more than once: {', '.join(twice)}")
+        if unknown:
+            raise bad(f"no such point: {', '.join(unknown)} (the points are: {', '.join(d['points'])})")
+        points = {}
+        for n, (x, y) in at.items():
+            c = d["points"][n].get("closeup")
+            if not c:
+                raise bad(f"{n} has no close-up (the fit puts it off the panorama): use --pano or --point")
+            if not (0 <= x < c["width"] and 0 <= y < c["height"]):
+                raise bad(f"{n}: {x:g},{y:g} is outside its close-up ({c['width']} x {c['height']})")
+            points[n] = {"yaw": round(c["yaw0"] + x * c["degPerPx"], 3), "pitch": round(c["pitch0"] + y * c["degPerPx"], 3)}
+        if pano_px:
+            p = d.get("panorama")
+            if not p:
+                raise bad("this question has no panorama mapping: use --closeup or --point")
+            for n, (x, y) in pano_px.items():
+                points[n] = {"yaw": round(p["yawRange"][0] + x * p["degPerPx"], 3),
+                             "pitch": round(p["pitchRange"][0] + y * p["degPerPx"], 3)}
+        for n, (yaw, pitch) in deg.items():
+            points[n] = {"yaw": yaw, "pitch": pitch}
+        for n in a.keep:
+            points[n] = {"fromFit": True}
+        for n in a.skip:
+            points[n] = {"skipped": True}
+        ans["points"] = points
+        return ans
+    groups = {g["component"] for g in d["groups"]}
+    crop_group = {c["id"]: g["component"] for g in d["groups"] for c in g["crops"]}
+    merges = [_ints(m, "--merge") for m in a.merge]
+    keeper, not_kit = _ints(a.keeper, "--keeper"), _ints(a.not_kit, "--not-kit")
+    tapped = [t.strip() for v in a.tapped for t in v.split(",") if t.strip()]
+    used = [*(c for m in merges for c in m), *keeper, *not_kit, *([a.split] if a.split is not None else [])]
+    if a.ok and (used or tapped):
+        raise bad("--ok stands alone: it says the groups are right as they are")
+    if not (a.ok or used or tapped):
+        raise bad("kits needs --ok, or --merge, --split, --keeper, --not-kit, --tapped")
+    unknown = sorted(set(used) - groups)
+    if unknown:
+        raise bad(f"no such group: {', '.join(map(str, unknown))} (the groups are {min(groups)}-{max(groups)})")
+    if a.split is not None and not d["splitAllowed"]:
+        raise bad("a split was already used on this game: merge and mark the groups as they are")
+    if any(len(m) < 2 for m in merges):
+        raise bad("--merge takes two or more groups, e.g. --merge 0,7")
+    no_crop = sorted(set(tapped) - set(crop_group))
+    if no_crop:
+        raise bad(f"no such crop: {', '.join(no_crop)}")
+    if tapped:
+        by: dict[str, list[str]] = {}
+        for t in dict.fromkeys(tapped):
+            by.setdefault(str(crop_group[t]), []).append(t)
+        ans["tapped"] = by
+    if merges:
+        ans["merge"] = merges
+    if a.split is not None:
+        ans["split"] = a.split
+    if a.keeper is not None:
+        ans["keeperOrReferee"] = sorted(set(keeper))
+    if not_kit:
+        ans["notKit"] = sorted(set(not_kit))
+    return ans
+
+
+def answer(job: Job, question: str | None, a) -> int:
+    """`answer`: writes one question's answer into <recording>/engine/answers.json
+    (keeping the other questions' answers there) and says what to run next.
+    It changes nothing else: prepare --answers applies it."""
+    q = load_questions(job)
+    ans = build_answer(q, question or "", a)
+    path = job.dir / "answers.json"
+    try:
+        answers = json.loads(path.read_text()) if path.exists() else {}
+    except json.JSONDecodeError:
+        answers = {}
+    answers[question] = ans
+    validate(answers, "engine-answers.schema.json", "answers")
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(answers, indent=1))
+    tmp.replace(path)
+    print(json.dumps({"written": str(path), "question": question, "answer": ans,
+                      "next": f"osb-engine prepare <job> --answers {path}"}, indent=1), flush=True)
+    return EXIT_OK
 
 
 # --------------------------------------------------------------------- run
@@ -1139,25 +1506,45 @@ def status(job: Job) -> int:
     pieces = sorted(p.name for p in (out / "pieces").glob("piece_*.mp4")) if (out / "pieces").exists() else []
     emit("status", prepared=(job.dir / "questions.json").exists(),
          pending=pending_questions(st),
-         pieces=len(pieces), output=str(out / "game.mp4") if (out / "game.mp4").exists() else None)
+         pieces=len(pieces), output=str(out / "game.mp4") if (out / "game.mp4").exists() else None,
+         next=next_step(job, st))
     return EXIT_OK
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("command", choices=("prepare", "run", "status", "label", "share"))
+    ap.add_argument("command", choices=("prepare", "run", "status", "questions", "answer", "label", "share"))
     ap.add_argument("job", type=Path)
-    ap.add_argument("what", nargs="?", help="label: ball or moments")
+    ap.add_argument("what", nargs="?", help="label: ball or moments; answer: cameras, pitch or kits")
     ap.add_argument("--answers", type=Path)
     ap.add_argument("--count", type=int, default=BALL_SET_COUNT, help="label ball: frames in the set")
     ap.add_argument("--at", default="", help="label moments: seconds into game.mp4 where the user pressed Missed play")
     ap.add_argument("--random", type=int, default=3, help="label moments: random moments added")
     ap.add_argument("--kinds", default="pitch,kits,ball,moments", help="share: which results")
+    g = ap.add_argument_group("answer (see the question's howToAnswer)")
+    g.add_argument("--left", choices=("main", "secondary"), help="cameras: the phone on the left")
+    g.add_argument("--approve", action="store_true", help="pitch: the lines sit on the paint")
+    g.add_argument("--closeup", action="append", default=[], metavar="NAME=X,Y", help="pitch: a keypoint, in its close-up's pixels")
+    g.add_argument("--pano", action="append", default=[], metavar="NAME=X,Y", help="pitch: a keypoint, in the background's pixels")
+    g.add_argument("--point", action="append", default=[], metavar="NAME=YAW,PITCH", help="pitch: a keypoint, in panorama degrees")
+    g.add_argument("--keep", action="append", default=[], metavar="NAME", help="pitch: the fit has this keypoint right")
+    g.add_argument("--skip", action="append", default=[], metavar="NAME", help="pitch: this keypoint can't be seen")
+    g.add_argument("--ok", action="store_true", help="kits: every kit has exactly one group")
+    g.add_argument("--merge", action="append", default=[], metavar="A,B", help="kits: groups that are the same kit")
+    g.add_argument("--split", type=int, metavar="GROUP", help="kits: a group that holds two kits")
+    g.add_argument("--keeper", metavar="A,B", help="kits: groups that are keepers or the referee")
+    g.add_argument("--not-kit", dest="not_kit", metavar="A,B", help="kits: groups that aren't a kit")
+    g.add_argument("--tapped", action="append", default=[], metavar="ID,ID", help="kits: people in the wrong group")
+    g.add_argument("--share", action="store_true", help="pitch, kits: the user agreed to share this result")
     a = ap.parse_args()
     signal.signal(signal.SIGINT, _on_signal)
     signal.signal(signal.SIGTERM, _on_signal)
     try:
         job = Job(a.job)
+        if a.command == "questions":
+            return questions_brief(job)
+        if a.command == "answer":
+            return answer(job, a.what, a)
         answers = None
         if a.answers:
             try:
