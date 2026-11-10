@@ -30,7 +30,9 @@ the ball: a frame's "dtS" in items.json (its offset from the nominal
 clipT; the two phones of one moment differ, so the offset of the phone
 whose image was labelled is used). OSB_NOMINAL=1 ignores the offsets, as
 runs before 2026-10-18 did. OSB_BALL_TAG picks the candidate file ("" is
-ballclip.py's full scan, "win" ballwin.py's windows).
+ballclip.py's full scan, "win" ballwin.py's windows). OSB_NOJUDGE=1 drops
+the judge's scores (the detector alone); "ballpath.SIZE_W=3" adds the size
+check (ballpath.size_ratios).
 """
 
 from __future__ import annotations
@@ -72,6 +74,10 @@ def setup(rec: Path, name: str):
     cands_path = cands_file(rec, seg0, start, os.environ.get("OSB_BALL_TAG", ""))
     print(f"candidates: {cands_path.name}")
     data = json.loads(cands_path.read_text())
+    if os.environ.get("OSB_NOJUDGE"):  # the detector alone: every judge score dropped
+        for f in data["frames"]:
+            for d in f["detections"]:
+                d.pop("judge", None)
     manifest = json.loads((rec / "manifest.json").read_text())
     report = json.loads((rec / "phase0" / "report.json").read_text())
     devs = phase0.paired_devices(manifest, report)
@@ -80,6 +86,8 @@ def setup(rec: Path, name: str):
     cams = {"main": cm.at(3840), "secondary": cs.at(3840)}
     pose = P.load_pose(rec)
     cam_xz = np.array([pose.cx, pose.cz])
+    import ballpath
+    ballpath.size_ratios(rec, data["frames"])  # used only when ballpath.SIZE_W > 0
 
     def on_pitch(role, x, y):
         d = cams[role].unproject(np.array([[x, y]], float))[0]

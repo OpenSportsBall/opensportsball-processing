@@ -14,6 +14,11 @@ history of what was tried and the main repo's `docs/TESTING-APPS.md` for the pho
 - **Score against reviewed labels, not by eye.** Each algorithm change is run
   through the harness below before a render. Watching renders is for judging
   what to label next, not for deciding between variants.
+- **Every ball labelling holds some back.** Whenever balls are labelled,
+  part of the new labels is set aside as a test set before any model
+  is trained on them, and no detector, judge or heatmap model trains on
+  that part afterwards. Without it the only test of a model is the
+  game it learnt from (see "Held-out ball labels" in section 3).
 - **Small sets are noisy.** 13 play moments and 90 ball moments: a difference
   of one or two is noise. Treat them as a direction, and add moments before
   tuning further.
@@ -317,6 +322,65 @@ from other motion (keeper bearings, motion blobs, net ripple, facing
 direction: `witness.py`, `flowcands.py`, `facing.py`) were scored the same
 way and none raises the found-rate; the backlog has their numbers.
 
+### Held-out ball labels
+
+Every time balls are labelled, on any recording and with any tool
+(`labelset.py` random or clip sets, the engine's `label ball`), part of
+the new labels is held back for testing:
+
+- **Decide before training, and mark it.** Choose the held-out part
+  when the set is made or labelled and mark it with `holdout.py` (below)
+  before anything trains on the set; note it in the Label sets column
+  of `docs/DATA.md`. Never pick it after seeing results.
+- **Hold out time, not frames.** Frames a second or two apart show the
+  same ball, players and light, so a held-out frame next to a trained
+  one isn't independent. Hold out whole clips or whole segments: for a
+  clip set, label a second clip as the test (rec3's `seg9`), or at
+  least the last third of a single clip; for a random set, the moments
+  in one or two whole segments. The engine's `label ball` sets hold out
+  the last quarter of every chunk by themselves.
+- **About a quarter, and at least ~30 ball moments.** Fewer than that,
+  and a gain or loss of a few is noise (see "Small sets are noisy").
+- **Train without it (enforced).** Pass a held-out clip as the test set
+  (`balljudge.py data <rec> <train sets> <test sets>`, `heattrain.py
+  train --hold <set>`). The valid split that `balldata.py` and
+  `balljudge.py` make by hashing each moment chooses the epochs, so it
+  doesn't count as held out.
+- **Report on it.** A new detector or judge is scored on every game's
+  held-out labels, not only on the game it was trained for (rec7's
+  judge_v4 improved rec7 and lost 5 balls on rec3's held-out `seg9`).
+
+How the code enforces it (`processing/spikes/holdout.py`):
+
+| Step | Command |
+|---|---|
+| Make a test clip | `labelset.py <rec> clip <name> <segment> <start s> <seconds> [step s] --heldout` |
+| Mark a set (or whole segments of one) held out | `holdout.py <rec> mark <set>` / `holdout.py <rec> mark <set> segments 9,15` |
+| See what a recording holds out | `holdout.py <rec>` |
+
+A mark is a `heldout.json` in the set's folder (`{"all": true}`,
+`{"segments": [...]}` or, from the engine, `{"gameS": [[from, to]]}`).
+The held-out time belongs to the recording: a labelled frame from any
+set inside it, or within 20 s of a held-out set's frames, is test data.
+`balljudge.py data`, `balldata.py` and `heattrain.py train` leave those
+frames out and refuse a held-out set named as training data;
+`balljudge.py data` and `balldata.py` stamp their output with the
+held-out time they applied, and `balljudge.py merge` / `train`,
+`ballmerge.py` and `balltrain.py` refuse data with no stamp or a stale
+one (a set marked after it was built), so data built before 2026-11-09
+must be rebuilt before training. Marks are only ever added; removing one
+means deleting the file by hand, and only if nothing was scored on it.
+
+An outside test set: SoccerTrack's wide view (`docs/DATA.md`, External
+datasets), never trained on. `uv run processing/spikes/stbench.py 2.0 999
+--expect-row` scores the detector and judges on it frame by frame (~20 min).
+
+Held out so far: only rec3's `seg9` (marked 2026-11-09 in `rec3` and
+`bench/rec3`; 9 moments of rec3's random set fall inside it and now stay
+out of training). rec3's `seg3`, rec5's and rec6's
+random sets and rec7's `seg6` are all in training, so the ball models
+have no independent test on those games yet.
+
 ## 4. Where things are
 
 The whole `footage/` layout, its S3 backup and how to restore it are in
@@ -409,3 +473,70 @@ the store, and download any segment `benchstore.py` reports missing from
 the recording's S3 prefix with the manifest's object key. Video is kept as
 whole, untouched segments so detector runs reproduce exactly; trimming them
 to the bench stretches would save only ~15%.
+
+## 7. The engine commands
+
+`processing/spikes/engine.py` is how the Mac app (and later the cloud
+job) runs a game: a job file in, questions out, answers in, progress as
+JSON lines, `game.mp4` out. Its docstring has the commands and exit codes;
+the file formats are `schemas/engine-*.schema.json`.
+
+| Step | Command |
+|---|---|
+| Unit tests (answers to sides, kit score, the schemas, the no-stitch path with stand-in steps, footage hashes, the disk check and cleanup; no footage) | `uv run --with pytest --with numpy --with opencv-python-headless --with jsonschema pytest processing/tests/test_engine.py` |
+| Sync, pitch fit, kit groups, then the questions | `uv run processing/spikes/engine.py prepare job.json` |
+| Apply answers (asks again after a pitch correction or a split) | `uv run processing/spikes/engine.py prepare job.json --answers answers.json` |
+| The whole game | `uv run processing/spikes/engine.py run job.json --answers answers.json` |
+| What's done and pending | `uv run processing/spikes/engine.py status job.json` |
+| A ball label set from the finished game (50 frames of Main, half detected, half bridged) | `uv run processing/spikes/engine.py label job.json ball [--count 50]` |
+| A must-see set: panoramas where the user pressed Missed play, plus random moments | `uv run processing/spikes/engine.py label job.json moments --at <s,s,...> [--random 3]` |
+| Store labels (also as `labels.json` / `boxes.json` for the benches) | `uv run processing/spikes/engine.py label job.json --answers labels.json` |
+| List what the user agreed to share | `uv run processing/spikes/engine.py share job.json` |
+
+A job is `{"schemaVersion": 1, "recording": "<folder>", "output": {"height": 1440}}`;
+`"options": {"maxChunks": 1}` renders only the first chunk, for a quick
+check. The questions are in `<recording>/engine/questions.json` with the
+crops and overlay images beside them; answers carry the question's
+`round`, and an answer to an earlier round is ignored.
+
+When the phones can't be stitched (rec5), prepare asks only `cameras`
+first: the panorama drawn through rough cameras with each phone on the
+left (`engine/cameras/main_left.jpg`, `secondary_left.jpg`) and which shows
+the pitch in one piece (`{"cameras": {"round": 1, "leftPhone":
+"secondary"}}`). Two stills side by side don't settle it: the phones'
+views cross, so on rec5 Main's inner edge looked like it joined
+Secondary's when it doesn't; the wrong panorama shows two broken halves. It then builds
+rough cameras (`jointfit.py rough`: gravity sensors, lens table, 80 deg
+apart) and asks the pitch and kits as usual, except that the pitch has
+`approveAllowed: false`: approving is refused (with a `problem`) until
+tapped points have fitted the cameras and pitch together
+(`jointfit.py taps`, `search` over starting angles 74-89 deg and three
+camera heights, ~2 min; `install`, which redraws the panorama). The next
+round can be approved or corrected again (`jointfit.py fit` from the
+fitted cameras). To try the no-stitch path on a game that stitches,
+delete `phase0/cameras.json` and make `pitch.py`'s stitch fail, or give
+the copy rec5's footage.
+
+Label sets are in `<recording>/engine/labels/<set>/` and hold the files
+the existing tools read too: a ball set is a labelset.py set
+(`items.json`, `images/`), so `label/server.py` can label it; a moments
+set is a playeval.py set (`items.json`, `pano/`, `pano.json`). `share`
+writes one `engine/share/<name>.json` per result: the files to upload,
+with sizes and SHA-256, and the result in numbers (pitch: approved first
+time or after how many corrections; kits: purity per round; label sets:
+answers by kind). It sends nothing.
+
+To test it end to end without disturbing a recording's earlier results,
+make a fresh copy: a folder with the recording's `manifest.json` and
+symlinks to its device folders. Everything the engine makes goes into the
+copy. Check also: a stop (SIGTERM to engine.py) exits 130 and leaves no
+`ballwin.py` / `roles.py` / `follow.py` running, and the same command then
+resumes; a bad job, missing footage or bad answers exit 2; `run` with
+questions pending exits 3. Both prepare and run hash every segment
+against the manifest's SHA-256 the first time (a changed byte exits 2,
+`footage_corrupt`); `run` refuses to start without room for what it
+still writes (`not_enough_disk`: ~49 GB for 100 minutes at 1440p) and,
+once `game.mp4` is checked, deletes the pieces, `video.mp4` and
+`audio.m4a` unless the job has `"options": {"keepIntermediates": true}`.
+A copy made for a test with fewer segments needs a manifest listing only
+those.

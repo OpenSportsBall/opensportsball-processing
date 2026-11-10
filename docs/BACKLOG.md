@@ -680,9 +680,16 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
       labelled clip, so not independent): aim at the ball 1% -> 64%, play
       boxes 0/5 -> 4/5 (unverified; the miss, 3:21, is a lost track).
       Re-rendered with OSB_JUDGE=judge_v4 from piece 2: aim 40, 28, 43,
-      48, 63, 46, 61% on pieces 3-9. judge_v4 is not benched on rec3,
-      rec4cal or rec6 and is not the standard; each new ball colour has
-      so far needed its own labels.
+      48, 63, 46, 61% on pieces 3-9. Benched against judge_v3 on the
+      same saved candidates (2026-11-09): rec3
+      play bench even (A+ball 17/26 both; A+ball+hold+nowalk 20 -> 21,
+      but play 3 drops 90% -> 0-33% in every ball variant); rec3
+      balleval seg3 found 42 -> 41/53, seg9 21 -> 16/37 with wrong
+      1 -> 4; rec4cal play bench the same (best 11/15 both); ball path
+      share rec5 39 -> 40%, rec6 52 -> 45%; rec7 engine chunks
+      1200 / 3000 / 4800: 1 / 0 / 0% -> 47 / 17 / 40%. So it fixes the
+      yellow ball but costs on rec3 seg9 and rec6: not the standard yet.
+      Each new ball colour has so far needed its own labels.
       Offline path tracker (2026-10-19, `ballpath.py`; the default
       in balleval.py and follow.py, OSB_BALL_CHAIN=1 for the chain): the clip is on disk
       before tracking runs, so instead of ball.py's greedy online chain
@@ -1371,6 +1378,31 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         keeps per-frame data, so check its peak on a full 10-minute chunk.
 - [ ] Follow cam speed, further ideas (a full game is ~2.5 h locally
       today, half in each pass):
+      - Profile (2026-11-08, rec7 0 2084.88 600, follow.py alone on the
+        M2 Pro, GPU-synchronised timers patched in from outside, no source
+        changes): 18.4 min for the 10-minute chunk, against ~25 min in
+        fullgame.py next to the ball stage (pass B 28.3 ms a frame alone,
+        44.6 ms there). Pass A 524 s: warp+blend 300 s (16.1 ms, of it
+        the uploads 2.2), seam 134 s and background 60 s on the CPU,
+        blobs 31 s. Path 44 s. Pass B 531 s, per frame:
+
+        | Step | ms | share |
+        |---|---|---|
+        | Blend: weights 2.2, two-band lowpass 3.9, blend 3.5 | 9.6 | 34% |
+        | Grids: project, upsample to full size (3 channels, fp32), normalise; both phones | 8.5 | 30% |
+        | Upload two 4K NV12 frames | 4.0 | 14% |
+        | Geometry (directions, seam offset) | 2.0 | 7% |
+        | `grid_sample`, both phones, Y and UV | 1.5 | 5% |
+        | Gain 1.3, pack 0.7, copy to CPU 0.6, encoder pipe 1.2 | 3.8 | 13% |
+
+        The sampling itself is cheap; the time is many full-frame (1080p)
+        elementwise steps, each a pass over GPU memory. First tries, in
+        PyTorch: upsample the coarse grid in fp16 with two channels and
+        the validity mask at coarse size; the lowpass from a smaller
+        image; fewer intermediate tensors in the blend. Then one fused
+        kernel per pixel (Metal on the Mac, the PyTorch path kept for
+        CUDA), with the decoder's frames used in place (IOSurface) rather
+        than copied up.
       - Pass A (detection, seam) at 10 fps, reusing results for the frames
         between: about a third of its cost. Check that the seam's player
         margin still covers fast play near the overlap.
@@ -1398,7 +1430,110 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
 
 ## Phase 3: processing pipeline
 
-- [ ] Verify each segment's SHA-256 against the manifest on download.
+- [x] Engine commands for the Mac app and the cloud job (`engine.py`,
+      main repo `docs/MAC-APP-PLAN.md` step A), 2026-11-09: `prepare`,
+      answers as files, `run`, `status`; platform choices in `accel.py`.
+      rec7 from a fresh copy, with a stop and resume, to `game.mp4` with
+      no hand edits (FINDINGS section 7).
+- [x] Engine side of the checks and contributions (step B), 2026-11-09:
+      `label ball` / `label moments` sets from a finished game, label
+      answers stored as `labels.json` / `boxes.json`, `share` lists per
+      result. On rec7: 50 ball frames across all 10 chunks, a moments set
+      with the camera's view at each moment, four share lists (pitch
+      10 MB, kits 417 crops 1.6 MB, ball 8.6 MB, moments 2.9 MB).
+- [ ] The standard judge doesn't know rec7's yellow ball: run from a
+      fresh copy with the standard models, the camera aimed at the ball
+      31% of chunk 0 and 0-2% of every other chunk (`ballAimShare`
+      0.035); rec7's own judge_v4 gave 28-64%. The detector still finds
+      the ball (6 of 8 sampled no-judge suggestions are on it); the
+      judge rejects it. Bench judge_v4 (rec3 + rec5 + rec7) as the
+      standard on rec3, rec4cal and rec6, and have the app offer ball
+      labels when `ballAimShare` is low. `label ball` now fills a set
+      from the detector's candidates without the judge when the ball
+      path is thin (`judged: false` in the set).
+- [ ] Pitch check: the keypoints the user can mark are all on the far
+      side and the ends (corners, boxes, halfway far end, circle, post
+      bases), so a wrong near touchline can't be corrected. On rec4,
+      after the taps the far side sat on the paint but the near
+      touchline was ~1.7 deg off under the camera (the field drops away;
+      no flat fit holds both). Add near-side points (the halfway line's
+      near end, the near corners) and the curvature term.
+- [ ] Engine on rec4 and rec5 (step B's "done when"), 2026-11-09, fresh
+      copies, first chunk rendered:
+      - rec4: prepare 13.6 min. Pitch: lines-only fit wrong (near
+        touchline far off); one tap round fixed the far side (104.1 x
+        60.8 m, camera 3.27 m) but not the near touchline (below). The
+        fixture's taps were made under the old calibration and sat ~2
+        deg off the new panorama (a tilt); moved by matching each tap's
+        patch (scores 0.83-0.99). Kits: k=8 put white with red and white
+        with yellow, and proposed red against red (purity 0.837); after
+        split, 10 groups, merged to white (6) against red (2), the
+        yellow referee and a mixed group marked (0.969). Run: 47 min for
+        the chunk, ball stage 9.2 min, aim at the ball 60%. Untouched.
+      - rec5 (Pixel + iPhone): stops at the pitch step,
+        `calibration_failed` (the stitcher can't match the phones: 0/8
+        pairs, as when rec5 was first processed; its cameras were set by
+        hand). The engine now names this failure instead of "pitch
+        failed (exit 1)". With rec5-game's hand-made `cameras.json`
+        copied in (the one hand edit), the rest ran: lines-only fit 105.1
+        x 64.3 m; with rec5-game's 11 taps 104.4 x 65.4 m, goals at the
+        boxes' centres. rec5-game's saved tap fit is 88.3 x 59.3 m from
+        the same taps: not explained. Kits: the soft iPhone half blurs
+        the crops; split then merge to blue against white, purity 0.772
+        then 0.645. A per-phone-model lens table (FINDINGS section 1) is
+        what would let rec5 through untouched.
+        The joint fit (`jointfit.py`, PR #21) doesn't replace the stitch:
+        it starts from phase0/cameras.json. Tested 2026-11-09 from rough
+        cameras with no stitcher instead (each phone's tilt and roll from
+        the manifest's gravity sensor, focal from `lenses.json`, the two
+        phones N deg apart, Main left or right), rec5-game's 11 taps
+        (pitch/taps_src.json) and START_POSE at 1.9 / 3 / 8 m, ~10 s a
+        fit: from 80-84 deg, Main right, taps 1.0-3.5 px median, 17-30 px
+        worst, fitted 80-83.5 deg apart (the hand cameras: 81.0); the fit
+        from the hand cameras gives 2.9 / 45.2. The fit keeps the start's
+        angle (70 stays 70, worst tap 77-85 px; 90 stays 90, 60-91 px)
+        and the wrong side diverges, so a grid over side and angle,
+        keeping the lowest tap error, finds both. Pitch from the good
+        starts 96-103 x 62-64 m against the hand start's 88.7 x 59.4:
+        rec5's yellow paint isn't found in the phones' backgrounds (paint
+        median 40 px, the truncation, in every fit, the hand start's
+        too), so the fit is the taps' alone and rec5's size stays
+        unsettled. Fallback for the engine: when the stitch fails, rough
+        cameras (side from the seam's continuity, or ask) for the
+        panorama the user taps on, taps required, then the joint fit over
+        a grid of angles. Built 2026-11-09 (on top of PR #21): engine
+        prepare asks which phone is on the left (the panorama both ways), `jointfit.py
+        rough / search / install`, the pitch question's approveAllowed;
+        on rec5's taps the search picks 80 deg, fitted 80.8 (hand 81.0),
+        taps 2.7 / 19.8 px, in 2 min. End to end on a 4-segment copy of
+        rec5 (segments 2-5, untouched): prepare 26 s to the cameras
+        question; with "secondary on the left" the rough lines fit 108.9
+        x 67.4 m and kits as usual (8.5 min); with rec5's 11 taps (placed
+        where they fall on the rough panorama) the search took 88 s and
+        picked 80 deg, fitted 80.6, taps 3.2 / 17.5 px, pitch 100.6 x
+        64.2 m, 2.67 m up, the lines on the yellow paint; round 2
+        approved. The question shows the panorama drawn both ways, not
+        two stills: rec5's views cross, so side by side Main's inner edge
+        looked like it joined Secondary's (it doesn't), while the wrong
+        panorama shows two broken halves. Not yet run through `run`.
+- [ ] The render waits on the ball stage about half of a game (44 vs 24
+      min per chunk; roles is 15 of the 44). Run roles in a third worker,
+      or alongside the ball stage, so a game takes ~6 h, not 8.5. Check
+      the peak memory with all three overlapped (8.4 GB with two).
+- [x] Disk: a game needs ~46 GB of output besides its footage at the end
+      (rec7: pieces 11 GB, `video.mp4` 12 GB, `game.mp4` 23 GB at 1440p).
+      Done 2026-11-09 (engine.py): `run` checks the free space it still
+      needs first (remaining pieces + video.mp4 + game.mp4 at 16 / 33
+      Mbit/s, ~49 GB for 100 min; `not_enough_disk`), and once game.mp4
+      is as long as the chunks it deletes the pieces, video.mp4 and
+      audio.m4a (job option keepIntermediates) and writes
+      fullgame/done.json so a rerun doesn't render again.
+- [x] Verify each segment's SHA-256 against the manifest on download.
+      Done 2026-11-09 in the engine (prepare and run; `footage_corrupt`,
+      exit 2), each file once (engine/verified.json, by size and
+      modification time): 20 GB of rec3 in 6.4 s, the check again 0.3 s.
+      The app's download (step E) should check too, to fetch a bad file
+      again at once.
 - [ ] Android footage: expect ~150 ms missing at every segment switch and
       start times that drift by that much per switch (see the gap-free
       recorder item in the main repo's backlog). Re-sync each segment to the other phone by audio
@@ -1410,3 +1545,123 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
 
 - [ ] Ball detection: fine-tune on youth-game footage; Kalman tracking;
       blended camera target.
+- [ ] Investigate Roboflow Universe datasets for the ball detector
+      (2026-11-09; https://universe.roboflow.com, search "soccer ball",
+      "football", "ball"). Community datasets with ball boxes, mostly from
+      TV broadcasts, some from fixed or amateur cameras (e.g.
+      quince-imaging/soccerballdetector). Licence per dataset (often
+      CC BY 4.0, some non-commercial or unstated) and label quality vary.
+      Caution: FUT-HEROS found a broadcast-only fine-tune worse than the
+      stock model on amateur footage (1/8 goals against 3/8).
+      To find out:
+      - Which sets are wide, fixed, full-pitch or amateur views like ours
+        (ball a few to ~20 px), rather than broadcast close-ups; how many
+        ball boxes each has; and whether the licence allows training a
+        model we ship (CC BY / CC0 / Apache yes, NC no).
+      - Label quality on a sample: missed balls, spare balls, boxes on
+        boots or heads.
+      - Uses, in order of risk: an extra test set (scored like
+        SoccerTrack, never trained on), "not the ball" negatives from
+        broadcast frames, then training data mixed with ours. Score any
+        retrained detector on every held-out set (rec3 seg9, SoccerTrack),
+        with and without the judge.
+      - Record each set used in docs/DATA.md (External datasets) with its
+        licence, version and what it was used for.
+- [ ] Investigate SAM 3 as a teacher that auto-labels balls, to retrain
+      RF-DETR on far more and more varied labels (2026-11-09). The
+      standard detector is trained on 398 distinct ball boxes from three
+      games (rec3 275, rec5 54, rec6 69; footage/models/README.md), few
+      for fine-tuning; it still found the ball in 54% of SoccerTrack's
+      frames, so the backbone carries and labels are the limit. The judge
+      exists mostly to reject ball-sized look-alikes (white boots, line
+      crossings, nets: 9 -> 1 wrong on rec3 seg9); enough labelled
+      negatives could teach the detector that instead, and the judge
+      doesn't carry to new footage (SoccerTrack: 3-4% of real balls kept).
+      Prior art: FUT-HEROS
+      (https://huggingface.co/build-small-hackathon/futheros-ball-rfdetr)
+      tracked the ball with SAM 3 (video, text prompt "ball"), kept frames
+      where an independent RF-DETR detection agreed within 35 px, then
+      added SAM 3-only frames of the fast, blurred ball in flight; goals
+      found on amateur footage 3/8 (stock) -> 7/8 -> 8/8.
+      To find out:
+      - Licence: SAM 3 is under Meta's SAM License (custom; said to allow
+        commercial use with restrictions). Read it before its labels train
+        a shipped model.
+      - Does it hold our ball? Run it on rec3 seg3 and seg9, rec5 (orange)
+        and rec7 (yellow) clips and score its track against the hand
+        labels (balleval-style found / wrong) and on SoccerTrack. Speed
+        and memory on the Mac (~0.86B parameters, unconfirmed), or a cloud
+        GPU.
+      - Label rules: agreement with our detector (and the other phone),
+        a size check against the pitch map, spot-checks on a sample, and
+        what to do with balls in hands, spare balls and balls in flight.
+        Negatives: detector candidates SAM 3 rejects where it holds the
+        ball elsewhere.
+      - Scale: thousands of frames across every game we have (rec2-rec7),
+        all colours and light, and later the engine's games. Never from
+        held-out time (holdout.py) or SoccerTrack.
+      - Retrain RF-DETR on them and compare with today's detector on every
+        held-out set (rec3 seg9, new held-out clips) and SoccerTrack,
+        with and without the judge. Pairs with the learning curve (25 /
+        50 / 100% of today's labels) to see whether label count is still
+        the limit, and with upscaled tiles for balls under 8 px, which
+        labels won't fix.
+- [ ] Investigate SoccerTrack v2 for the follow cam and play analytics
+      (2026-11-09; [paper](https://arxiv.org/abs/2508.01802),
+      [data](https://huggingface.co/datasets/atomscott/soccertrack-v2),
+      [code](https://github.com/AtomScott/SoccerTrack-v2)). 10 full
+      university games (934 min) from fixed panoramic cameras (BePro,
+      4096 x 1504, 25 fps), the closest public match to our product.
+      CC BY 4.0 (data) and MIT (code): commercial use with credit. Per
+      frame: every player's and official's pitch position, ID, jersey,
+      team and role; 21,428 ball events (12 classes: pass, drive, shot,
+      out, throw-in, free kick, goal, ...) with frame and acting player;
+      per-game calibration. No measured ball positions (its ball track is
+      interpolated between events), so no help for the detector or
+      judge. 13.4 GB per game, ~145 GB in all; benchmark split: test
+      128057 + 132831, validation 117093 + 132877. Its MMSports 2025
+      challenge is player tracking only (Deep-EIoU starter, winner
+      GTATrack at HOTA 0.60); no published weights.
+      To find out:
+      - Follow cam: at each ball event, is the acting player's position
+        inside the virtual camera's view? Thousands of scored moments a
+        game, against our 26 + 15 hand-drawn must-see boxes. Needs a
+        single-panorama input to the pipeline (their panorama and
+        calibration in place of our two phones and stitch).
+      - Phases of play: out, throw-in, free kick and goal times as a
+        test set for detecting restarts and stoppages from footage
+        (phones on the mount take no input during a game).
+      - Play analytics: player positions and roles to check `roles.py`,
+        team sides and our centre of play, and as ground truth for any
+        stats we add later (possession, passes, heat maps).
+      - Whether players' and officials' positions and the events could
+        also train anything (licence allows it), and whether a camera
+        this different still predicts how our phones do.
+      Start with one test game (128057, 13.4 GB): keep it held out, never
+      trained on.
+- [ ] The judge doesn't carry to a new camera (2026-11-09, `stbench.py`
+      on SoccerTrack, an outside dataset held out for testing: see
+      FINDINGS): it keeps 3-4% of real balls the detector found and ranks
+      candidates worse than the detector's confidence alone (AP 0.34-0.36
+      vs 0.81). Before more per-colour judges: a judge that generalises
+      (colour and grayscale augmentation, recoloured white balls, blur and
+      scale jitter, fair sampling across games instead of xN copies, or a
+      pretrained backbone), scored on every game's held-out labels and on
+      SoccerTrack; and check whether follow.py does better trusting the
+      detector more where the judge is unsure. Measured since (FINDINGS):
+      on rec3's held-out seg9 the judge cuts wrong picks 9 -> 1 (white
+      boots, feet, line crossings: ball-sized, so a size check doesn't
+      replace it); on rec7's yellow ball judge_v3 finds 0/52 where the
+      detector alone finds 38/52 with 1 wrong. Next: the judge as a soft
+      weight with a floor, so it can't veto a confident detection, and
+      the look-alikes as detector negatives (SAM 3 item below).
+- [ ] Held-out ball labels on every game (rule from 2026-11-09, in
+      `docs/TESTING-PROCESSING.md`): only rec3's `seg9` is held out;
+      rec5, rec6 and rec7 have no independent ball test. Label a held-out
+      clip on each (`labelset.py ... clip ... --heldout`; rec6 first:
+      daylight). Enforced in code since 2026-11-09 (`holdout.py`: the
+      training-data builders leave held-out time out and stamp their
+      output; training refuses unstamped or stale data; the engine's
+      ball sets hold out the last quarter of each chunk). Every crops.npz
+      and balldata/ built before then must be rebuilt before the next
+      retrain.

@@ -1,9 +1,17 @@
 # schemas
 
-`manifest.schema.json` is a **pinned copy** of the upload manifest schema.
-The source of truth is `shared/schemas/manifest.schema.json` in the main
-OpenSportsBall repository (Apache-2.0), which the phone app and the API
-also use. Don't edit the copy here; change it there and re-sync.
+Pinned copies of schemas whose source of truth is `shared/schemas/` in the
+main OpenSportsBall repository (Apache-2.0). Don't edit the copies here;
+change them there and re-sync.
+
+- `manifest.schema.json`: the upload manifest, also used by the phone app
+  and the API.
+- `engine-job.schema.json`, `engine-questions.schema.json`,
+  `engine-answers.schema.json`, `engine-event.schema.json`,
+  `engine-labelset.schema.json`, `engine-label-answers.schema.json`,
+  `engine-contribution.schema.json`: the processing engine's files
+  (`processing/spikes/engine.py`), which the Mac app and the cloud job
+  read and write.
 
 Pinned from main repo commit: `7d113c4`
 

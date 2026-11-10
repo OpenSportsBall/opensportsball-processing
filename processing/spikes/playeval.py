@@ -7,10 +7,10 @@
 # ///
 """Labelled moments for judging play following without watching videos.
 
-    uv run processing/spikes/playeval.py make footage/rec3 <set> <segment> <start s> <clip t> [<clip t> ...]
+    uv run processing/spikes/playeval.py make footage/rec3 <set> <segment> <start s> <clip t> [<clip t> ...] [--out <dir>]
     uv run processing/spikes/playeval.py score footage/rec3 <set> <path.json> [<path.json> ...]
 
-"make" writes <recording>/playeval/<set>/: a stitched panorama of both
+"make" writes <recording>/playeval/<set>/ (or --out): a stitched panorama of both
 phones at each moment (clip times in seconds from `start` in `segment`;
 a clip may run on into the next segments, as in follow.py), and
 items.json. A reviewer then draws, on the page in playeval/ (server.py),
@@ -70,13 +70,13 @@ def grab(rec: Path, devs: dict, report: dict, phone: int, seg: int, t: float, fl
     return cv2.rotate(bgr, cv2.ROTATE_180) if flip else bgr
 
 
-def make(rec: Path, name: str, seg0: int, start: float, times: list[float]) -> None:
+def make(rec: Path, name: str, seg0: int, start: float, times: list[float], out: Path | None = None) -> None:
     manifest = json.loads((rec / "manifest.json").read_text())
     report = json.loads((rec / "phase0" / "report.json").read_text())
     devs = phase0.paired_devices(manifest, report)
     flip = [report["upsideDown"]["main"], report["upsideDown"]["secondary"]]
     cm, cs = follow.setup_cameras(rec, report, devs, flip)
-    out = rec / "playeval" / name
+    out = out or rec / "playeval" / name
     (out / "pano").mkdir(parents=True, exist_ok=True)
 
     W = int((PANO_YAW[1] - PANO_YAW[0]) / PANO_DEG)
@@ -156,8 +156,13 @@ def score(rec: Path, name: str, paths: list[Path]) -> None:
 
 if __name__ == "__main__":
     a = sys.argv
+    out = None
+    if "--out" in a:
+        k = a.index("--out")
+        out = Path(a[k + 1])
+        del a[k:k + 2]
     if len(a) > 6 and a[1] == "make":
-        make(Path(a[2]), a[3], int(a[4]), float(a[5]), [float(x) for x in a[6:]])
+        make(Path(a[2]), a[3], int(a[4]), float(a[5]), [float(x) for x in a[6:]], out)
     elif len(a) > 4 and a[1] == "score":
         score(Path(a[2]), a[3], [Path(x) for x in a[4:]])
     else:

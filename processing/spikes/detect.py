@@ -38,6 +38,7 @@ import torch
 import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).parent))
+import accel  # noqa: E402
 import follow  # noqa: E402
 import phase0  # noqa: E402
 import gpu  # noqa: E402
@@ -118,7 +119,7 @@ def coreml_detector(rf, env: str, make, ckpt: Path | None = None, batches=(1, 8)
     Anything failing falls back to PyTorch with a message: same detections
     either way (BACKLOG.md, 2026-11-08), Core ML ~30% faster per stage."""
     v = os.environ.get(env, "")
-    if v == "0" or (not v and sys.platform != "darwin"):
+    if v == "0" or (not v and not accel.coreml()):
         return rf
     try:
         if v:

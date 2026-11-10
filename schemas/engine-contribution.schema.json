@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opensportsball.dev/schemas/engine-contribution.schema.json",
+  "title": "Engine contribution",
+  "description": "What one shared result is made of, written by `engine.py share` to <recording>/engine/share/<name>.json. The engine only lists the files; the app uploads them with the user's consent (and its wording's version) and may delete the list after. File paths are relative to the recording folder.",
+  "type": "object",
+  "required": ["schemaVersion", "name", "kind", "recording", "engine", "createdAt", "summary", "files"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "name": { "type": "string", "description": "pitch, kits, or a label set's name (ball-1, moments-1)." },
+    "kind": { "enum": ["pitch", "kits", "ball", "moments"] },
+    "recording": {
+      "type": "object",
+      "description": "From the manifest, so the server can tie it to the game.",
+      "properties": { "gameId": { "type": "string" }, "sessionId": { "type": "string" }, "createdAt": { "type": "string" } }
+    },
+    "engine": {
+      "type": "object",
+      "required": ["version"],
+      "properties": { "version": { "type": "string", "description": "The engine's build (a commit), so results can be compared across versions." } }
+    },
+    "createdAt": { "type": "string" },
+    "summary": { "type": "object", "description": "The result in numbers: pitch (approved first time, rounds, fitted size), kits (purity, structure per round), ball and moments (items labelled, by status)." },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "bytes", "sha256"],
+        "properties": { "path": { "type": "string" }, "bytes": { "type": "integer" }, "sha256": { "type": "string" } }
+      }
+    }
+  }
+}

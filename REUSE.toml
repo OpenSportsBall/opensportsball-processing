@@ -9,8 +9,8 @@ path = "**"
 SPDX-FileCopyrightText = "2026 The OpenSportsBall Authors"
 SPDX-License-Identifier = "AGPL-3.0-only"
 
-# Pinned copy of the main repo's data contract, which is Apache-2.0 there.
+# Pinned copies of the main repo's data contracts, which are Apache-2.0 there.
 [[annotations]]
-path = "schemas/manifest.schema.json"
+path = ["schemas/manifest.schema.json", "schemas/engine-*.schema.json"]
 SPDX-FileCopyrightText = "2026 The OpenSportsBall Authors"
 SPDX-License-Identifier = "Apache-2.0"

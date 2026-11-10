@@ -20,13 +20,17 @@ with it, only data:
   recording's uploads are complete.
 - **Output:** a 1080p MP4, a detections file, and optionally a low-resolution
   full-field panorama.
+- **Engine:** `processing/spikes/engine.py` runs one game through files
+  (`prepare`, then `run` once the pitch and kit questions are answered;
+  JSON progress on stdout). The Mac app drives it this way; see
+  [docs/TESTING-PROCESSING.md](docs/TESTING-PROCESSING.md), section 7.
 
 ## Layout
 
 | Path | What |
 |---|---|
 | `processing/` | GPU pipeline: sync, stitch, track, render; Phase 0 spikes, including the labelling tools and model training (`processing/spikes/`) |
-| `schemas/` | Pinned copy of the main repo's manifest schema |
+| `schemas/` | Pinned copies of the main repo's schemas: the upload manifest and the engine's job, questions, answers and progress events |
 | `docs/` | Findings, data layout, how processing is tested, backlog |
 | `footage/`, `datasets/` | Local only, never committed; benchmark data comes from Hugging Face (below); see [docs/DATA.md](docs/DATA.md) |
 
@@ -47,8 +51,8 @@ benchmarks.
 
 ## License
 
-**AGPL-3.0-only** (see [LICENSE](LICENSE)), except the pinned schema copy,
-which is Apache-2.0 like its source. Anyone running a modified version of
+**AGPL-3.0-only** (see [LICENSE](LICENSE)), except the pinned schema copies,
+which are Apache-2.0 like their source. Anyone running a modified version of
 this pipeline as a network service, the maintainers included, must offer
 its users the modified source (AGPL section 13).
 

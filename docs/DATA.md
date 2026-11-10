@@ -17,7 +17,7 @@ On the Mac:
 | Path | What |
 |---|---|
 | `footage/<rec>/` | one recording: `manifest.json`, the phones' video in `<deviceId>/`, and everything made from it (below) |
-| `footage/<rec>/labels*/` | a ball label set: `items.json` (moments, frames, suggestions), `labels.json` (the labels), `images/`, `pano/` |
+| `footage/<rec>/labels*/` | a ball label set: `items.json` (moments, frames, suggestions), `labels.json` (the labels), `images/`, `pano/`; `heldout.json` when it is (partly) held out for testing (`holdout.py`) |
 | `footage/<rec>/playeval/` | play-box sets (TESTING-PROCESSING.md section 2) |
 | `footage/<rec>/phase0/`, `pitch/`, `lens/`, `teams/`, `bg/` | sync, cameras, pitch map, team colours, background |
 | `footage/<rec>/detect/`, `follow/`, `fullgame*/` | candidates, caches and renders (made from the video; hours to remake) |
@@ -48,13 +48,21 @@ The backup only uploads; it never deletes from S3.
 | Rec | Date | Game | What | Label sets |
 |---|---|---|---|---|
 | rec2 | 2026-10-12 | `a901c618` | first field test (2 segments); raw video only in `data/rec2/` | |
-| rec3 | 2026-10-14 | `f68af87f` | first game, night, white ball (an evening game: 2026-10-15 UTC); bench | `labels` (random, 408 frames), `labels_seg3`, `labels_seg9` (clips) |
+| rec3 | 2026-10-14 | `f68af87f` | first game, night, white ball (an evening game: 2026-10-15 UTC); bench | `labels` (random, 408 frames; trained), `labels_seg3` (clip; trained), `labels_seg9` (clip; **held out**) |
 | rec4 | 2026-10-21 | `c92f9740` | night game, white ball; `rec4cal` (corrected camera model, bench), `rec4bench`, `rec4cal_cmp` are its variants | `labels_seg9` (not labelled) |
-| rec5 | 2026-10-28 | `38a1d10f` | orange ball; `rec5-game` (working copy), `rec5-cal` are its variants | `rec5-game/labels` (ball mode, 98 frames) |
-| rec6 | 2026-10-30 | `1f3a915a` | first daylight game | `labels` (random, both phones, 196 frames) |
-| rec7 | 2026-11-04 | `3ba4b9f2` | night game, Pixel 11 + iPhone 14 Pro, ~6.2 m mount, yellow ball; `balljudge/judge_v4.pt`; play boxes `playeval/seg0-1484` (5) | `labels_seg6` (clip, seg 6 100-220 s, both phones, 119 frames) |
+| rec5 | 2026-10-28 | `38a1d10f` | orange ball; `rec5-game` (working copy), `rec5-cal` are its variants | `rec5-game/labels` (ball mode, 98 frames; trained, nothing held out) |
+| rec6 | 2026-10-30 | `1f3a915a` | first daylight game | `labels` (random, both phones, 196 frames; trained, nothing held out) |
+| rec7 | 2026-11-04 | `3ba4b9f2` | night game, Pixel 11 + iPhone 14 Pro, ~6.2 m mount, yellow ball; `balljudge/judge_v4.pt`; play boxes `playeval/seg0-1484` (5) | `labels_seg6` (clip, seg 6 100-220 s, both phones, 119 frames; trained, nothing held out) |
 
-Add a row for every new recording.
+Add a row for every new recording. For every ball label set, say whether it
+is trained on or held out for testing; every new labelling holds part back
+(`docs/TESTING-PROCESSING.md`, "Held-out ball labels").
+
+## External datasets
+
+| Name | Where | What | Licence | Use |
+|---|---|---|---|---|
+| SoccerTrack (Scott et al., CVPRW 2022) | `footage/soccertrack/wide_view/` (`videos/`, `annotations/`), `footage/soccertrack/fisheye_keypoints.json` | 66 clips of 30 s, 25 fps, 6500 x 1000: one fixed fisheye camera beside the pitch, unwrapped; two university 11-v-11 games (2020-02-20, 2022-02-20), daylight, white ball. Boxes for every player and the ball (team and player `BALL`) in every frame; player boxes were made from the players' GNSS tracks. Downloaded 2026-11-09 from [Kaggle](https://www.kaggle.com/datasets/atomscott/soccertrack) (version 6; the drone and pre-drawn videos left out). | LGPL-3.0 (Kaggle); players gave signed consent (University of Tsukuba ethics approval) | **Held out: test only, never trained on.** A camera, field and light none of our models has seen |
 
 ## Backing up
 
