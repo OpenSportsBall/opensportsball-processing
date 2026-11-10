@@ -68,6 +68,7 @@ import argparse
 import hashlib
 import json
 import sys
+import time
 from pathlib import Path
 
 import cv2
@@ -697,9 +698,12 @@ def mirror_main(src: Path, joint: Path, dest: Path, bg_seg: int) -> None:
     print(f"{dest}: cameras and pitch from {joint}, panorama from segment {bg_seg}")
 
 
-def convert_detect_main(src: Path, dest: Path, start: str) -> None:
+def convert_detect_main(src: Path, dest: Path, start: str, src_detect: Path | None = None,
+                        dest_detect: Path | None = None) -> None:
     """A clip's ball candidates (ball_*_<start>_*.json) and roles (roles_*_<start>_*.json) from src's
-    cameras and pitch into a mirror's: each through the phone that saw it (its "phone")."""
+    cameras and pitch into dest's (a mirror, or an adopting recording): each through the phone that
+    saw it (its "phone"). start "*" takes every clip."""
+    src_detect, dest_detect = src_detect or src / "detect", dest_detect or dest / "detect"
     old_cm, old_cs, _ = load_cameras(src / "phase0" / "cameras.json")
     new_cm, new_cs, _ = load_cameras(dest / "phase0" / "cameras.json")
     old = (old_cm.at(W), old_cs.at(W))
@@ -712,8 +716,8 @@ def convert_detect_main(src: Path, dest: Path, start: str) -> None:
         d = new[phone].unproject(np.c_[x, y].astype(float))
         return (np.degrees(np.arctan2(d[:, 0], d[:, 2])), np.degrees(np.arctan2(d[:, 1], np.hypot(d[:, 0], d[:, 2]))), ok)
 
-    (dest / "detect").mkdir(exist_ok=True)
-    for p in sorted((src / "detect").glob(f"ball_*_{start}_*.json")):
+    dest_detect.mkdir(exist_ok=True)
+    for p in sorted(src_detect.glob(f"ball_*_{start}_*.json")):
         j = json.loads(p.read_text())
         for fr in j["frames"]:
             for d in fr["detections"]:
@@ -725,9 +729,9 @@ def convert_detect_main(src: Path, dest: Path, start: str) -> None:
                     x, z = new_pose.to_pitch(y, q)[0]
                     d["xz"] = None if not np.isfinite(x) else [round(float(x), 2), round(float(z), 2)]
                 d["onPitch"] = bool(d.get("xz") is not None and abs(d["xz"][0]) <= hl and abs(d["xz"][1]) <= hw)
-        (dest / "detect" / p.name).write_text(json.dumps(j))
+        (dest_detect / p.name).write_text(json.dumps(j))
         print(f"converted {p.name}")
-    for p in sorted((src / "detect").glob(f"roles_*_{start}_*.json")):
+    for p in sorted(src_detect.glob(f"roles_*_{start}_*.json")):
         j = json.loads(p.read_text())
         for fr in j["frames"]:
             for q in fr["people"]:
@@ -737,8 +741,56 @@ def convert_detect_main(src: Path, dest: Path, start: str) -> None:
                     x, z = new_pose.to_pitch(y, pp)[0]
                     if np.isfinite(x):
                         q["xz"] = [round(float(x), 2), round(float(z), 2)]
-        (dest / "detect" / p.name).write_text(json.dumps(j))
+        (dest_detect / p.name).write_text(json.dumps(j))
         print(f"converted {p.name}")
+
+
+ADOPT_PITCH = ("pitch.json", "goals.json", "taps.json", "taps_src.json", "background.png", "background.jpg",
+               "overlay.jpg")
+
+
+def adopt_main(rec: Path, mirror: Path) -> None:
+    """Puts a mirror's joint cameras and pitch into the recording itself. Everything replaced goes to
+    <rec>/pre_joint/ first (phase0/cameras.json, the pitch/ files, playeval boxes, follow/'s pass A
+    caches, the whole detect/). Then: the mirror's pitch files, boxes and pass A caches are copied in,
+    and every ball candidate and role file is carried into the new angles (convert-detect)."""
+    import shutil
+
+    pre = rec / "pre_joint"
+    if pre.exists():
+        sys.exit(f"{pre} exists: already adopted")
+    (pre / "phase0").mkdir(parents=True)
+    (pre / "pitch").mkdir()
+    shutil.copy2(rec / "phase0" / "cameras.json", pre / "phase0" / "cameras.json")
+    shutil.copy2(mirror / "phase0" / "cameras.json", rec / "phase0" / "cameras.json")
+    for n in ADOPT_PITCH:
+        if (rec / "pitch" / n).exists():
+            shutil.copy2(rec / "pitch" / n, pre / "pitch" / n)
+        if (mirror / "pitch" / n).exists():
+            shutil.copy2(mirror / "pitch" / n, rec / "pitch" / n)
+    for b in sorted((mirror / "playeval").glob("*/boxes.json")) if (mirror / "playeval").exists() else []:
+        dst = rec / "playeval" / b.parent.name / "boxes.json"
+        (pre / "playeval" / b.parent.name).mkdir(parents=True)
+        shutil.copy2(dst, pre / "playeval" / b.parent.name / "boxes.json")
+        shutil.copy2(b, dst)
+    (pre / "follow").mkdir()
+    for f in (rec / "follow").glob("passA_*.json"):
+        shutil.move(str(f), pre / "follow" / f.name)
+    for f in (mirror / "follow").glob("passA_*.json"):
+        shutil.copy2(f, rec / "follow" / f.name)
+    shutil.move(str(rec / "detect"), pre / "detect")
+    (rec / "detect").mkdir()
+    for e in (pre / "detect").iterdir():
+        if not (e.suffix == ".json" and e.name.split("_")[0] in ("ball", "roles")):
+            (shutil.copytree if e.is_dir() else shutil.copy2)(e, rec / "detect" / e.name)
+    convert_detect_main(pre, rec, "*", pre / "detect", rec / "detect")
+    (pre / "README.md").write_text(
+        f"# Before the joint fit\n\nAdopted {time.strftime('%Y-%m-%d %H:%M')} from {mirror} "
+        f"(jointfit.py adopt). These are the files it replaced: phase0/cameras.json, the pitch/ files "
+        f"{', '.join(ADOPT_PITCH)}, playeval boxes, follow/'s pass A caches and detect/ (ball candidates and "
+        "roles were carried into the new angles, not re-detected). Outputs made before this (fullgame/, "
+        "phases/, renders, paths) are in the old geometry. To undo: copy these back.\n")
+    print(f"{rec}: adopted {mirror}; old files in {pre}")
 
 
 def stitch_main(rec: Path, cams_paths: list[str], segs: list[int]) -> None:
@@ -819,6 +871,9 @@ def main() -> None:
         return
     if len(sys.argv) > 1 and sys.argv[1] == "convert-detect":
         convert_detect_main(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4])
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "adopt":
+        adopt_main(Path(sys.argv[2]), Path(sys.argv[3]))
         return
     if len(sys.argv) > 1 and sys.argv[1] == "stitch":
         i = sys.argv.index("--segs")

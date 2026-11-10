@@ -203,9 +203,27 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
           11 2.77 -> 2.53, 15 2.47 -> 2.15: the joint fit doesn't fix the
           seam; refine_lines does that. A 20 s render of each looked
           alike, no seam faults. Not adopted yet: 20 moments, ball
-          candidates found with the old geometry. Next: adopt on rec4cal
-          and rec7 (phase0/ and pitch/), rerun ballwin there, then the
-          per-segment Secondary rotation (rec7 segments 0-1).
+          candidates found with the old geometry.
+        - Adopted on rec4cal and rec7 (2026-11-09, `jointfit.py adopt`):
+          the joint cameras.json, pitch.json, goals, taps (rebuilt in the
+          new panorama's degrees), panorama, must-see boxes and pass A
+          caches; every ball candidate and role file carried into the new
+          angles. The replaced files are in <rec>/pre_joint/ (README; copy
+          them back to undo). fullgame/, phases/ and older renders stay in
+          the old geometry. footage/bench/rec4cal is unchanged (the
+          standard bench baselines). ballwin rerun on the bench clips with
+          today's code and each clip's original checkpoint, on both
+          geometries (the old one in footage/rec4cal-old, rec7-old, built
+          from pre_joint/): best variant rec4cal 11/15 -> 13/15 (mean
+          coverage 73 -> 91%), rec7 0/5 both. Candidates per clip the same
+          on both geometries (rec7 2205 / 2213), so the geometry doesn't
+          change what ballwin finds.
+        - Open, not the geometry: today's ballwin finds 2205 candidates on
+          rec7's seg0-1484 clip against 5093 in the 2026-11-05 file, and the
+          bench there falls from 4/5 to 0/5 on either geometry. Since then:
+          the scan plan from the pitch map (2026-11-07) and Core ML as the
+          default detector (bb6051a).
+        - Next: per-segment Secondary rotation (rec7 segments 0-1).
         - Paint in the phones' frames: line_mask's scales were tuned on
           the 0.03 deg panorama; rec5-game's far yellow lines and rec6's
           over-wide white mask (97% of model points "on paint") need a
