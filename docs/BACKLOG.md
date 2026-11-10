@@ -115,6 +115,33 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         window). The kept rotation is the one most segments agree with;
         the others are listed in cameras.json "lineFit.mountMoved".
         Adds ~2-3 min to building cameras.json.
+- [ ] Line detection and pitch mapping without taps. Every field since
+      rec3 has needed taps; the joint fit (`jointfit.py`, below) fixed the
+      lenses but not this. Untapped joint fits, priors from the lens table
+      with the recording left out (2026-11-09): rec7 3.1 / 9.5 px tap
+      error, rec6 6.4 / 16.0 (about its tapped fit), rec4cal 35.3 / 78.0
+      (length runs to 117 m against ~105; 4.1 px with a 1% different
+      prior, so unstable), rec5-game fails. And they started from the
+      tapped pitch.json: a real untapped game starts worse. Where it fails:
+      - Paint in the phones' own frames: `pitch.line_mask`'s scales were
+        tuned on the 0.03 deg panorama. rec5-game's far yellow lines go
+        undetected; rec6's white mask is so wide that 97% of model points
+        sit "on paint", so the paint term says nothing there.
+      - The far ends: the end boxes and goal lines are thin and few pixels
+        tall, and the fit locks the ends onto the wrong paint (length runs
+        away). Junction detection found one box of four on rec4.
+      - The start: `best_start` searches camera heights; nothing measures
+        the centre circle, halfway line or touchlines to seed the pose.
+      Ideas: paint detection per phone at the scale the line should have
+      there (its width is known from the current fit); fit the ends
+      separately once the middle holds (pitch.fit_end_pose does this in the
+      panorama); goals as end anchors (validated on rec3); a learned
+      keypoint detector trained on the tapped recordings' `taps_src.json`
+      (source pixels, so the labels survive stitch changes).
+      Measure: tap error and the rec4 traced benchmark (`jointfit.py
+      score` / `bench`) for untapped fits started from `best_start`, not
+      from a tapped pitch.json; done when every tapped recording's
+      untapped fit is within ~2x its tapped fit.
 - [ ] Per-segment Secondary rotation in rendering: refine_lines already
       fits one per sampled segment, but every caller of setup_cameras
       (and game_stream across segment switches) uses one camera pair.
@@ -162,6 +189,74 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         play bench no worse. Rebuilding cameras.json changes every
         panorama angle: existing pitch fits and taps.json need redoing
         (taps can be carried across through the phone pixels).
+      - Joint fit (2026-11-09, `processing/spikes/jointfit.py`): taps
+        carried into each phone's 4K pixels (`pitch/taps_src.json`), then
+        one least squares over both lenses (focal, k1, k2), Secondary's
+        rotation, the lens offset (metres) and the pitch pose, on each
+        phone's own median background (one segment: rec7 11, rec4cal 12,
+        rec6 2, rec5-game 10) and its paint, with the taps. No warp terms.
+        Priors: focal from the lens table or the manifest FOV (10% with
+        taps), k1/k2 sd 0.01, lens offset sd 3 cm. ~15 s per fit once the
+        backgrounds are cached. Tap error at 4K, median / worst (current
+        -> joint): rec7 6.9 / 20.6 -> 1.8 / 7.6, rec4cal 2.5 / 35.4 ->
+        1.2 / 3.4, rec6 4.9 / 16.5 -> 2.7 / 7.0, rec5-game 6.5 / 49.6 ->
+        2.9 / 45.2. rec4 traced benchmark at 4K (`jointfit.py bench`):
+        all markings 4.5 -> 3.0 median, centre circle 22.8 -> 1.5, boxes
+        ~2.5 -> <1, near touchline 7.0 -> 9.2. rec4cal's camera comes out
+        at 3.0 m up against the measured 2.6 (the field drops away, see
+        FINDINGS). Lens table (`lenses.json`, fitted with taps): Pixel 11
+        747.5 +- 3.4 px @ 1920 (n=4, factory 752.8), Pixel 11 Pro 740.9
+        +- 5.2 (n=2), iPhone 14 Pro 718.5 +- 13.1 (n=2; rec5-game's
+        iPhone half is out of focus). Without taps, priors from the
+        table with the recording left out: rec7 3.1 / 9.5 px, rec6 6.4 /
+        16.0, rec4cal 35.3 / 78.0 (length runs to 117 m; 4.1 px with a 1%
+        different prior, so unstable), rec5-game fails. The lens table
+        doesn't make untapped games reliable: the far ends' paint does.
+        Next:
+        - Tried in the follow cam (2026-11-09): `jointfit.py mirror`
+          builds footage/rec7-joint and footage/rec4cal-joint (same video,
+          the joint cameras and pitch; must-see boxes, goals and taps
+          carried through the phones' pixels, boxes moved 0.07-0.36 deg;
+          pass A redone), `jointfit.py convert-detect` carries a clip's
+          ball candidates and roles across (not re-detected). Play bench,
+          `goalkick,goalframe,unsure,ball,goalin,ballhold,roles,kickoff,
+          peoplesurge` with ballwin's candidates: rec4cal 9/15 -> 12/15
+          (mean coverage 68 -> 84%), rec7 4/5 -> 4/5 (85 -> 88%); median
+          width 58 -> 59 and 52 -> 53 deg. Variant A alone: rec4cal 10/15
+          both (different moments), rec7 0/5 both. rec4cal's fitted goals
+          come out 7.19 / 7.57 m wide against 7.67 / 7.78 (full size is
+          7.32). Seam paint (`jointfit.py stitch`, rec7, px at 4K, current
+          -> joint): seg 1 3.52 -> 5.18 (the mount moved), 6 1.81 -> 1.98,
+          11 2.77 -> 2.53, 15 2.47 -> 2.15: the joint fit doesn't fix the
+          seam; refine_lines does that. A 20 s render of each looked
+          alike, no seam faults. Not adopted yet: 20 moments, ball
+          candidates found with the old geometry.
+        - Adopted on rec4cal and rec7 (2026-11-09, `jointfit.py adopt`):
+          the joint cameras.json, pitch.json, goals, taps (rebuilt in the
+          new panorama's degrees), panorama, must-see boxes and pass A
+          caches; every ball candidate and role file carried into the new
+          angles. The replaced files are in <rec>/pre_joint/ (README; copy
+          them back to undo). fullgame/, phases/ and older renders stay in
+          the old geometry. footage/bench/rec4cal is unchanged (the
+          standard bench baselines). ballwin rerun on the bench clips with
+          today's code and each clip's original checkpoint, on both
+          geometries (the old one in footage/rec4cal-old, rec7-old, built
+          from pre_joint/; rec7 with OSB_JUDGE=judge_v4, as its 2026-11-05
+          files were made): best variant rec4cal 11/15 -> 13/15 (mean
+          coverage 73 -> 91%), rec7 4/5 both (85 -> 88%, aim at the ball
+          64% both); 15/20 -> 17/20. Candidates per clip about the same on
+          both geometries (rec7 5303 / 5336), so the geometry doesn't change
+          what ballwin finds. (A first rec7 rerun with the standard judge
+          gave ~2200 candidates and 0/5 on both geometries; d9634ff blamed
+          ballwin's scan plan or Core ML for that, wrongly. ballwin now
+          writes the judge into each ball file.)
+        - Next: per-segment Secondary rotation (rec7 segments 0-1).
+        - Paint in the phones' frames: line_mask's scales were tuned on
+          the 0.03 deg panorama; rec5-game's far yellow lines and rec6's
+          over-wide white mask (97% of model points "on paint") need a
+          look before untapped fits can work.
+        - More recordings with taps per phone model (iPhone 14 Pro has two,
+          one of them soft).
 - [ ] Players-only follow: `processing/spikes/follow.py` renders a 1080p
       virtual camera straight from both 4K sources. Cameras refined at
       1920 px (median error 11 to 4 px at 4K); each pixel comes from one
