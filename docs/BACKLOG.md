@@ -1516,6 +1516,26 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         two stills: rec5's views cross, so side by side Main's inner edge
         looked like it joined Secondary's (it doesn't), while the wrong
         panorama shows two broken halves. Not yet run through `run`.
+- [x] The packaged engine for the Mac app (step D), 2026-11-10, unsigned:
+      `packaging/mac/` builds `osb-engine/` (CPython 3.12 from
+      python-build-standalone, the 73 pinned packages, an LGPL ffmpeg 8.0.1
+      with VideoToolbox and no Homebrew libraries, the code, schemas and
+      models, RF-DETR's COCO weights): 1.5 GB, built in under 2 min after
+      the first download. accel.py's OSB_PYTHON / OSB_FFMPEG_DIR replace
+      `uv run` and the PATH's ffmpeg. As a clean Mac (`test_clean.sh`: empty
+      environment, system PATH, a fresh home, model downloads off) on an
+      8-segment copy of rec3: prepare 13.7 min to the questions (nothing
+      downloaded, nothing written to the home folder), then one chunk of
+      `run` in 52 min (ball 15.3 + roles 15.7 min on Core ML, converted on
+      first use in ~25 s in all; render 20.4 min), game.mp4 1080p H.264 +
+      AAC, 600 s, the intermediates deleted (2.4 GB). Found on the way:
+      phase0.py's stitch preview and play.py used x264's `-crf`, which an
+      LGPL ffmpeg doesn't have; both use accel.h264_args now.
+- [ ] Sign and notarize the engine (needs a Developer ID Application
+      certificate; packaging/mac/README.md), then test on a second Mac or a
+      macOS VM. coremltools 9 warns it is untested with torch 2.11: the
+      exports worked, but pin torch to what coremltools supports if one
+      ever fails (detect.py falls back to PyTorch, ~30% slower).
 - [ ] The render waits on the ball stage about half of a game (44 vs 24
       min per chunk; roles is 15 of the 44). Run roles in a third worker,
       or alongside the ball stage, so a game takes ~6 h, not 8.5. Check

@@ -40,6 +40,7 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.optimize import linear_sum_assignment
 
 sys.path.insert(0, str(Path(__file__).parent))
+import accel  # noqa: E402
 import pitch as P  # noqa: E402
 
 GATE_M = 3.0          # a detection this close to a track's prediction can join it
@@ -217,8 +218,8 @@ def minimap_video(path, pose, pos, vel, points, ball, fps, show=("median", "flow
         cv2.putText(base, name, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, colours[name], 1)
         y += 18
     cv2.putText(base, "ball", (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-    proc = subprocess.Popen(["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24",
-                             "-s", f"{W_}x{H_}", "-r", str(fps), "-i", "-", "-c:v", "libx264", "-crf", "23",
+    proc = subprocess.Popen([accel.ffmpeg(), "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24",
+                             "-s", f"{W_}x{H_}", "-r", str(fps), "-i", "-", *accel.h264_args("6M"),
                              "-pix_fmt", "yuv420p", str(path)], stdin=subprocess.PIPE)
     for i in range(len(pos)):
         img = base.copy()

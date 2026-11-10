@@ -11,6 +11,12 @@ Core ML. The rest of the pipeline asks here instead of naming Apple's
 
 OSB_ACCEL=cpu forces the last row (a check that the pipeline runs
 anywhere; slow). Imports nothing heavy: fullgame.py uses it without torch.
+
+How the pipeline's own programs are found, so a packaged engine (the Mac
+app's, packaging/mac/) runs without uv or Homebrew: OSB_PYTHON is the
+Python that runs the scripts (with every dependency installed; unset:
+`uv run`, each script's own dependency list), OSB_FFMPEG_DIR holds ffmpeg
+and ffprobe (unset: the PATH's).
 """
 
 from __future__ import annotations
@@ -39,7 +45,7 @@ def platform() -> str:
 @functools.cache
 def _ffmpeg_encoders() -> str:
     try:
-        return subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True,
+        return subprocess.run([ffmpeg(), "-hide_banner", "-encoders"], capture_output=True, text=True,
                               timeout=30).stdout
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -70,6 +76,22 @@ def h264_args(bitrate: str, maxrate: str | None = None) -> list[str]:
     enc = {"mac": ["-c:v", "h264_videotoolbox"],
            "nvidia": ["-c:v", "h264_nvenc", "-preset", "p5"]}.get(platform(), ["-c:v", "libx264", "-preset", "veryfast"])
     return [*enc, "-b:v", bitrate, *cap]
+
+
+def python_cmd() -> list[str]:
+    """The command that runs one of the pipeline's scripts: the packaged Python, else uv."""
+    py = os.environ.get("OSB_PYTHON")
+    return [py] if py else ["uv", "run", "-q"]
+
+
+def ffmpeg() -> str:
+    d = os.environ.get("OSB_FFMPEG_DIR")
+    return os.path.join(d, "ffmpeg") if d else "ffmpeg"
+
+
+def ffprobe() -> str:
+    d = os.environ.get("OSB_FFMPEG_DIR")
+    return os.path.join(d, "ffprobe") if d else "ffprobe"
 
 
 def coreml() -> bool:
