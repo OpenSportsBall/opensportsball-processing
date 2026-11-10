@@ -54,14 +54,16 @@ CARD = Path(__file__).resolve().parents[2] / "docs" / "DATASET_CARD.md"
 # Recordings outside the bench store whose pitch maps and labels we share.
 # (rec3's and rec4cal's are already inside bench/.)
 ANNOTATED = {
-    "rec5-game": ["pitch", "labels", "labels_kits"],
+    "rec5-game": ["pitch", "labels", "labels_kits", "teams"],
     "rec6": ["pitch", "labels"],
-    "rec7": ["pitch", "labels_seg6"],
+    "rec7": ["pitch", "labels_seg6", "playeval", "teams"],
 }
 
 # The app's upload state: the account id, S3 multipart upload ids and part ETags.
 NEVER = ["upload.json", "**/upload.json"]
-IGNORE = [".DS_Store", "**/.DS_Store", "**/__pycache__/**", ".cache/**", *NEVER]
+# A play set's paths/ are bench output (playbench.py rewrites them), not
+# annotations.
+IGNORE = [".DS_Store", "**/.DS_Store", "**/__pycache__/**", ".cache/**", "rec*/playeval/*/paths/**", *NEVER]
 
 # What a shared text file must not hold (private_details).
 PRIVATE = {"a home-directory path": re.compile(r"/(?:Users|home)/[^/\s\"']+/"),

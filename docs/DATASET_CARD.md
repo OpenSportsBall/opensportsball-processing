@@ -54,7 +54,7 @@ The repository mirrors the `footage/` directory of
 | `bench/rec3/`, `bench/rec4cal/` | The bench store for two night games: the phones' video segments the benches read (unchanged, sha256-checked against each manifest), plus sync, pitch maps, team colours, background models, play-box sets, ball label sets and detector caches |
 | `bench/fixtures/pitch/` | Pitch-mapping regression fixtures and the marked-field benchmark |
 | `models/` | The standard ball detector and judge, with a README of what each was trained on |
-| `rec5-game/`, `rec6/`, `rec7/` | Pitch maps (`pitch/`) and ball label sets (`labels*/`, with their frames) from three more games: an orange ball, the first daylight game, and a night game with a yellow ball, with the cameras the pitch maps were made with (`phase0/cameras.json`). Their full videos are not included |
+| `rec5-game/`, `rec6/`, `rec7/` | Pitch maps (`pitch/`) and ball label sets (`labels*/`, with their frames) from three more games: an orange ball, the first daylight game, and a night game with a yellow ball, with the cameras the pitch maps were made with (`phase0/cameras.json`). rec5-game and rec7 also have team sides (`teams/`), and rec7 a play-box set (`playeval/`). Their full videos are not included |
 
 A pitch map (`pitch/`) holds the fitted pitch (`pitch.json`), the median
 background panorama it was fitted on (`background.png`, 0.03 deg per pixel)
@@ -67,7 +67,16 @@ rec6's are the older stitch plus warped pitch fit.
 A ball label set holds `items.json` (the moments and frames picked for
 labelling), `labels.json` (the ball positions, or none where it isn't
 visible), `images/` (the labelled frames) and `pano/` (the stitched
-frames).
+frames). A set with `heldout.json` is kept for testing: don't train on it.
+
+A play-box set (`playeval/<set>/`) holds the must-see moments of one clip
+that a follow cam should keep in view: `clip.json` (the clip),
+`boxes.json` (the reviewed box at each moment) and `items.json`, with the
+panoramas they were drawn on (`pano/`, `pano.json`).
+
+Team sides (`teams/<clip>/sides.json`) say which kit components are each
+team and which are a keeper or referee. Where automatic side detection
+failed they were set by hand (`sides.auto.json` is what it guessed).
 
 ## Getting it
 
