@@ -569,6 +569,193 @@ def lenses_main(recs: list[Path]) -> None:
     print(f"wrote {LENS_TABLE}")
 
 
+# ---------------------------------------------------------------- mirror
+
+MIRROR_OWN = {"phase0", "pitch", "playeval", "follow", "detect"}
+
+
+class Reangle:
+    """Panorama angles under one camera pair -> under another, through the phone that saw them
+    (the one farther from its frame edge, as the panoramas pick)."""
+
+    def __init__(self, old: tuple, new: tuple):
+        self.old = [c.at(W) for c in old]
+        self.new = [c.at(W) for c in new]
+
+    def __call__(self, yaw_deg, pitch_deg) -> tuple[np.ndarray, np.ndarray]:
+        d = follow.direction(np.radians(np.atleast_1d(yaw_deg)), np.radians(np.atleast_1d(pitch_deg)))
+        proj = [c.project(d) for c in self.old]
+        edge = [np.where(ok, np.minimum.reduce([x, W - 1 - x, y, H - 1 - y]), -1) for x, y, ok in proj]
+        k = np.where(edge[0] >= edge[1], 0, 1)
+        out = np.full((len(d), 3), np.nan)
+        for i in (0, 1):
+            m = (k == i) & (edge[i] >= 0)
+            if m.any():
+                out[m] = self.new[i].unproject(np.c_[proj[i][0][m], proj[i][1][m]].astype(float))
+        yaw = np.degrees(np.arctan2(out[:, 0], out[:, 2]))
+        pit = np.degrees(np.arctan2(out[:, 1], np.hypot(out[:, 0], out[:, 2])))
+        return yaw, pit
+
+
+def convert_box(b: dict, re: Reangle) -> dict:
+    t = np.linspace(0, 1, 21)
+    y0, y1, p0, p1 = b["yaw0"], b["yaw1"], b["pitch0"], b["pitch1"]
+    ys = np.r_[y0 + t * (y1 - y0), y0 + t * (y1 - y0), np.full(21, y0), np.full(21, y1)]
+    ps = np.r_[np.full(21, p0), np.full(21, p1), p0 + t * (p1 - p0), p0 + t * (p1 - p0)]
+    yy, pp = re(ys, ps)
+    ok = np.isfinite(yy)
+    return {**b, "yaw0": round(float(yy[ok].min()), 2), "yaw1": round(float(yy[ok].max()), 2),
+            "pitch0": round(float(pp[ok].min()), 2), "pitch1": round(float(pp[ok].max()), 2),
+            "convertedBy": "jointfit.py mirror"}
+
+
+def convert_goals(goals: dict, old_pose: P.PitchPose, new_pose: P.PitchPose, re: Reangle) -> dict:
+    """Goal frames (pitch metres under the old fit) -> the new fit, through both post bases."""
+    out = []
+    for g in goals["goals"]:
+        th = np.radians(g.get("angleToGoalLineDeg", 0.0))
+        d = np.array([np.sin(th), np.cos(th)])
+        c = np.array([g["x"], g["z"]])
+        bases = np.array([c - g["width"] / 2 * d, c + g["width"] / 2 * d])
+        a = old_pose.angles(bases)
+        yy, pp = re(a[:, 0], a[:, 1])
+        nb = new_pose.to_pitch(yy, pp)
+        v = nb[1] - nb[0]
+        out.append({**g, "x": round(float(nb.mean(0)[0]), 3), "z": round(float(nb.mean(0)[1]), 3),
+                    "width": round(float(np.hypot(*v)), 3),
+                    "angleToGoalLineDeg": round(float(np.degrees(np.arctan2(v[0], v[1]))), 2),
+                    "convertedBy": "jointfit.py mirror"})
+    return {**goals, "goals": out}
+
+
+def mirror_main(src: Path, joint: Path, dest: Path, bg_seg: int) -> None:
+    """A recording that shares src's video but uses a joint fit's cameras and pitch: everything at
+    the top level is linked except phase0/, pitch/, playeval/ (boxes and goals converted), follow/
+    (empty: pass A is redone) and detect/ (left out: ball and role files are in the old angles)."""
+    if dest.exists():
+        sys.exit(f"{dest} exists")
+    dest.mkdir(parents=True)
+    for e in src.iterdir():
+        if e.name not in MIRROR_OWN and not e.name.startswith("joint") and not e.name.startswith("."):
+            (dest / e.name).symlink_to(e.resolve())
+    (dest / "phase0").mkdir()
+    for e in (src / "phase0").iterdir():
+        if e.name != "cameras.json":
+            (dest / "phase0" / e.name).symlink_to(e.resolve())
+    (dest / "phase0" / "cameras.json").write_text((joint / "cameras.json").read_text())
+    (dest / "follow").mkdir()
+    old_cm, old_cs, _ = load_cameras(src / "phase0" / "cameras.json")
+    new_cm, new_cs, _ = load_cameras(joint / "cameras.json")
+    re = Reangle((old_cm, old_cs), (new_cm, new_cs))
+    old_pose, new_pose = load_pose(src / "pitch" / "pitch.json"), load_pose(joint / "pitch.json")
+    pd = dest / "pitch"
+    pd.mkdir()
+    (pd / "pitch.json").write_text((joint / "pitch.json").read_text())
+    for n in ("paint.json", "taps_src.json"):
+        if (src / "pitch" / n).exists():
+            (pd / n).write_text((src / "pitch" / n).read_text())
+    if (src / "pitch" / "goals.json").exists():
+        g = convert_goals(json.loads((src / "pitch" / "goals.json").read_text()), old_pose, new_pose, re)
+        (pd / "goals.json").write_text(json.dumps(g, indent=1))
+        print("goals: " + ", ".join(f"side {x['side']} x {x['x']:.2f} z {x['z']:.2f} w {x['width']:.2f}"
+                                    for x in g["goals"]))
+    # taps.json in the new panorama's degrees, from the stitch-free taps
+    ts = pd / "taps_src.json"
+    if ts.exists():
+        cams = (new_cm.at(W), new_cs.at(W))
+        taps = {}
+        for n, t in json.loads(ts.read_text())["taps"].items():
+            if t.get("skipped"):
+                taps[n] = {"skipped": True}
+                continue
+            d = cams[0 if t["phone"] == "main" else 1].unproject(np.array([[t["x"], t["y"]]], float))[0]
+            taps[n] = {"yaw": round(float(np.degrees(np.arctan2(d[0], d[2]))), 3),
+                       "pitch": round(float(np.degrees(np.arctan2(d[1], np.hypot(d[0], d[2])))), 3)}
+            if t.get("fromFit"):
+                taps[n]["fromFit"] = True
+        (pd / "taps.json").write_text(json.dumps(taps, indent=1))
+    for sdir in sorted((src / "playeval").glob("*/")) if (src / "playeval").exists() else []:
+        if not (sdir / "clip.json").exists():
+            continue
+        od = dest / "playeval" / sdir.name
+        od.mkdir(parents=True)
+        for n in ("clip.json", "items.json", "README.md"):
+            if (sdir / n).exists():
+                (od / n).write_text((sdir / n).read_text())
+        boxes = json.loads((sdir / "boxes.json").read_text())
+        nb = {k: convert_box(b, re) for k, b in boxes.items()}
+        (od / "boxes.json").write_text(json.dumps(nb, indent=1))
+        shift = np.median([abs(nb[k]["yaw0"] - b["yaw0"]) + abs(nb[k]["yaw1"] - b["yaw1"])
+                           for k, b in boxes.items()]) / 2
+        print(f"playeval/{sdir.name}: {len(nb)} boxes converted (median edge shift {shift:.2f} deg)")
+    pano = P.Pano()
+    bg = P.background(dest, bg_seg, pano)
+    cv2.imwrite(str(pd / "background.png"), bg)
+    cv2.imwrite(str(pd / "background.jpg"), cv2.resize(bg, (pano.w // 3, pano.h // 3)))
+    cv2.imwrite(str(pd / "overlay.jpg"), cv2.resize(P.draw(bg, pano, new_pose), (pano.w // 2, pano.h // 2)),
+                [cv2.IMWRITE_JPEG_QUALITY, 88])
+    print(f"{dest}: cameras and pitch from {joint}, panorama from segment {bg_seg}")
+
+
+def convert_detect_main(src: Path, dest: Path, start: str) -> None:
+    """A clip's ball candidates (ball_*_<start>_*.json) and roles (roles_*_<start>_*.json) from src's
+    cameras and pitch into a mirror's: each through the phone that saw it (its "phone")."""
+    old_cm, old_cs, _ = load_cameras(src / "phase0" / "cameras.json")
+    new_cm, new_cs, _ = load_cameras(dest / "phase0" / "cameras.json")
+    old = (old_cm.at(W), old_cs.at(W))
+    new = (new_cm.at(W), new_cs.at(W))
+    old_pose, new_pose = load_pose(src / "pitch" / "pitch.json"), load_pose(dest / "pitch" / "pitch.json")
+    hl, hw = new_pose.L / 2 + P.ON_PITCH_MARGIN, new_pose.W / 2 + P.ON_PITCH_MARGIN
+
+    def reangle(phone, yaw, pit):
+        x, y, ok = old[phone].project(follow.direction(np.radians(yaw), np.radians(pit)))
+        d = new[phone].unproject(np.c_[x, y].astype(float))
+        return (np.degrees(np.arctan2(d[:, 0], d[:, 2])), np.degrees(np.arctan2(d[:, 1], np.hypot(d[:, 0], d[:, 2]))), ok)
+
+    (dest / "detect").mkdir(exist_ok=True)
+    for p in sorted((src / "detect").glob(f"ball_*_{start}_*.json")):
+        j = json.loads(p.read_text())
+        for fr in j["frames"]:
+            for d in fr["detections"]:
+                y, q, ok = reangle(d["phone"], np.array([d["yaw"]]), np.array([d["pitch"]]))
+                if not ok[0]:
+                    continue
+                d["yaw"], d["pitch"] = round(float(y[0]), 3), round(float(q[0]), 3)
+                if d.get("xz") is not None:
+                    x, z = new_pose.to_pitch(y, q)[0]
+                    d["xz"] = None if not np.isfinite(x) else [round(float(x), 2), round(float(z), 2)]
+                d["onPitch"] = bool(d.get("xz") is not None and abs(d["xz"][0]) <= hl and abs(d["xz"][1]) <= hw)
+        (dest / "detect" / p.name).write_text(json.dumps(j))
+        print(f"converted {p.name}")
+    for p in sorted((src / "detect").glob(f"roles_*_{start}_*.json")):
+        j = json.loads(p.read_text())
+        for fr in j["frames"]:
+            for q in fr["people"]:
+                a = old_pose.angles(np.array([q["xz"]], float))
+                y, pp, ok = reangle(q["phone"], a[:, 0], a[:, 1])
+                if ok[0]:
+                    x, z = new_pose.to_pitch(y, pp)[0]
+                    if np.isfinite(x):
+                        q["xz"] = [round(float(x), 2), round(float(z), 2)]
+        (dest / "detect" / p.name).write_text(json.dumps(j))
+        print(f"converted {p.name}")
+
+
+def stitch_main(rec: Path, cams_paths: list[str], segs: list[int]) -> None:
+    """How well the two phones' paint lines up in the overlap (follow.line_median, px at 4K) for each
+    camera file, on segments' median backgrounds: the seam a render shows."""
+    _, report, devs, flip = rec_info(rec)
+    data = []
+    for sg in segs:
+        bgs = follow.phone_backgrounds(rec, devs, report, flip, sg)
+        if bgs is not None:
+            data.append(follow.LineData(sg, *bgs))
+    for cp in cams_paths:
+        cm, cs, _ = load_cameras(Path(cp))
+        row = [follow.line_median(cm, cs, d) for d in data]
+        print(f"{cp:45s} " + "  ".join(f"seg {d.seg}: {e:.2f} px ({n})" for d, (e, n) in zip(data, row)))
+
+
 # ----------------------------------------------------------------- bench
 
 def bench_main(fixture: Path, rec: Path, dirs: list[str]) -> None:
@@ -626,6 +813,16 @@ def main() -> None:
         return
     if len(sys.argv) > 1 and sys.argv[1] == "bench":
         bench_main(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4:])
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "mirror":
+        mirror_main(Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]), int(sys.argv[5]))
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "convert-detect":
+        convert_detect_main(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4])
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "stitch":
+        i = sys.argv.index("--segs")
+        stitch_main(Path(sys.argv[2]), sys.argv[3:i], [int(s) for s in sys.argv[i + 1].split(",")])
         return
     ap = argparse.ArgumentParser()
     ap.add_argument("rec", type=Path)
