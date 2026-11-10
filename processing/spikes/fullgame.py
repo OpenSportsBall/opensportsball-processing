@@ -153,12 +153,12 @@ def main() -> None:
                 continue
             t0, rc = time.time(), 0
             if not cands(start, seconds).exists():  # the candidates may be there from an earlier run
-                rc = run(["uv", "run", "-q", str(HERE / "ballwin.py"), str(rec), "0", f"{start:g}", f"{seconds:g}",
+                rc = run([*accel.python_cmd(), str(HERE / "ballwin.py"), str(rec), "0", f"{start:g}", f"{seconds:g}",
                           str(a.detector), "10"], out / "logs" / f"ball_{k:02d}.log", done_file=cands(start, seconds))
                 if rc and cands(start, seconds).exists():
                     rc = 0  # the candidates are there; whatever happened after doesn't matter
             if rc == 0 and a.teams and not roles_file(start, seconds).exists():
-                rc = run(["uv", "run", "-q", str(HERE / "roles.py"), str(rec), "0", f"{start:g}", f"{seconds:g}",
+                rc = run([*accel.python_cmd(), str(HERE / "roles.py"), str(rec), "0", f"{start:g}", f"{seconds:g}",
                           a.teams, f"{a.roles_fps:g}"], out / "logs" / f"roles_{k:02d}.log", done_file=roles_file(start, seconds))
                 if rc and roles_file(start, seconds).exists():
                     rc = 0
@@ -180,7 +180,7 @@ def main() -> None:
                 time.sleep(10)
             else:
                 t0 = time.time()
-                rc = run(["uv", "run", "-q", str(HERE / "follow.py"), str(rec), "0", f"{start:g}", f"{seconds:g}",
+                rc = run([*accel.python_cmd(), str(HERE / "follow.py"), str(rec), "0", f"{start:g}", f"{seconds:g}",
                           "play", a.features], out / "logs" / f"follow_{k:02d}.log")
                 src = rec / "follow" / f"follow_{tag}.mp4"
                 if rc == 0 and src.exists():
@@ -219,11 +219,11 @@ def main() -> None:
     lst = out / "pieces.txt"
     lst.write_text("".join(f"file '{piece(k).resolve()}'\n" for k in range(len(chunks))))
     log = out / "logs" / "concat.log"
-    run(["ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy",
+    run([accel.ffmpeg(), "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy",
          str(out / "video.mp4")], log)
     alst = out / "audio.txt"
     alst.write_text("".join(f"file '{(rec / s['objectKey']).resolve()}'\n" for s in devs["main"]["segments"]))
-    run(["ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(alst), "-vn", "-c:a", "copy",
+    run([accel.ffmpeg(), "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(alst), "-vn", "-c:a", "copy",
          str(out / "audio.m4a")], log)
     if a.height == PIECE_H:
         video = ["-c", "copy"]
@@ -232,7 +232,7 @@ def main() -> None:
         video = ["-map", "0:v", "-map", "1:a", "-vf", f"scale={a.height * 16 // 9}:{a.height}:flags=lanczos",
                  *accel.h264_args(br, br), "-profile:v", "high", "-pix_fmt", "yuv420p",
                  "-c:a", "copy", "-movflags", "+faststart"]
-    rc = run(["ffmpeg", "-v", "error", "-y", "-i", str(out / "video.mp4"), "-ss", f"{a.start:g}", "-i", str(out / "audio.m4a"),
+    rc = run([accel.ffmpeg(), "-v", "error", "-y", "-i", str(out / "video.mp4"), "-ss", f"{a.start:g}", "-i", str(out / "audio.m4a"),
               *video, "-shortest", str(out / "game.mp4")], log)
     print(f"{'done' if rc == 0 else 'mux FAILED'}: {out / 'game.mp4'} ({a.height}p) in {(time.time() - t0) / 3600:.1f} h",
           flush=True)

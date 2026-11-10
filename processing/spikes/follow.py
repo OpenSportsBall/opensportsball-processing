@@ -484,7 +484,7 @@ def frame_stream(path: Path, start: float, seconds: float, width: int, fps: floa
     pre = min(PREROLL_S, start)
     skip = int(round(pre * fps))
     proc = subprocess.Popen(
-        ["ffmpeg", "-v", "error", "-noautorotate", *accel.decode_args(), "-ss", f"{start - pre:.4f}",
+        [accel.ffmpeg(), "-v", "error", "-noautorotate", *accel.decode_args(), "-ss", f"{start - pre:.4f}",
          "-i", str(path), "-t", f"{seconds + pre:.3f}", "-vf", f"fps={fps},scale={width}:{height}",
          "-f", "rawvideo", "-pix_fmt", "nv12", "-"],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -632,7 +632,7 @@ class NV12Encoder:
 
     def __init__(self, path: Path, w: int, h: int, fps: int = FPS, bitrate: str = "16M"):
         self.proc = subprocess.Popen(
-            ["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "nv12",
+            [accel.ffmpeg(), "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "nv12",
              "-s", f"{w}x{h}", "-r", str(fps), "-i", "-",
              *accel.h264_args(bitrate),
              "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709",

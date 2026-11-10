@@ -49,6 +49,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).parent))
+import accel  # noqa: E402
+
 FS = 48_000          # audio sample rate used for sync
 PREVIEW_W = 960      # width of each phone's frame in the preview
 PREVIEW_SECONDS = 12
@@ -67,7 +70,7 @@ PIECE_MIN_SYNC_S = 30.0  # shorter pieces are placed from the stamps (and the se
 
 def probe_start(path: Path, kind: str) -> float:
     out = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", f"{kind}:0",
+        [accel.ffprobe(), "-v", "error", "-select_streams", f"{kind}:0",
          "-show_entries", "stream=start_time", "-of", "csv=p=0", str(path)],
         check=True, capture_output=True, text=True).stdout.strip()
     # A stream with side data (the Pixel 11 Pro's display matrix) gets a
@@ -78,7 +81,7 @@ def probe_start(path: Path, kind: str) -> float:
 def load_audio(path: Path) -> np.ndarray:
     """Mono float32 at FS, sample 0 at file time 0 (audio start_time is 0)."""
     raw = subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", str(path), "-vn", "-ac", "1",
+        [accel.ffmpeg(), "-v", "error", "-i", str(path), "-vn", "-ac", "1",
          "-ar", str(FS), "-f", "f32le", "-"],
         check=True, capture_output=True).stdout
     return np.frombuffer(raw, dtype=np.float32)
@@ -92,7 +95,7 @@ def frames_at(path: Path, start: float, count: int, fps: float,
     raw = subprocess.run(
         # -noautorotate: the files' display rotation is handled from the
         # manifest's orientation, so don't let ffmpeg apply it as well.
-        ["ffmpeg", "-v", "error", "-noautorotate", "-ss", f"{start:.4f}", "-i", str(path),
+        [accel.ffmpeg(), "-v", "error", "-noautorotate", "-ss", f"{start:.4f}", "-i", str(path),
          "-vf", vf, "-frames:v", str(count),
          "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
         check=True, capture_output=True).stdout
@@ -262,9 +265,9 @@ class Encoder:
         w, h = size[0] // 2 * 2, size[1] // 2 * 2
         self.size = (w, h)
         self.proc = subprocess.Popen(
-            ["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24",
-             "-s", f"{w}x{h}", "-r", str(fps), "-i", "-", "-c:v", "libx264",
-             "-crf", "20", "-pix_fmt", "yuv420p", str(path)],
+            [accel.ffmpeg(), "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24",
+             "-s", f"{w}x{h}", "-r", str(fps), "-i", "-", *accel.h264_args("8M"),  # VideoToolbox on a Mac
+             "-pix_fmt", "yuv420p", str(path)],
             stdin=subprocess.PIPE)
 
     def write(self, frame: np.ndarray) -> None:

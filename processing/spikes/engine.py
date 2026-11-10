@@ -103,6 +103,8 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import accel  # noqa: E402  (python_cmd, ffprobe: the packaged engine's programs)
 SCHEMAS = HERE.parents[1] / "schemas"
 VERSION = 1
 TEAMS_SET = "engine"          # labels_engine/ and teams/engine/: the kit sample this engine makes
@@ -224,7 +226,9 @@ def step(job: Job, name: str, args: list[str], *, done: Path | None = None, uv_w
         raise Stop()
     job.logs.mkdir(parents=True, exist_ok=True)
     log = job.logs / f"{name}.log"
-    cmd = ["uv", "run", "-q", *[a for w in uv_with for a in ("--with", w)], str(HERE / args[0]), *args[1:]]
+    py = accel.python_cmd()
+    extra = [a for w in uv_with for a in ("--with", w)] if py[0] == "uv" else []  # a packaged Python has them all
+    cmd = [*py, *extra, str(HERE / args[0]), *args[1:]]
     emit("step", step=name, status="started", log=str(log))
     t0 = time.time()
     with log.open("a") as f:
@@ -788,7 +792,7 @@ def check_disk(job: Job) -> None:
 
 def video_seconds(path: Path) -> float | None:
     try:
-        r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+        r = subprocess.run([accel.ffprobe(), "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
                            capture_output=True, text=True, timeout=60)
         return float(r.stdout.strip())
     except (OSError, ValueError, subprocess.SubprocessError):

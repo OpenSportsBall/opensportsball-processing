@@ -1,0 +1,15 @@
+# The packaged engine's Python dependencies: the union of the `# /// script`
+# lists of every script osb-engine runs (engine.py, phase0, pitch, labelset,
+# teams, playeval, jointfit, fullgame -> ballwin, roles, follow) and what
+# they import. Pinned for macOS arm64 in requirements.txt:
+#     uv pip compile packaging/mac/requirements.in --python-version 3.12 \
+#         --python-platform aarch64-apple-darwin -o packaging/mac/requirements.txt
+numpy>=1.26
+scipy>=1.13
+opencv-python-headless>=4.10
+torch>=2.4
+rfdetr>=1.11
+coremltools>=8,<10
+scikit-learn>=1.4
+pyyaml>=6
+jsonschema>=4.20
