@@ -1,0 +1,282 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opensportsball.dev/schemas/engine-event.schema.json",
+  "title": "Engine progress event",
+  "description": "One line of the engine's stdout (JSON lines). Unknown event types and fields may appear in later versions; ignore them.",
+  "type": "object",
+  "required": [
+    "event",
+    "at"
+  ],
+  "properties": {
+    "event": {
+      "type": "string"
+    },
+    "at": {
+      "type": "string",
+      "description": "Local time with offset."
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "event": {
+          "const": "step"
+        },
+        "step": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "started",
+            "done",
+            "skipped"
+          ]
+        },
+        "seconds": {
+          "type": "number"
+        },
+        "log": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "step",
+        "status"
+      ]
+    },
+    {
+      "properties": {
+        "event": {
+          "const": "questions"
+        },
+        "path": {
+          "type": "string"
+        },
+        "pending": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "path",
+        "pending"
+      ]
+    },
+    {
+      "properties": {
+        "event": {
+          "const": "answer"
+        },
+        "question": {
+          "enum": [
+            "cameras",
+            "pitch",
+            "kits"
+          ]
+        },
+        "result": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "question",
+        "result"
+      ]
+    },
+    {
+      "properties": {
+        "event": {
+          "const": "needs_answers"
+        },
+        "pending": {
+          "type": "array"
+        },
+        "questions": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pending"
+      ]
+    },
+    {
+      "properties": {
+        "event": {
+          "const": "progress"
+        },
+        "stage": {
+          "type": "string"
+        },
+        "fraction": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "chunks": {
+          "type": "integer"
+        },
+        "ballDone": {
+          "type": "integer"
+        },
+        "followDone": {
+          "type": "integer"
+        },
+        "elapsedS": {
+          "type": "number"
+        },
+        "etaS": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "From this run's pace; null until one chunk is done."
+        }
+      },
+      "required": [
+        "stage",
+        "fraction"
+      ]
+    },
+    {
+      "properties": {
+        "event": {
+          "const": "done"
+        },
+        "output": {
+          "type": "string"
+        },
+        "seconds": {
+          "type": "number"
+        },
+        "ballAimShare": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "run: share of the game the camera aimed at the ball. Low (under ~0.2) usually means the models don't know this ball; ball labels fix that."
+        },
+        "ballAimByChunk": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "description": "run: the same per chunk, in percent."
+        }
+      },
+      "required": [
+        "output"
+      ]
+    },
+    {
+      "properties": {
+        "event": {
+          "const": "status"
+        }
+      }
+    },
+    {
+      "properties": {
+        "event": {
+          "const": "error"
+        },
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "log": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ]
+    },
+    {
+      "properties": {
+        "event": {
+          "const": "stopped"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "properties": {
+        "event": {
+          "const": "labelset"
+        },
+        "set": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "ball",
+            "moments"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "items": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "set",
+        "path"
+      ]
+    },
+    {
+      "properties": {
+        "event": {
+          "const": "labels"
+        },
+        "set": {
+          "type": "string"
+        },
+        "labelled": {
+          "type": "integer"
+        },
+        "items": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "set",
+        "labelled"
+      ]
+    },
+    {
+      "properties": {
+        "event": {
+          "const": "share"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "files": {
+          "type": "integer"
+        },
+        "reason": {
+          "type": "string",
+          "description": "Why nothing was written, when path is null."
+        }
+      },
+      "required": [
+        "name"
+      ]
+    }
+  ]
+}

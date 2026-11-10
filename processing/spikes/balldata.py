@@ -16,10 +16,13 @@ a tile at a random offset, its box sized from its distance (pitch map and
 camera: a 22 cm ball, plus margin for blur). Negatives: empty field tiles
 from frames without a ball, and hard negatives where the off-the-shelf
 detector's suggestions were wrong (kit, paint, lights). "Unsure" frames
-are left out. Moments are split 80/20 into train and valid (both phones
+are left out, and so are moments in held-out time (holdout.py: test
+labels no model trains on). Moments are split 80/20 into train and valid (both phones
 of a moment on the same side); test is a copy of valid.
 
-Writes <out>/{train,valid,test}/ with images and _annotations.coco.json.
+Writes <out>/{train,valid,test}/ with images and _annotations.coco.json,
+and <out>/holdout.json (the held-out time left out; ballmerge.py and
+balltrain.py check it).
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 import follow  # noqa: E402
+import holdout  # noqa: E402
 import phase0  # noqa: E402
 import pitch as P  # noqa: E402
 
@@ -85,6 +89,7 @@ def main(rec: Path, out: Path) -> None:
         return float(np.clip(BALL_M / dist * cam.f * BOX_MARGIN, *BOX_PX))
 
     rng = np.random.default_rng(SEED)
+    held = holdout.Holdout(rec)
     if out.exists():
         shutil.rmtree(out)
     coco = {s: {"images": [], "annotations": [], "categories": [{"id": 1, "name": "ball", "supercategory": "ball"}]}
@@ -114,8 +119,12 @@ def main(rec: Path, out: Path) -> None:
         counts[split]["tiles"] += 1
         counts[split][kind] = counts[split].get(kind, 0) + 1
 
+    n_held = 0
     for it in items:
         moment = it["id"] if it.get("kind") == "pair" else it["id"].rsplit("_", 1)[0]
+        if held.held(it["segment"], it["t"]):
+            n_held += 1
+            continue
         split = split_of(moment)
         for f in (it["frames"] if it.get("kind") == "pair" else [it]):
             v = labels.get(f["id"])
@@ -147,6 +156,9 @@ def main(rec: Path, out: Path) -> None:
     for s, d in coco.items():
         (out / s / "_annotations.coco.json").write_text(json.dumps(d))
     shutil.copytree(out / "valid", out / "test")
+    (out / "holdout.json").write_text(json.dumps(held.stamp()))
+    if n_held:
+        print(f"{n_held} labelled moments in held-out time {held.windows} left out")
     for s, c in counts.items():
         print(f"{s}: {c['tiles']} tiles ({c.get('ball', 0)} around balls, {c['empty']} empty, {c['hard']} hard negatives),"
               f" {c['balls']} ball boxes")

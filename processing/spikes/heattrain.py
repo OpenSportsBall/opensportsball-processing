@@ -35,7 +35,8 @@ ball, with flips and brightness jitter; the target is a disk at the ball
 (WASB's binary target, radius at least 2.5 px) under WASB's weighted
 BCE, on the middle frame's output. --hold leaves a label set out (and
 the random set's frames within 20 s of that clip) and scores it every
-EVAL_EVERY steps. Checkpoints go to <recording>/heattrain/<name>.pt.
+EVAL_EVERY steps. Frames in held-out time (holdout.py: test labels no
+model trains on) never train, whatever --hold says. Checkpoints go to <recording>/heattrain/<name>.pt.
 
 `eval` runs a model (or the stock one) over every frame of a set as
 ballwin.py's full scans do (2x and 4x tiles) and prints, per peak
@@ -60,6 +61,7 @@ import torch.nn.functional as F
 sys.path.insert(0, str(Path(__file__).parent))
 import ballheat  # noqa: E402
 import balljudge  # noqa: E402
+import holdout  # noqa: E402
 import gpu  # noqa: E402
 import phase0  # noqa: E402
 
@@ -171,6 +173,8 @@ def load_sets(rec: Path, hold: str | None) -> tuple[list[dict], list[dict]]:
         ts = [it["t"] for it in c]
         span = (c[0]["segment"], min(ts) - HOLD_MARGIN_S, max(ts) + HOLD_MARGIN_S)
     train, held = [], []
+    marked = holdout.Holdout(rec)
+    n_marked = 0
     for d in sorted((rec / "heattrain").glob("*/meta.json")):
         name = d.parent.name
         for fid, m in json.loads(d.read_text()).items():
@@ -179,8 +183,12 @@ def load_sets(rec: Path, hold: str | None) -> tuple[list[dict], list[dict]]:
                 held.append(row)
             elif span and m["segment"] == span[0] and span[1] <= m["t"] <= span[2]:
                 continue
+            elif marked.held(m["segment"], m["t"]):
+                n_marked += 1
             else:
                 train.append(row)
+    if n_marked:
+        print(f"{n_marked} frames in held-out time {marked.windows} kept out of training", flush=True)
     return train, held
 
 

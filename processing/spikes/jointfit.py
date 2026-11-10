@@ -14,6 +14,13 @@
     uv run processing/spikes/jointfit.py lenses <rec> [<rec> ...]
     uv run processing/spikes/jointfit.py bench footage/fixtures/pitch/<name> <rec> <dir> [<dir> ...]
 
+When the phones can't be stitched (follow.setup_cameras: "calibration
+failed", rec5), osb-engine (engine.py) builds the cameras from the pitch:
+    uv run processing/spikes/jointfit.py <rec> choices <out dir> [--seg N]
+    uv run processing/spikes/jointfit.py <rec> rough --left main|secondary [--angle 80]
+    uv run processing/spikes/jointfit.py <rec> search [--seg N] [--out DIR]
+    uv run processing/spikes/jointfit.py <rec> install DIR [--seg N]
+
 Why: the stitch (phase0/cameras.json) is fitted on the strip where the two
 phones overlap, which can't separate each phone's focal length from the
 angle between them (the same Pixel 11 came out 4% apart on rec6 and rec7).
@@ -30,6 +37,33 @@ Exact: the panorama is a grid of directions through those cameras. A tap is
 only as right in that phone's frame as the panorama was there (Main's side
 always; Secondary's as well as the stitch put Secondary's rotation for the
 segment the panorama was built from, which isn't recorded).
+
+choices: the panorama drawn through rough cameras with each phone on the
+left (main_left.jpg, secondary_left.jpg), for the question that asks which
+shows the pitch in one piece: the right order joins up (rec5: one halfway
+line, the arc and touchlines run through), the wrong one shows two broken
+halves. Two stills side by side don't settle it: the phones' views cross,
+so each phone's inner edge isn't where the other's picture continues.
+
+rough: phase0/cameras.json with no stitcher: each phone's tilt and roll
+from the manifest's gravity sensor, its focal from the lens table (else
+the manifest's field of view), the phones ROUGH_ANGLE deg apart with the
+one the user named on the left. Good enough to draw a panorama to tap the
+pitch on (taps are exact in the phone they land in, whatever the cameras);
+not to render. Marked "rough" so the engine knows the fit must follow.
+
+search: the joint fit from rough cameras, which keeps the start's angle
+between the phones (rec5: 70 stays 70), so it is run from SEARCH_ANGLES x
+START_HEIGHTS (pitch.START_POSE at those heights) and the start with the
+smallest tap error (median + worst / 4, non-finite fits dropped) is
+written to DIR (default <rec>/joint/). Needs taps (taps_src.json).
+
+install: puts DIR's cameras.json and pitch.json into the recording
+(phase0/cameras.json, the rough one kept as cameras_rough.json; pitch.json
+with no warp), redraws pitch/background.png from the new cameras, turns
+taps_src.json into taps.json in the new panorama's degrees, and removes
+what depended on the old cameras (goals.json, review.json, overlays) for
+the engine to remake.
 
 fit: per-phone median backgrounds of one segment (default: the middle one),
 their paint (pitch.line_mask, the recording's paint colour), and one least
@@ -83,6 +117,9 @@ import pitch as P  # noqa: E402
 
 W, H = follow.SRC_W, follow.SRC_H
 LENS_TABLE = Path(__file__).parent / "lenses.json"
+ROUGH_ANGLE = 80.0     # rough cameras: degrees between the phones (the mount: rec5 81, rec7 79)
+SEARCH_ANGLES = (74.0, 77.0, 80.0, 83.0, 86.0, 89.0)  # search: starts across the mount's range
+START_HEIGHTS = (1.9, 3.0, 8.0)  # search: pitch.START_POSE at these camera heights (5 m diverged on rec5)
 TAP_PX = 3.0          # how well a tap is placed, px at 4K (pitch.TAP_PX is 3 panorama px, ~2.5 here)
 TAP_WEIGHT = 3.0      # as pitch.TAP_WEIGHT
 TRUNCS = (32, 10, 5)  # px at 4K: coarse to fine (pitch.py's 40/12/6 panorama px)
@@ -386,28 +423,37 @@ def draw_overlay(bg, xs, ys, ok, taps, role, pred):
 
 def fit_main(rec: Path, args) -> None:
     out = Path(args.out) if args.out else rec / "joint"
-    out.mkdir(parents=True, exist_ok=True)
     manifest, report, _, _ = rec_info(rec)
-    nseg = len(report["segments"])
-    seg = args.seg if args.seg is not None else nseg // 2
+    seg = args.seg if args.seg is not None else len(report["segments"]) // 2
     cm, cs, _ = load_cameras(rec / "phase0" / "cameras.json")
     pose0 = load_pose(rec / "pitch" / "pitch.json")
     taps = {} if args.no_taps else load_src_taps(rec)
-    taps = {n: t for n, t in taps.items() if not t.get("fromFit")}
     table = json.loads(Path(args.lenses).read_text()) if args.lenses else None
     if table and args.exclude_self:
         table = drop_recording(table, rec.name)
+    rep = fit_write(rec, cm, cs, pose0, seg, taps, table, out, args.dist_sd, args.offset_sd)
+    print_report(rec.name, out.name, rep)
+
+
+def fit_write(rec: Path, cm, cs, pose0: P.PitchPose, seg: int, taps: dict, table: dict | None, out: Path,
+              dist_sd: float = DIST_SD, offset_sd: float = OFFSET_SD_M, verbose: bool = True) -> dict:
+    """One joint fit from these cameras and pitch pose; writes cameras.json, pitch.json, report.json
+    and the overlays to `out`, returns the report."""
+    out.mkdir(parents=True, exist_ok=True)
+    manifest, _, _, _ = rec_info(rec)
+    taps = {n: t for n, t in taps.items() if not t.get("fromFit")}
     priors = lens_priors(manifest, table, bool(taps))
-    priors.update(distSd=args.dist_sd, offsetSdM=args.offset_sd)
+    priors.update(distSd=dist_sd, offsetSdM=offset_sd)
     colour = P.paint_colour(rec)
-    print(f"{rec.name}: segment {seg}, {len(taps)} taps, paint {colour}; priors "
-          + ", ".join(f"{r} f {priors[r][0]:.1f} +-{100 * priors[r][1]:.0f}% ({priors[r][4]})" for r in ("main", "secondary"))
-          + f", k1/k2 +-{args.dist_sd}, lens offset +-{args.offset_sd} m")
+    if verbose:
+        print(f"{rec.name}: segment {seg}, {len(taps)} taps, paint {colour}; priors "
+              + ", ".join(f"{r} f {priors[r][0]:.1f} +-{100 * priors[r][1]:.0f}% ({priors[r][4]})" for r in ("main", "secondary"))
+              + f", k1/k2 +-{dist_sd}, lens offset +-{offset_sd} m")
     bgm, bgs = backgrounds(rec, seg, rec / "joint")
     paints = [Paint(bgm, colour), Paint(bgs, colour)]
     model = Model(cm, cs)
     v0 = start_vector(cm, cs, pose0)
-    v = fit(model, v0, paints, taps, priors)
+    v = fit(model, v0, paints, taps, priors, verbose=verbose)
     cams = model.cameras(v)
     pose = model.pose(v)
     info = {"segment": seg, "taps": len(taps), "paint": colour, "priors": {k: (list(p) if isinstance(p, tuple) else p) for k, p in priors.items()},
@@ -425,7 +471,175 @@ def fit_main(rec: Path, args) -> None:
         pred = {n: e["pred"] for n, e in rep["taps"].items() if e["phone"] == role and "pred" in e}
         cv2.imwrite(str(out / f"overlay_{role}.jpg"), draw_overlay(bg, *proj[k], all_taps, role, pred),
                     [cv2.IMWRITE_JPEG_QUALITY, 88])
+    return rep
+
+
+# ------------------------------------------------------- no stitch: rough
+
+def rough_rotation(yaw_deg: float, pitch_deg: float, roll_deg: float) -> np.ndarray:
+    """Camera-to-world rotation (columns: camera x right, y down, z forward; world y down, as
+    follow.Camera) from a yaw and the manifest's orientation (pitchDeg < 0 looks down; its rollDeg
+    turns the other way to follow.Camera's)."""
+    y, p, r = np.radians([yaw_deg, -pitch_deg, -roll_deg])
+    z = np.array([np.sin(y) * np.cos(p), np.sin(p), np.cos(y) * np.cos(p)])
+    x0 = np.array([np.cos(y), 0.0, -np.sin(y)])
+    y0 = np.cross(z, x0)
+    return np.stack([np.cos(r) * x0 + np.sin(r) * y0, -np.sin(r) * x0 + np.cos(r) * y0, z], axis=1)
+
+
+def rough_cameras(manifest: dict, left: str, angle: float, table: dict | None) -> dict:
+    """cameras.json with no stitcher (see rough above); `left` is the phone on the left."""
+    out = {}
+    for d in manifest["devices"]:
+        e = (table or {}).get(lens_key(d))
+        f = e["f"] if e else manifest_focal(d)
+        k1, k2 = (e["k1"], e["k2"]) if e else (0.0, 0.0)
+        yaw = (-angle / 2) if d["role"] == left else (angle / 2)
+        o = d.get("orientation") or {}
+        R = rough_rotation(yaw, o.get("pitchDeg", -8.0), o.get("rollDeg", 0.0))
+        out[d["role"]] = [float(f), follow.REF_W / 2, follow.REF_W * 9 / 32, float(k1), float(k2), R.tolist()]
+    out["secondaryLensOffsetCameraHeights"] = [0.0, 0.0, 0.0]
+    out["rough"] = {"left": left, "angleDeg": angle, "focal": "lens table" if table else "manifest FOV",
+                    "about": "no stitcher: gravity sensors, focal prior, the user's left/right; jointfit.py search follows"}
+    return out
+
+
+def rough_main(rec: Path, left: str, angle: float) -> None:
+    cams = rec / "phase0" / "cameras.json"
+    if cams.exists() and not json.loads(cams.read_text()).get("rough"):
+        sys.exit(f"{cams} exists and isn't rough: the stitch worked, nothing to do")
+    manifest = json.loads((rec / "manifest.json").read_text())
+    table = json.loads(LENS_TABLE.read_text()) if LENS_TABLE.exists() else None
+    j = rough_cameras(manifest, left, angle, table)
+    cams.write_text(json.dumps(j))
+    print(f"rough cameras: {left} on the left, {angle:g} deg apart, focal from {j['rough']['focal']}: "
+          + ", ".join(f"{r} f {j[r][0]:.1f}" for r in ("main", "secondary")))
+
+
+def choices_main(rec: Path, out: Path, seg: int | None) -> None:
+    """The panorama through rough cameras with each phone on the left, 2000 px wide."""
+    _, report, _, _ = rec_info(rec)
+    seg = seg if seg is not None else len(report["segments"]) // 4
+    out.mkdir(parents=True, exist_ok=True)
+    cams = rec / "phase0" / "cameras.json"
+    if cams.exists() and not json.loads(cams.read_text()).get("rough"):
+        sys.exit(f"{cams} exists and isn't rough: the stitch worked, nothing to ask")
+    manifest = json.loads((rec / "manifest.json").read_text())
+    table = json.loads(LENS_TABLE.read_text()) if LENS_TABLE.exists() else None
+    try:
+        for left in ("main", "secondary"):
+            cams.write_text(json.dumps(rough_cameras(manifest, left, ROUGH_ANGLE, table)))
+            pano = P.Pano()
+            bg = P.background(rec, seg, pano)
+            cv2.imwrite(str(out / f"{left}_left.jpg"), cv2.resize(bg, (2000, round(2000 * bg.shape[0] / bg.shape[1])),
+                                                                  interpolation=cv2.INTER_AREA), [cv2.IMWRITE_JPEG_QUALITY, 85])
+    finally:
+        cams.unlink(missing_ok=True)  # no cameras until the user has picked
+    print(f"panoramas of segment {seg} with each phone on the left in {out}")
+
+
+def tap_score(rep: dict) -> float:
+    px = [t["px"] for t in rep["taps"].values() if "px" in t and not t.get("fromFit")]
+    if not px or not np.all(np.isfinite(px)):
+        return float("inf")
+    return float(np.median(px) + max(px) / 4)
+
+
+def search_main(rec: Path, seg: int | None, out: Path | None) -> None:
+    """The joint fit from rough cameras at every start in SEARCH_ANGLES x START_HEIGHTS; the best goes to out."""
+    import shutil
+
+    out = out or rec / "joint"
+    manifest, report, _, _ = rec_info(rec)
+    seg = seg if seg is not None else len(report["segments"]) // 2
+    cur = json.loads((rec / "phase0" / "cameras.json").read_text())
+    rough = cur.get("rough") or {}
+    if "left" not in rough:
+        sys.exit("search starts from rough cameras (jointfit.py rough): phase0/cameras.json isn't")
+    taps = load_src_taps(rec)
+    if sum(not t.get("fromFit") for t in taps.values()) < 4:
+        sys.exit("search needs taps: at least 4 tapped pitch points (taps_src.json)")
+    table = json.loads(LENS_TABLE.read_text()) if LENS_TABLE.exists() else None
+    tmp = out.parent / (out.name + "_search")
+    best, results = None, []
+    for angle in SEARCH_ANGLES:
+        j = rough_cameras(manifest, rough["left"], angle, table)
+        cm = follow.Camera(*j["main"][:5], np.array(j["main"][5]))
+        cs = follow.Camera(*j["secondary"][:5], np.array(j["secondary"][5]), t=[0.0, 0.0, 0.0])
+        for h in START_HEIGHTS:
+            start = list(P.START_POSE)
+            start[2] = h
+            d = tmp / f"a{angle:g}_h{h:g}"
+            try:
+                rep = fit_write(rec, cm, cs, P.PitchPose(start), seg, taps, None, d, verbose=False)
+                sc = tap_score(rep)
+            except Exception as e:  # a start that runs off (the fit's own numerics)
+                print(f"  {angle:g} deg, {h:g} m: failed ({e})", flush=True)
+                continue
+            fitted = json.loads((d / "cameras.json").read_text())
+            ang = np.degrees(np.arctan2(fitted["main"][5][0][2], fitted["main"][5][2][2])
+                             - np.arctan2(fitted["secondary"][5][0][2], fitted["secondary"][5][2][2]))
+            print(f"  start {angle:g} deg apart, {h:g} m up: tap score {sc:.1f} px, fitted {abs(ang):.1f} deg apart", flush=True)
+            results.append({"angleDeg": angle, "heightM": h, "score": sc if np.isfinite(sc) else None,
+                            "fittedAngleDeg": round(float(abs(ang)), 2)})
+            if np.isfinite(sc) and (best is None or sc < best[0]):
+                best = (sc, d)
+    if best is None:
+        sys.exit("no start converged: check the taps")
+    out.mkdir(parents=True, exist_ok=True)  # joint/ also caches the backgrounds: copy over, don't replace
+    for f in best[1].iterdir():
+        shutil.copy2(f, out / f.name)
+    rep = json.loads((out / "report.json").read_text())
+    rep["search"] = {"best": best[1].name, "starts": results}
+    (out / "report.json").write_text(json.dumps(rep, indent=1))
+    shutil.rmtree(tmp, ignore_errors=True)
+    print(f"best start {best[1].name}: tap score {best[0]:.1f} px -> {out}")
     print_report(rec.name, out.name, rep)
+
+
+def taps_in_angles(taps_src: dict, cams) -> dict:
+    """taps_src.json's taps (phone pixels) as panorama degrees through these cameras (at W)."""
+    taps = {}
+    for n, t in taps_src["taps"].items():
+        if t.get("skipped"):
+            taps[n] = {"skipped": True}
+            continue
+        d = cams[0 if t["phone"] == "main" else 1].unproject(np.array([[t["x"], t["y"]]], float))[0]
+        taps[n] = {"yaw": round(float(np.degrees(np.arctan2(d[0], d[2]))), 3),
+                   "pitch": round(float(np.degrees(np.arctan2(d[1], np.hypot(d[0], d[2])))), 3)}
+        if t.get("fromFit"):
+            taps[n]["fromFit"] = True
+    return taps
+
+
+def install_main(rec: Path, src: Path, seg: int | None) -> None:
+    """A joint fit's cameras and pitch into the recording, before anything else used the old ones."""
+    import shutil
+
+    _, report, _, _ = rec_info(rec)
+    seg = seg if seg is not None else len(report["segments"]) // 2
+    p0, pd = rec / "phase0", rec / "pitch"
+    cur = json.loads((p0 / "cameras.json").read_text())
+    if cur.get("rough"):
+        shutil.copy2(p0 / "cameras.json", p0 / "cameras_rough.json")
+    shutil.copy2(src / "cameras.json", p0 / "cameras.json")
+    shutil.copy2(src / "pitch.json", pd / "pitch.json")
+    new_cm, new_cs, _ = load_cameras(p0 / "cameras.json")
+    if (pd / "taps_src.json").exists():
+        taps = taps_in_angles(json.loads((pd / "taps_src.json").read_text()), (new_cm.at(W), new_cs.at(W)))
+        (pd / "taps.json").write_text(json.dumps(taps, indent=1))
+    pano = P.Pano()
+    bg = P.background(rec, seg, pano)
+    cv2.imwrite(str(pd / "background.png"), bg)
+    cv2.imwrite(str(pd / "background.jpg"), cv2.resize(bg, (pano.w // 3, pano.h // 3)))
+    over = cv2.resize(P.draw(bg, pano, load_pose(pd / "pitch.json")), (pano.w // 2, pano.h // 2))
+    # overlay_taps.jpg is the overlay for a fit from taps (what engine.py's pitch question shows)
+    for n in ("overlay.jpg", "overlay_taps.jpg"):
+        cv2.imwrite(str(pd / n), over, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    for n in ("goals.json", "review.json"):
+        (pd / n).unlink(missing_ok=True)
+    # taps_src.json stays: its pixels don't depend on the cameras (only its "source" record is old).
+    print(f"installed {src}: cameras and pitch; panorama from segment {seg}; goals and review to remake")
 
 
 # ----------------------------------------------------------------- score
@@ -663,17 +877,7 @@ def mirror_main(src: Path, joint: Path, dest: Path, bg_seg: int) -> None:
     # taps.json in the new panorama's degrees, from the stitch-free taps
     ts = pd / "taps_src.json"
     if ts.exists():
-        cams = (new_cm.at(W), new_cs.at(W))
-        taps = {}
-        for n, t in json.loads(ts.read_text())["taps"].items():
-            if t.get("skipped"):
-                taps[n] = {"skipped": True}
-                continue
-            d = cams[0 if t["phone"] == "main" else 1].unproject(np.array([[t["x"], t["y"]]], float))[0]
-            taps[n] = {"yaw": round(float(np.degrees(np.arctan2(d[0], d[2]))), 3),
-                       "pitch": round(float(np.degrees(np.arctan2(d[1], np.hypot(d[0], d[2])))), 3)}
-            if t.get("fromFit"):
-                taps[n]["fromFit"] = True
+        taps = taps_in_angles(json.loads(ts.read_text()), (new_cm.at(W), new_cs.at(W)))
         (pd / "taps.json").write_text(json.dumps(taps, indent=1))
     for sdir in sorted((src / "playeval").glob("*/")) if (src / "playeval").exists() else []:
         if not (sdir / "clip.json").exists():
@@ -874,6 +1078,27 @@ def main() -> None:
         return
     if len(sys.argv) > 1 and sys.argv[1] == "adopt":
         adopt_main(Path(sys.argv[2]), Path(sys.argv[3]))
+        return
+    if len(sys.argv) > 2 and sys.argv[2] in ("rough", "choices", "search", "install"):
+        ap = argparse.ArgumentParser()
+        ap.add_argument("rec", type=Path)
+        ap.add_argument("cmd")
+        ap.add_argument("dir", nargs="?")
+        ap.add_argument("--seg", type=int)
+        ap.add_argument("--left", choices=["main", "secondary"])
+        ap.add_argument("--angle", type=float, default=ROUGH_ANGLE)
+        ap.add_argument("--out")
+        a = ap.parse_args()
+        if a.cmd == "rough":
+            if not a.left:
+                sys.exit("rough needs --left main|secondary")
+            rough_main(a.rec, a.left, a.angle)
+        elif a.cmd == "choices":
+            choices_main(a.rec, Path(a.dir), a.seg)
+        elif a.cmd == "search":
+            search_main(a.rec, a.seg, Path(a.out) if a.out else None)
+        else:
+            install_main(a.rec, Path(a.dir), a.seg)
         return
     if len(sys.argv) > 1 and sys.argv[1] == "stitch":
         i = sys.argv.index("--segs")

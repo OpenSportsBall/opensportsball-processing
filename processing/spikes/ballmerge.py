@@ -10,7 +10,8 @@ are linked (not copied) under a per-input prefix, and the COCO annotations
 renumbered. Each recording keeps its own train/valid split, so no moment
 is on both sides. "<dir>*N" repeats that input's train split N times, to
 weight a small new set (a ball colour the rest hasn't seen) against a
-large old one; valid and test are never repeated.
+large old one; valid and test are never repeated. Each input's holdout.json (the held-out
+time balldata.py left out) is checked and carried into the output.
 """
 
 from __future__ import annotations
@@ -20,9 +21,19 @@ import os
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+import holdout  # noqa: E402
+
 
 def main(out: Path, specs: list[str]) -> None:
     inputs = [(Path(s.split("*")[0]), int(s.split("*")[1]) if "*" in s else 1) for s in specs]
+    stamp = {}
+    for src, _ in inputs:
+        st = json.loads((src / "holdout.json").read_text()) if (src / "holdout.json").exists() else None
+        holdout.check_stamp(st, str(src))
+        stamp.update(st)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "holdout.json").write_text(json.dumps(stamp))
     for split in ("train", "valid", "test"):
         dest = out / split
         dest.mkdir(parents=True, exist_ok=True)

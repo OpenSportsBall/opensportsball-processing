@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opensportsball.dev/schemas/engine-label-answers.schema.json",
+  "title": "Answers to an engine label set",
+  "description": "The user's labels for one set (engine-labelset.schema.json), given to `engine.py label <job> --answers`. Items may be answered in several files; a later answer to an item replaces the earlier one.",
+  "type": "object",
+  "required": ["set"],
+  "additionalProperties": false,
+  "properties": {
+    "set": { "type": "string" },
+    "ball": {
+      "type": "object",
+      "description": "By item id. status ball: the match ball is at x, y (image pixels); none: it isn't visible; unsure: can't tell.",
+      "additionalProperties": {
+        "oneOf": [
+          { "type": "object", "required": ["status", "x", "y"], "additionalProperties": false,
+            "properties": { "status": { "const": "ball" }, "x": { "type": "number" }, "y": { "type": "number" } } },
+          { "type": "object", "required": ["status"], "additionalProperties": false,
+            "properties": { "status": { "enum": ["none", "unsure"] } } }
+        ]
+      }
+    },
+    "moments": {
+      "type": "object",
+      "description": "By item id: the part of the field the camera had to show, in panorama degrees (yaw right +, pitch down +), or skipped.",
+      "additionalProperties": {
+        "oneOf": [
+          { "type": "object", "required": ["yaw0", "yaw1", "pitch0", "pitch1"], "additionalProperties": false,
+            "properties": { "yaw0": { "type": "number" }, "yaw1": { "type": "number" },
+                            "pitch0": { "type": "number" }, "pitch1": { "type": "number" }, "note": { "type": "string" } } },
+          { "type": "object", "required": ["skipped"], "additionalProperties": false,
+            "properties": { "skipped": { "const": true } } }
+        ]
+      }
+    }
+  },
+  "oneOf": [ { "required": ["ball"] }, { "required": ["moments"] } ]
+}

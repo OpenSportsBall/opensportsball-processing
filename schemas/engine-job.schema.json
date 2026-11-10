@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opensportsball.dev/schemas/engine-job.schema.json",
+  "title": "Processing engine job",
+  "description": "What the processing engine (osb-engine) is asked to do with one recording. Written by whatever starts the engine: the Mac app, the cloud job, or a person at a terminal.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "recording"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "recording": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Folder holding the merged manifest.json and every segment file at its objectKey. Relative paths are relative to the job file. The engine writes its own files inside it (engine/, phase0/, pitch/, teams/, detect/, follow/, fullgame/)."
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "height": {
+          "enum": [
+            1080,
+            1440
+          ],
+          "default": 1440,
+          "description": "game.mp4's height. 1440 scales the 1080p render up, which YouTube serves with a better codec and bitrate."
+        }
+      }
+    },
+    "options": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "chunkS": {
+          "type": "number",
+          "minimum": 60,
+          "default": 600,
+          "description": "The game is processed in chunks this long; a stopped run resumes at the first unfinished chunk."
+        },
+        "maxChunks": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Only this many chunks (0: all). For tests."
+        },
+        "sample": {
+          "type": "object",
+          "description": "Where the pitch and the kit groups are fitted. Default: a quarter of the way into the recording.",
+          "required": [
+            "segment",
+            "startS",
+            "seconds"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "segment": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Main's segment index."
+            },
+            "startS": {
+              "type": "number",
+              "minimum": 0
+            },
+            "seconds": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          }
+        },
+        "keepIntermediates": {
+          "type": "boolean",
+          "default": false,
+          "description": "Keep fullgame/pieces/, video.mp4 and audio.m4a after game.mp4 is written and checked (by default they are deleted: ~23 GB for 100 minutes). For tests."
+        }
+      }
+    }
+  }
+}

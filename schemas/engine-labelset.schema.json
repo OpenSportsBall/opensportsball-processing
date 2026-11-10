@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opensportsball.dev/schemas/engine-labelset.schema.json",
+  "title": "Engine label set",
+  "description": "A set of ball frames or must-see moments to label, made by `engine.py label` from a finished run: <recording>/engine/labels/<set>/set.json. Image paths are relative to the set's folder. Offered only to users who agree to share: the labels exist to train and score the models.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "set",
+    "kind",
+    "items",
+    "labelled"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "set": {
+      "type": "string",
+      "description": "The set's name, e.g. ball-1; answers name it."
+    },
+    "kind": {
+      "enum": [
+        "ball",
+        "moments"
+      ]
+    },
+    "labelled": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Items with an answer so far."
+    },
+    "panorama": {
+      "type": "object",
+      "description": "moments only: the panoramas' projection. Pixel (x, y) is yaw yawRange[0] + (x + 0.5) * degPerPx, pitch pitchRange[0] + (y + 0.5) * degPerPx (down is +).",
+      "required": [
+        "degPerPx",
+        "yawRange",
+        "pitchRange",
+        "width",
+        "height"
+      ],
+      "properties": {
+        "degPerPx": {
+          "type": "number"
+        },
+        "yawRange": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "pitchRange": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "width": {
+          "type": "integer"
+        },
+        "height": {
+          "type": "integer"
+        }
+      }
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "image",
+          "videoT"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "image": {
+            "type": "string"
+          },
+          "videoT": {
+            "type": "number",
+            "description": "Seconds into game.mp4."
+          },
+          "width": {
+            "type": "integer"
+          },
+          "height": {
+            "type": "integer"
+          },
+          "pick": {
+            "enum": [
+              "detected",
+              "bridged",
+              "missed",
+              "random"
+            ],
+            "description": "ball: the detector found the ball here (detected) or the tracker bridged a gap it missed (bridged, often the hard cases). moments: the user pressed Missed play (missed), or a random moment so the set doesn't hold only failures."
+          },
+          "suggestions": {
+            "type": "array",
+            "description": "ball: likely ball positions in image pixels, best first. fromPath: where the tracked path puts it.",
+            "items": {
+              "type": "object",
+              "required": [
+                "x",
+                "y"
+              ],
+              "properties": {
+                "x": {
+                  "type": "number"
+                },
+                "y": {
+                  "type": "number"
+                },
+                "conf": {
+                  "type": "number"
+                },
+                "fromPath": {
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "camera": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "moments: where the follow cam pointed at that moment, to draw its view on the panorama (16:9, hfovDeg wide).",
+            "properties": {
+              "yawDeg": {
+                "type": "number"
+              },
+              "pitchDeg": {
+                "type": "number"
+              },
+              "hfovDeg": {
+                "type": "number"
+              }
+            }
+          },
+          "answered": {
+            "type": "boolean"
+          },
+          "judged": {
+            "type": "boolean",
+            "description": "ball: false when picked from the detector's candidates without the ball judge (a ball the judge doesn't know)."
+          },
+          "heldOut": {
+            "type": "boolean",
+            "description": "ball: held out for testing (the last quarter of each chunk): never used to train a model, only to score one."
+          }
+        }
+      }
+    }
+  }
+}

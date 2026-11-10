@@ -21,6 +21,13 @@ from pathlib import Path
 
 
 def main(data: Path, out: Path, epochs: int, device: str) -> None:
+    import json
+
+    import holdout
+
+    # Data built before a set was held out (or before the check) would train on test labels.
+    holdout.check_stamp(json.loads((data / "holdout.json").read_text()) if (data / "holdout.json").exists() else None,
+                        str(data))
     import rfdetr
 
     model = rfdetr.RFDETRMedium()

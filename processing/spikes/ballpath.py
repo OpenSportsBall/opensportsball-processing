@@ -41,7 +41,11 @@ ball at rest, lost by the detector for longer than SKIP_MAX), bridged
 the same way. SMOOTH_S > 0 smooths the positions along each run of the
 path, HOLD_S > 0 holds a run's end positions into the frames around it.
 STILL_COST > 0 charges a step under STILL_DEG (a parked spare ball;
-ball.py's "moving" score).
+ball.py's "moving" score). SIZE_W > 0 charges a candidate whose box is
+far from the ball size expected at that spot (its "sizeRatio", from
+size_ratios: the pitch map's distance, so no training): SIZE_W per unit
+of |log(ratio / SIZE_MID)| beyond log(SIZE_TOL). Heads, kit and signs
+are 2x+ too big; the judge learnt the same thing per game.
 
 ~1200 frames x a few candidates: a plain dynamic programme, under a
 second per clip.
@@ -70,6 +74,9 @@ CROSS_COST = 1.0      # switching phone
 SKIP_MAX = 10         # a candidate may follow one up to this many frames earlier directly (1: consecutive only)
 SKIP_RATIO = 1.0      # each frame skipped by such an edge costs this x NONE_COST
 NEAR_W = 0.0          # a candidate within NEAR_PLAYER_M of a player costs this much less
+SIZE_W = 0.0          # per unit of |log(box / expected ball size / SIZE_MID)| beyond log(SIZE_TOL) (0: off)
+SIZE_MID = 1.35       # a ball's box is ~1.35x the ball (margin, blur): rec3 seg3/seg9 median 1.29-1.34
+SIZE_TOL = 1.5        # free within SIZE_MID / 1.5 .. x 1.5 (0.9-2.0x; rec3's balls 1.0-1.8x)
 STILL_DEG = 0.1       # a same-phone step under this is "still" ...
 STILL_COST = 0.0      # ... and costs this (0: off)
 BRIDGE_S = 1.0        # frames skipped by an edge are interpolated when the skip is at most this long
@@ -85,10 +92,27 @@ JUMP_PLAY_MARGIN_M = 10.0   # ... when it is this much farther; closer than that
 JUMP_KEEP_S = 5.0     # ... unless both are at least this long: then both are kept (0: off)
 
 
+def size_ratios(rec: Path, frames: list[dict]) -> None:
+    """Each candidate's box size over the ball diameter expected at its
+    pixel (the pitch map's distance from the camera), as "sizeRatio"."""
+    import balljudge
+
+    exp = balljudge.expected_at(rec)
+    for f in frames:
+        for d in f["detections"]:
+            if "box" in d and "sizeRatio" not in d:
+                x0, y0, x1, y1 = d["box"]
+                e = exp("main" if d["phone"] == 0 else "secondary", (x0 + x1) / 2, (y0 + y1) / 2)
+                d["sizeRatio"] = round(max(x1 - x0, y1 - y0) / max(e, 1e-3), 3)
+
+
 def node_costs(cands, people):
     out = []
     for i, fr in enumerate(cands):
         c = np.array([-np.log(max(1e-6, d["conf"] * d.get("judge", 1.0))) for d in fr], float)
+        if SIZE_W and len(fr):
+            r = np.array([d.get("sizeRatio", SIZE_MID) for d in fr], float)
+            c = c + SIZE_W * np.maximum(0.0, np.abs(np.log(np.maximum(r, 1e-3) / SIZE_MID)) - np.log(SIZE_TOL))
         if NEAR_W and len(fr) and len(people[i]):
             P_ = np.array([d["xz"] for d in fr])
             near = np.array([np.hypot(*(people[i] - p).T).min() for p in P_]) < B.NEAR_PLAYER_M

@@ -1,0 +1,277 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opensportsball.dev/schemas/engine-questions.schema.json",
+  "title": "The engine's questions",
+  "description": "Written by `prepare` to <recording>/engine/questions.json: what the user has to check before the game is processed. Image paths are relative to the recording folder. Answers: engine-answers.schema.json.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "recording",
+    "pending"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "recording": {
+      "type": "string"
+    },
+    "pending": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "cameras",
+          "pitch",
+          "kits"
+        ]
+      },
+      "description": "Questions still to answer; `run` starts only when this is empty. When cameras is pending, pitch and kits aren't asked yet (they need the cameras)."
+    },
+    "pitch": {
+      "type": "object",
+      "required": [
+        "round",
+        "status",
+        "background",
+        "overlay",
+        "fit",
+        "lines",
+        "points"
+      ],
+      "properties": {
+        "round": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "approved"
+          ]
+        },
+        "background": {
+          "type": "string",
+          "description": "The empty-pitch panorama (a median over frames, so players mostly vanish)."
+        },
+        "overlay": {
+          "type": "string",
+          "description": "The same with the fitted pitch drawn on, for a quick look."
+        },
+        "panorama": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "background's pixels and panorama degrees: x = (yaw - yawRange[0]) / degPerPx, y = (pitch - pitchRange[0]) / degPerPx. Yaw right +, pitch down +.",
+          "properties": {
+            "image": {
+              "type": "string"
+            },
+            "degPerPx": {
+              "type": "number"
+            },
+            "yawRange": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "minItems": 2,
+              "maxItems": 2
+            },
+            "pitchRange": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "minItems": 2,
+              "maxItems": 2
+            }
+          }
+        },
+        "fit": {
+          "type": "object",
+          "description": "lengthM, widthM, cameraHeightM, fittedWith."
+        },
+        "lines": {
+          "type": "array",
+          "description": "Each marking as a polyline of [yaw, pitch] in degrees."
+        },
+        "goals": {
+          "type": "array"
+        },
+        "points": {
+          "type": "object",
+          "description": "Named keypoints where the fit puts them, in panorama degrees: what a correction starts from.",
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "yaw",
+              "pitch"
+            ],
+            "properties": {
+              "yaw": {
+                "type": "number"
+              },
+              "pitch": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        "lineColour": {
+          "type": "object"
+        },
+        "approveAllowed": {
+          "type": "boolean",
+          "description": "false when the pitch has to be marked (tapped points) before it can be approved: the cameras came from the pitch, not a stitch, and the first guess is drawn through rough cameras. Absent means true."
+        },
+        "problem": {
+          "type": "string",
+          "description": "Why the last answer wasn't accepted (e.g. approve when approveAllowed is false)."
+        }
+      }
+    },
+    "kits": {
+      "type": "object",
+      "required": [
+        "round",
+        "status",
+        "k",
+        "groups",
+        "splitAllowed"
+      ],
+      "properties": {
+        "round": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "answered"
+          ]
+        },
+        "k": {
+          "type": "integer"
+        },
+        "splitAllowed": {
+          "type": "boolean"
+        },
+        "problem": {
+          "type": "string",
+          "description": "Why the last answer couldn't be used, to show the user."
+        },
+        "groups": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "component",
+              "people",
+              "perMoment",
+              "proposed",
+              "crops"
+            ],
+            "properties": {
+              "component": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "people": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "perMoment": {
+                "type": "number",
+                "description": "People of this group on the pitch per sampled moment (both phones)."
+              },
+              "proposed": {
+                "enum": [
+                  "A",
+                  "B",
+                  "keeperOrReferee",
+                  "other"
+                ],
+                "description": "The engine's guess. A and B are the two sides, in no order: there is no 'your team'."
+              },
+              "crops": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "image"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "image": {
+                      "type": "string"
+                    },
+                    "frame": {
+                      "type": "string"
+                    },
+                    "box": {
+                      "type": "array",
+                      "items": {
+                        "type": "number"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "cameras": {
+      "type": "object",
+      "required": [
+        "round",
+        "status",
+        "panoramas"
+      ],
+      "description": "Asked only when the two phones' views couldn't be stitched (too little overlap, or one view soft): which order of the phones shows the pitch in one piece (panoramas). The engine then builds the cameras from the pitch: the pitch question needs tapped points (approveAllowed false) before it can be approved.",
+      "properties": {
+        "round": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "answered"
+          ]
+        },
+        "panoramas": {
+          "type": "object",
+          "required": [
+            "mainLeft",
+            "secondaryLeft"
+          ],
+          "description": "The panorama drawn through rough cameras with Main on the left, and with Secondary on the left (paths relative to the recording). The right order shows the pitch in one piece; the wrong one shows two broken halves (lines meeting in a V, the halfway line at both edges). Ask which shows the pitch in one piece.",
+          "properties": {
+            "mainLeft": {
+              "type": "string"
+            },
+            "secondaryLeft": {
+              "type": "string"
+            }
+          }
+        },
+        "leftPhone": {
+          "enum": [
+            "main",
+            "secondary"
+          ],
+          "description": "The answer, once given."
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

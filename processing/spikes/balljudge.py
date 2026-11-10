@@ -21,6 +21,11 @@ a few conv layers. Positives are crops at every labelled ball (jittered);
 negatives are motion candidates and the stock detector's suggestions
 that aren't a ball. Split by moment, as balldata.py does.
 
+Every recording's held-out ball labels (docs/DATA.md says which) go in
+as <test sets> and never as train sets; the valid split picks the
+epochs, so it is not a held-out test (docs/TESTING-PROCESSING.md,
+"Held-out ball labels").
+
 Writes <recording>/balljudge/: crops.npz, judge.pt, and eval output.
 
 Every game is judged by the standard model, footage/models/ball_judge.pt
@@ -42,6 +47,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 import balldata  # noqa: E402
+import holdout  # noqa: E402
 import phase0  # noqa: E402
 
 STANDARD = Path(__file__).resolve().parents[2] / "footage" / "models" / "ball_judge.pt"
@@ -93,16 +99,21 @@ def crops_from(region, w: int, h: int, pts) -> np.ndarray:
     return np.stack(out)
 
 
-def frames_with_split(rec: Path):
+def frames_with_split(rec: Path, held=None):
+    """The random set's frames, split by moment; moments in held-out time
+    (holdout.py) are left out."""
     lab_dir = rec / "labels"
     if not (lab_dir / "labels.json").exists():  # a recording with clip sets only
         return lab_dir, []
+    held = held or holdout.Holdout(rec)
     items = json.loads((lab_dir / "items.json").read_text())
     labels = json.loads((lab_dir / "labels.json").read_text())
     motion = json.loads((lab_dir / "motion.json").read_text())
     out = []
     for it in items:
         moment = it["id"] if it.get("kind") == "pair" else it["id"].rsplit("_", 1)[0]
+        if held.held(it["segment"], it["t"]):
+            continue
         for f in (it["frames"] if it.get("kind") == "pair" else [it]):
             v = labels.get(f["id"])
             if not v or v["status"] == "unsure" or f["id"] not in motion:
@@ -137,11 +148,15 @@ def expected_at(rec: Path):
     return at
 
 
-def clip_frames(rec: Path, name: str, split: str):
+def clip_frames(rec: Path, name: str, split: str, held=None):
     """Frames of a clip label set (labelset.py clip) with their balls and,
     as candidates, every detection the clip's detector made at that
-    moment (its false ones are the most useful negatives)."""
+    moment (its false ones are the most useful negatives). For training,
+    a held-out set is refused and held-out moments left out."""
     lab = rec / f"labels_{name}"
+    if split == "train":
+        held = held or holdout.Holdout(rec)
+        held.refuse_training_set(lab.name)
     items = json.loads((lab / "items.json").read_text())
     labels = json.loads((lab / "labels.json").read_text())
     seg0, start = int(items[0]["id"].split("_")[0][1:]), float(items[0]["id"].split("_")[1])
@@ -150,6 +165,8 @@ def clip_frames(rec: Path, name: str, split: str):
     out = []
     for it in items:
         k = int(round(it["clipT"] * cands["fps"])) if cands else -1
+        if split == "train" and held.held(it["segment"], it["t"]):
+            continue
         for f in it["frames"]:
             v = labels.get(f["id"])
             if not v or v["status"] == "unsure":
@@ -165,10 +182,13 @@ def data(rec: Path, train_sets=(), test_sets=()) -> None:
     """Crops from the random label set (split by moment into train/valid)
     plus clip sets: `train_sets` join the training data, `test_sets` are
     held out whole (split "test")."""
-    lab_dir, frames = frames_with_split(rec)
+    held = holdout.Holdout(rec)
+    for name in train_sets:  # before any work: a held-out set named as training is a mistake
+        held.refuse_training_set(f"labels_{name}")
+    lab_dir, frames = frames_with_split(rec, held)
     frames = [(sp, f, balls, cands, lab_dir) for sp, f, balls, cands in frames]
     for name in train_sets:
-        frames += clip_frames(rec, name, "train")
+        frames += clip_frames(rec, name, "train", held)
     for name in test_sets:
         frames += clip_frames(rec, name, "test")
     out = rec / "balljudge"
@@ -198,7 +218,9 @@ def data(rec: Path, train_sets=(), test_sets=()) -> None:
         if (k + 1) % 50 == 0:
             print(f"{k + 1}/{len(frames)} frames, {len(X)} crops", flush=True)
     X = np.stack(X); y = np.array(y, np.uint8); split = np.array(split)
-    np.savez_compressed(out / "crops.npz", X=X, y=y, split=split)
+    np.savez_compressed(out / "crops.npz", X=X, y=y, split=split, holdout=json.dumps(held.stamp()))
+    if held.windows:
+        print(f"held out (left out of train and valid): {held.windows} game s")
     for sp in ("train", "valid", "test"):
         m = split == sp
         print(f"{sp}: {m.sum()} crops, {y[m].sum()} positives")
@@ -215,20 +237,23 @@ def merge(out_rec: Path, specs: list[str]) -> None:
     own = out / "crops.npz"
     if own.exists() and not (out / f"crops_{out_rec.name}.npz").exists():
         own.rename(out / f"crops_{out_rec.name}.npz")
-    Xs, ys, splits = [], [], []
+    Xs, ys, splits, stamp = [], [], [], {}
     for spec in specs:
         rec, n = Path(spec.split("*")[0]), int(spec.split("*")[1]) if "*" in spec else 1
         src = rec / "balljudge" / f"crops_{rec.name}.npz"
         if not src.exists():  # a recording's own crops; its crops.npz may be a merge made there
             src = src.with_name("crops.npz")
         z = np.load(src)
+        st = json.loads(str(z["holdout"])) if "holdout" in z.files else None
+        holdout.check_stamp(st, str(src))
+        stamp.update(st)
         tr = z["split"] == "train"
         for r in range(n):
             m = np.ones(len(tr), bool) if r == 0 else tr
             Xs.append(z["X"][m]); ys.append(z["y"][m]); splits.append(z["split"][m])
         print(f"{src}: {len(tr)} crops ({z['y'].sum()} positives), train x{n}")
     X, y, split = np.concatenate(Xs), np.concatenate(ys), np.concatenate(splits)
-    np.savez_compressed(own, X=X, y=y, split=split)
+    np.savez_compressed(own, X=X, y=y, split=split, holdout=json.dumps(stamp))
     for sp in ("train", "valid", "test"):
         m = split == sp
         print(f"{sp}: {m.sum()} crops, {y[m].sum()} positives")
@@ -258,8 +283,11 @@ def train(rec: Path, epochs: int, name: str = "judge") -> None:
 
     out = rec / "balljudge"
     z = np.load(out / "crops.npz")
+    holdout.check_stamp(json.loads(str(z["holdout"])) if "holdout" in z.files else None, str(out / "crops.npz"))
     X, y, split = z["X"], z["y"], z["split"]
-    dev = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
+    import accel
+
+    dev = accel.device()
     tr, va, te = split == "train", split == "valid", split == "test"
     if te.any():
         Xte, yte = to_tensor(X[te], torch).to(dev), y[te]
@@ -307,7 +335,9 @@ def load_judge(rec: Path, name: str | None = None):
     """The standard judge, or <rec>/balljudge/<name>.pt when named."""
     import torch
 
-    dev = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
+    import accel
+
+    dev = accel.device()
     net = Judge.build().to(dev)
     net.load_state_dict(torch.load(STANDARD if name is None else rec / "balljudge" / f"{name}.pt", map_location=dev))
     net.eval()

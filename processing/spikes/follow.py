@@ -76,6 +76,7 @@ from scipy.ndimage import gaussian_filter1d, median_filter
 from scipy.optimize import least_squares
 
 sys.path.insert(0, str(Path(__file__).parent))
+import accel  # noqa: E402
 import gpu  # noqa: E402
 import phase0  # noqa: E402
 
@@ -483,7 +484,7 @@ def frame_stream(path: Path, start: float, seconds: float, width: int, fps: floa
     pre = min(PREROLL_S, start)
     skip = int(round(pre * fps))
     proc = subprocess.Popen(
-        ["ffmpeg", "-v", "error", "-noautorotate", "-hwaccel", "videotoolbox", "-ss", f"{start - pre:.4f}",
+        ["ffmpeg", "-v", "error", "-noautorotate", *accel.decode_args(), "-ss", f"{start - pre:.4f}",
          "-i", str(path), "-t", f"{seconds + pre:.3f}", "-vf", f"fps={fps},scale={width}:{height}",
          "-f", "rawvideo", "-pix_fmt", "nv12", "-"],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -627,13 +628,13 @@ def prefetch(gen, depth: int = 6):
 
 
 class NV12Encoder:
-    """Hardware H.264 from NV12 frames."""
+    """H.264 from NV12 frames, in hardware where there is an encoder (accel.py)."""
 
     def __init__(self, path: Path, w: int, h: int, fps: int = FPS, bitrate: str = "16M"):
         self.proc = subprocess.Popen(
             ["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "nv12",
              "-s", f"{w}x{h}", "-r", str(fps), "-i", "-",
-             "-c:v", "h264_videotoolbox", "-b:v", bitrate,
+             *accel.h264_args(bitrate),
              "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709",
              "-color_trc", "bt709", str(path)],
             stdin=subprocess.PIPE)

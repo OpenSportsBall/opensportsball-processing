@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opensportsball.dev/schemas/engine-answers.schema.json",
+  "title": "Answers to the engine's questions",
+  "description": "The user's answers to engine-questions.schema.json, given to `prepare` or `run` with --answers. Each answer names the question's round; an answer to an older round is ignored, so the whole file can simply be rewritten and passed again.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "pitch": {
+      "type": "object",
+      "required": [
+        "round"
+      ],
+      "additionalProperties": false,
+      "description": "Either approve the drawn pitch, or give the keypoints; the engine refits and asks again in the next round.",
+      "properties": {
+        "round": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "approve": {
+          "const": true
+        },
+        "points": {
+          "type": "object",
+          "description": "Keypoints by name (the names in the question's points). A point the user moved has yaw and pitch; one left where the fit drew it, fromFit; one they couldn't see, skipped.",
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": [
+                  "yaw",
+                  "pitch"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "yaw": {
+                    "type": "number"
+                  },
+                  "pitch": {
+                    "type": "number"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "fromFit"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "fromFit": {
+                    "const": true
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "skipped"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "skipped": {
+                    "const": true
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "share": {
+          "type": "boolean",
+          "description": "Whether the user agreed to share this pitch map and these points to improve pitch detection (the app's switch, on by default). The engine records it; the app sends."
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "approve"
+          ]
+        },
+        {
+          "required": [
+            "points"
+          ]
+        }
+      ]
+    },
+    "kits": {
+      "type": "object",
+      "required": [
+        "round"
+      ],
+      "additionalProperties": false,
+      "description": "The kit-group check. Groups are named by their component number in the question.",
+      "properties": {
+        "round": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "tapped": {
+          "type": "object",
+          "description": "Per group (component number as a string), the crop ids the user tapped as being in the wrong group or not a player in kit. Scores the grouping; not used to regroup.",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "uniqueItems": true
+          }
+        },
+        "merge": {
+          "type": "array",
+          "description": "Sets of groups that are the same kit.",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "minItems": 2,
+            "uniqueItems": true
+          }
+        },
+        "split": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "A group that holds two kits: the engine regroups with more components and asks again (once; see splitAllowed)."
+        },
+        "keeperOrReferee": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "uniqueItems": true,
+          "description": "Groups that are keepers or the referee. Missing: the engine's own guess."
+        },
+        "notKit": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "uniqueItems": true,
+          "description": "Groups that aren't a kit (spectators, subs in bibs, shadows)."
+        },
+        "share": {
+          "type": "boolean",
+          "description": "Whether the user agreed to share the shown crops and these answers to improve team detection (on by default)."
+        }
+      }
+    },
+    "cameras": {
+      "type": "object",
+      "required": [
+        "round",
+        "leftPhone"
+      ],
+      "additionalProperties": false,
+      "description": "Which phone is on the left: the question's panorama that shows the pitch in one piece.",
+      "properties": {
+        "round": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "leftPhone": {
+          "enum": [
+            "main",
+            "secondary"
+          ]
+        }
+      }
+    }
+  }
+}

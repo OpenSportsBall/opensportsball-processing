@@ -10,9 +10,9 @@
 
     uv run processing/spikes/labelset.py footage/rec3 [count] [seed]
     uv run processing/spikes/labelset.py footage/rec3 pano
-    uv run processing/spikes/labelset.py footage/rec3 clip <name> <segment> <start s> <seconds> [step s]
+    uv run processing/spikes/labelset.py footage/rec3 clip <name> <segment> <start s> <seconds> [step s] [--heldout]
     uv run processing/spikes/labelset.py footage/rec3 pairs
-    uv run processing/spikes/labelset.py footage/rec5-game ball <candidates file in detect/> [count] [phone] [seed]
+    uv run processing/spikes/labelset.py footage/rec5-game ball <candidates file in detect/> [count] [phone] [seed] [--out <dir>]
 
 Picks `count` random moments across all segments of the recording, and
 for each one phone's frame (upright, full resolution), saved as a JPEG in
@@ -35,7 +35,12 @@ the detector missed (often the hard cases: small, blurred, half hidden),
 with the path's position projected into the frame as the first suggestion
 ("fromPath"). Frames are at least BALL_GAP_S apart. For a new ball the
 models haven't seen (the 2026-10-28 game's orange one, which the judge
-rejects): its candidates without the judge still find it.
+rejects): its candidates without the judge still find it. The set goes to
+<recording>/labels/ unless --out names another folder (engine.py's label
+sets); a second call adds to the same set. --nojudge ignores the judge's
+scores in the file, for a ball the judge doesn't know (engine.py falls
+back to it when a set comes up short): frames with an on-pitch candidate
+of at least NOJUDGE_CONF, its candidates as the suggestions.
 
 "pairs" turns every unlabelled item into a moment with both phones'
 frames (kind "pair"), so the ball is clicked once on the panorama and
@@ -249,7 +254,7 @@ def pairs(rec: Path) -> None:
     panoramas(rec)
 
 
-def clip(rec: Path, name: str, seg0: int, start: float, seconds: float, step: float) -> None:
+def clip(rec: Path, name: str, seg0: int, start: float, seconds: float, step: float, heldout: bool = False) -> None:
     """A set of both-phone moments every `step` s along a clip (clip times
     as in follow.py: from `start` s into `seg0`, running on into the next
     segments), in <recording>/labels_<name>/, for ball ground truth along
@@ -258,8 +263,11 @@ def clip(rec: Path, name: str, seg0: int, start: float, seconds: float, step: fl
     else the stock detector. Frames are grabbed at the asked time (see
     `grab`) and each carries "dtS": 0.0, its image's offset from the
     moment's time; sets made before 2026-10-18 were grabbed up to 0.9 s
-    late and have their measured offset there (ballheat.py <set> dt)."""
+    late and have their measured offset there (ballheat.py <set> dt).
+    With `heldout` the set is a test clip from the start (holdout.py):
+    no model may train on it."""
     import follow
+    import holdout
     import playeval
 
     manifest = json.loads((rec / "manifest.json").read_text())
@@ -308,13 +316,20 @@ def clip(rec: Path, name: str, seg0: int, start: float, seconds: float, step: fl
             print(f"{len(items)} moments", flush=True)
     (out / "items.json").write_text(json.dumps(items, indent=1))
     print(f"{len(items)} moments in {out}")
+    if heldout:
+        holdout.mark(rec, out.name, {"all": True})
+    else:
+        print(f"for training. If it is to be a test clip, mark it before anything trains on it:"
+              f" holdout.py {rec} mark {out.name}")
     panoramas(rec, out)
 
 
 BALL_GAP_S = 1.5  # "ball" set frames at least this far apart in game time
+NOJUDGE_CONF = 0.3  # --nojudge: a frame needs an on-pitch candidate at least this sure
 
 
-def ball_set(rec: Path, cands_name: str, count: int, role: str, seed: int) -> None:
+def ball_set(rec: Path, cands_name: str, count: int, role: str, seed: int, out: Path | None = None,
+             nojudge: bool = False) -> None:
     import ball as B
     import ballpath
     import follow
@@ -332,7 +347,7 @@ def ball_set(rec: Path, cands_name: str, count: int, role: str, seed: int) -> No
     data = json.loads((rec / "detect" / cands_name).read_text())
     fps, frames = data["fps"], data["frames"]
     n = len(frames)
-    cands = [[d for d in f["detections"] if B.usable(d, pose)] for f in frames]
+    cands = [[d for d in f["detections"] if B.usable({**d, "judge": 1.0} if nojudge else d, pose)] for f in frames]
     spots = B.static_spots(cands, fps, pose=pose)
     keep = [[d for d in fr if all(np.hypot(*(np.array(d["xz"]) - sp)) > B.STATIC_RADIUS for sp in spots)]
             for fr in cands]
@@ -348,6 +363,12 @@ def ball_set(rec: Path, cands_name: str, count: int, role: str, seed: int) -> No
 
     seen = [i for i in range(n) if chosen(i) is not None and chosen(i)["phone"] == phone]
     bridged = [i for i in range(n) if est[i] is not None and src[i] is None and path_px(i) is not None]
+    if nojudge:
+        # Without the judge ballwin.py doesn't follow the ball, so the
+        # candidates are scattered scans and the path is thin: pick frames
+        # where the detector put a fairly sure candidate on the pitch.
+        seen = [i for i in range(n) if any(d["phone"] == phone and d["conf"] >= NOJUDGE_CONF for d in cands[i])]
+        bridged = []
     rng = np.random.default_rng(seed)
     picks: list[tuple[int, str]] = []
 
@@ -368,7 +389,7 @@ def ball_set(rec: Path, cands_name: str, count: int, role: str, seed: int) -> No
     print(f"{len(seen)} frames with a {role} detection on the path, {len(bridged)} bridged in {role}'s view;"
           f" picked {sum(k == 'detected' for _, k in picks)} + {sum(k == 'bridged' for _, k in picks)}", flush=True)
 
-    out = rec / "labels"
+    out = out or rec / "labels"
     (out / "images").mkdir(parents=True, exist_ok=True)
     items_path = out / "items.json"
     items = json.loads(items_path.read_text()) if items_path.exists() else []
@@ -398,7 +419,7 @@ def ball_set(rec: Path, cands_name: str, count: int, role: str, seed: int) -> No
             sugg = [{"x": round(x, 1), "y": round(y, 1), "conf": 0.0, "fromPath": True}] + sugg[:MAX_SUGGESTIONS - 1]
         items.append({"id": iid, "image": f"images/{iid}.jpg", "segment": seg, "t": t, "phone": role,
                       "width": img.shape[1], "height": img.shape[0], "candidates": sugg, "dtS": 0.0,
-                      "pick": kind, "source": cands_name})
+                      "pick": kind, "source": cands_name, **({"judge": False} if nojudge else {})})
         items_path.write_text(json.dumps(items, indent=1))  # every frame: a long run can be stopped
         print(f"{k + 1}/{len(picks)} {iid}", flush=True)
     items_path.write_text(json.dumps(items, indent=1))
@@ -451,16 +472,28 @@ def main(rec: Path, count: int, seed: int) -> None:
 
 
 if __name__ == "__main__":
+    OUT = None
+    HELDOUT = "--heldout" in sys.argv
+    if HELDOUT:
+        sys.argv.remove("--heldout")
+    NOJUDGE = "--nojudge" in sys.argv
+    if NOJUDGE:
+        sys.argv.remove("--nojudge")
+    if "--out" in sys.argv:
+        k = sys.argv.index("--out")
+        OUT = Path(sys.argv[k + 1])
+        del sys.argv[k:k + 2]
     if len(sys.argv) > 2 and sys.argv[2] == "pano":
         panoramas(Path(sys.argv[1]))
     elif len(sys.argv) > 3 and sys.argv[2] == "ball":
         ball_set(Path(sys.argv[1]), sys.argv[3], int(sys.argv[4]) if len(sys.argv) > 4 else 100,
-                 sys.argv[5] if len(sys.argv) > 5 else "main", int(sys.argv[6]) if len(sys.argv) > 6 else 1)
+                 sys.argv[5] if len(sys.argv) > 5 else "main", int(sys.argv[6]) if len(sys.argv) > 6 else 1, OUT,
+                 NOJUDGE)
     elif len(sys.argv) > 2 and sys.argv[2] == "pairs":
         pairs(Path(sys.argv[1]))
     elif len(sys.argv) > 6 and sys.argv[2] == "clip":
         clip(Path(sys.argv[1]), sys.argv[3], int(sys.argv[4]), float(sys.argv[5]), float(sys.argv[6]),
-             float(sys.argv[7]) if len(sys.argv) > 7 else 2.0)
+             float(sys.argv[7]) if len(sys.argv) > 7 else 2.0, HELDOUT)
     else:
         main(Path(sys.argv[1]), int(sys.argv[2]) if len(sys.argv) > 2 else 300,
              int(sys.argv[3]) if len(sys.argv) > 3 else 1)

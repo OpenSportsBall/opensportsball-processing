@@ -906,7 +906,11 @@ def review_main(rec: Path) -> None:
     (out / "review.json").write_text(json.dumps({
         "pitch": {"lengthM": round(pose.L, 2), "widthM": round(pose.W, 2), "cameraHeightM": round(pose.h, 2),
                   "fittedWith": json.loads((out / "pitch.json").read_text()).get("fittedWith", "lines")},
-        "lines": lines, "goals": frames, "points": fit}, indent=1))
+        "lines": lines, "goals": frames, "points": fit,
+        # background.png's pixels <-> panorama degrees, so a page or app can draw the
+        # fit over it: x = (yaw - yawRange[0]) / degPerPx, y = (pitch - pitchRange[0]) / degPerPx
+        "panorama": {"image": "background.png", "degPerPx": DEG_PER_PX, "yawRange": list(YAW_RANGE),
+                     "pitchRange": list(PITCH_RANGE)}}, indent=1))
     print(f"wrote {out / 'review.json'}: {len(lines)} markings, {len(frames)} goals, {len(fit)} points")
 
 
