@@ -262,8 +262,7 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
           prior stays zero-centred at 3 cm a side (the lenses are ~7 cm
           apart, the direction depends on the mount); with it Gaussian
           the offsets come out under 2 cm (rec6's was 4-6 cm).
-          New fits against the adopted ones (written to scratch, not
-          adopted): rec7 f 751.7 / 727.7 -> 750.6 / 725.8, Secondary k1
+          New fits against the 2026-11-09 ones: rec7 f 751.7 / 727.7 -> 750.6 / 725.8, Secondary k1
           -0.0103 -> -0.0010, pitch 101.85 x 59.81 -> 101.98 x 59.87 m,
           camera 6.47 m both. rec4cal f 746.3 / 744.6 -> 749.6 / 740.1,
           Secondary k1 -0.0223 -> +0.0012, pitch 105.22 x 61.95 -> 105.29
@@ -278,7 +277,7 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
           17.1 -> 8.8 -> 3.6, circle 22.8 -> 1.5 -> 1.0, far touchline 2.5
           -> 2.5 -> 2.0, near touchline 7.0 -> 9.2 -> 9.2, goal lines 0.7
           -> 0.7 -> 0.9, boxes about the same.
-          Lens table if rebuilt from the new fits (not done): Pixel 11
+          Lens table rebuilt from the new fits: Pixel 11
           747.5 +- 3.4 -> 748.6 +- 1.9 (n=4), Pixel 11 Pro 740.9 +- 5.2 ->
           741.6 +- 2.1 with k1/k2 scatter 0.0155 -> 0.0036 (rec4cal's
           -0.022 was the stalled fit), iPhone 14 Pro 718.5 +- 13.1 ->
@@ -287,11 +286,34 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
           +- 0.1-0.3 deg across recordings) and `lenses` now records it
           (halfFovDeg) with the k1/k2 scatter (distSd), which the prior
           uses as its sd where it is over 0.01.
-          Open: re-adopt rec4cal and rec7 on the new fits and rebuild
-          lenses.json (every panorama angle moves again: goals, boxes,
-          candidates), or leave them; the play bench on the new fits
-          isn't run. Untapped fits not retried. `adopt` is still not
-          atomic and `lenses` still drops recordings it isn't given.
+          Re-adopted on rec4cal and rec7 and lenses.json rebuilt (later
+          on 2026-11-10). The four tapped recordings refitted into
+          <rec>/joint/ (rec4cal and rec7 from pre_joint, rec6 on segment
+          2; the 2026-11-09 fits kept in <rec>/joint_2026-11-09/), then
+          mirror, convert-detect, convert-passa and `adopt <rec> <mirror>
+          joint_2026-11-09_files` (the replaced files; pre_joint/ is
+          still the stitch). Most of both recordings' video is off this
+          disk (rec7 segments 0, 6, 11; rec4cal 2-6), so the panorama was
+          drawn from the fit's cached per-phone backgrounds (rec7 segment
+          11, rec4cal 12) and pass A carried across like the candidates
+          (`convert-passa`: 99.6% of rec7's blobs, 97.5% of rec4cal's;
+          the rest fall outside both 4K frames and keep their old
+          angles), not redone. The move from the 2026-11-09 fit is small:
+          angles 0.09 deg median, 0.14 worst on rec7 (0.10 / 0.32 on
+          rec4cal), the same image point on the ground 4 cm median, 0.7 m
+          worst (0.20 / 2.7 m, the far corners). Play bench with the
+          carried candidates, `goalkick,goalframe,unsure,ball,goalin,
+          ballhold,roles,kickoff,peoplesurge`, before -> after: rec4cal
+          13/15 both (mean coverage 91 -> 92%), rec7 4/5 both (88 ->
+          89%). Fitted taps: rec7 1.8 / 7.6 -> 1.6 / 7.2 px, rec4cal 1.2 /
+          3.4 -> 1.4 / 4.9. Not rerun: ballwin on the new geometry (the
+          candidates are carried), the rec5 no-stitch path with the new
+          lens table (rough cameras take their focal from it), fullgame.
+          The shared dataset and the S3 backup still hold the 2026-11-09
+          pitch maps, cameras and boxes until `sharedata.py upload
+          --annotations-only` and `footagestore.py backup` are run.
+          Untapped fits not retried. `adopt` is still not atomic and
+          `lenses` still drops recordings it isn't given.
         - Adopted on rec4cal and rec7 (2026-11-09, `jointfit.py adopt`):
           the joint cameras.json, pitch.json, goals, taps (rebuilt in the
           new panorama's degrees), panorama, must-see boxes and pass A
