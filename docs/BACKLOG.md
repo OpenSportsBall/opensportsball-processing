@@ -115,6 +115,33 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         window). The kept rotation is the one most segments agree with;
         the others are listed in cameras.json "lineFit.mountMoved".
         Adds ~2-3 min to building cameras.json.
+- [ ] Line detection and pitch mapping without taps. Every field since
+      rec3 has needed taps; the joint fit (`jointfit.py`, below) fixed the
+      lenses but not this. Untapped joint fits, priors from the lens table
+      with the recording left out (2026-11-09): rec7 3.1 / 9.5 px tap
+      error, rec6 6.4 / 16.0 (about its tapped fit), rec4cal 35.3 / 78.0
+      (length runs to 117 m against ~105; 4.1 px with a 1% different
+      prior, so unstable), rec5-game fails. And they started from the
+      tapped pitch.json: a real untapped game starts worse. Where it fails:
+      - Paint in the phones' own frames: `pitch.line_mask`'s scales were
+        tuned on the 0.03 deg panorama. rec5-game's far yellow lines go
+        undetected; rec6's white mask is so wide that 97% of model points
+        sit "on paint", so the paint term says nothing there.
+      - The far ends: the end boxes and goal lines are thin and few pixels
+        tall, and the fit locks the ends onto the wrong paint (length runs
+        away). Junction detection found one box of four on rec4.
+      - The start: `best_start` searches camera heights; nothing measures
+        the centre circle, halfway line or touchlines to seed the pose.
+      Ideas: paint detection per phone at the scale the line should have
+      there (its width is known from the current fit); fit the ends
+      separately once the middle holds (pitch.fit_end_pose does this in the
+      panorama); goals as end anchors (validated on rec3); a learned
+      keypoint detector trained on the tapped recordings' `taps_src.json`
+      (source pixels, so the labels survive stitch changes).
+      Measure: tap error and the rec4 traced benchmark (`jointfit.py
+      score` / `bench`) for untapped fits started from `best_start`, not
+      from a tapped pitch.json; done when every tapped recording's
+      untapped fit is within ~2x its tapped fit.
 - [ ] Per-segment Secondary rotation in rendering: refine_lines already
       fits one per sampled segment, but every caller of setup_cameras
       (and game_stream across segment switches) uses one camera pair.
