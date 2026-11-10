@@ -32,6 +32,20 @@ background panoramas and compares it with a result that was checked by eye.
     uv run --with pytest --with numpy --with scipy --with opencv-python-headless --with torch \
         pytest processing/tests/test_pitch_regression.py -v
 
+The joint fit of both lenses and the pitch (`jointfit.py`) and the split
+into periods of play (`phases.py`) have tests that need no footage: a
+made-up mount and pitch whose paint and taps the fit has to recover, and
+made-up recordings (two halves, extra time, two games, quarters, one
+period, nothing but play, cut short) the split has to get right.
+
+    cd processing && uv run --extra dev pytest tests/test_jointfit.py tests/test_phases.py
+
+How close a joint fit puts the taps is measured on taps it wasn't given
+(the fit's own taps flatter it); on a recording whose joint fit is adopted,
+start from the files it replaced:
+
+    uv run processing/spikes/jointfit.py footage/rec7 holdout --start footage/rec7/pre_joint --out /tmp/rec7-holdout
+
 Fixtures: `footage/fixtures/pitch/<name>/` (`background.png`, `expected.json`),
 or `$OSB_PITCH_FIXTURES`. The test skips when none exist. Make one from a
 recording whose `pitch.json` and `goals.json` you have verified:

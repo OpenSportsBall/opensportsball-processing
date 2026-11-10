@@ -9,7 +9,8 @@
 
     uv run processing/spikes/jointfit.py <rec> taps
     uv run processing/spikes/jointfit.py <rec> fit [--seg N] [--no-taps] [--lenses lenses.json [--exclude-self]]
-                                                   [--dist-sd 0.01] [--offset-sd 0.03] [--out DIR]
+                                                   [--dist-sd 0.01] [--offset-sd 0.03] [--start DIR] [--out DIR]
+    uv run processing/spikes/jointfit.py <rec> holdout [--folds 5] [--start DIR] [--out DIR] [fit's options]
     uv run processing/spikes/jointfit.py <rec> score <dir> [<dir> ...] [--seg N]
     uv run processing/spikes/jointfit.py lenses <rec> [<rec> ...]
     uv run processing/spikes/jointfit.py bench footage/fixtures/pitch/<name> <rec> <dir> [<dir> ...]
@@ -75,10 +76,24 @@ distance to paint in each phone that sees it, the taps in their phone's
 pixels, and priors: focal lengths from the lens table (--lenses) or the
 manifest's field of view, small distortion, a small lens offset. Main's
 rotation stays the world frame, as in follow.Camera. Starts from
-phase0/cameras.json and pitch/pitch.json (warp dropped). Writes <out>
-(default <rec>/joint/): cameras.json (follow.setup_cameras' format plus
-"jointFit"), pitch.json (warpDeg all 0), overlay_main.jpg,
-overlay_secondary.jpg and report.json.
+phase0/cameras.json and pitch/pitch.json (warp dropped), or from --start
+DIR: another fit's directory, or a recording's pre_joint/ (the cameras and
+pitch from before a joint fit was adopted). The robust loss covers the
+paint and the taps; the priors are plain Gaussians. The last stage repeats
+until it stops moving (report.json "fit": passes, cost, converged; a fit
+that didn't converge says so on stderr). Writes <out> (default
+<rec>/joint/): cameras.json (follow.setup_cameras' format plus "jointFit"),
+pitch.json (warpDeg all 0), overlay_main.jpg, overlay_secondary.jpg and
+report.json.
+
+holdout: how well the fit places taps it wasn't given. The taps are dealt
+into --folds groups; each group in turn is left out of a fit and scored by
+that fit (px at 4K), against the same taps' error in the fit made with all
+of them and in the start. The fair figure for "how close are the taps": a
+fit with 20 free parameters and ~30 tap coordinates at weight 3 fits its
+own taps closely whatever its geometry. Writes <out>/holdout.json (default
+<rec>/joint/). Start from --start <rec>/pre_joint on an adopted recording
+(its own cameras and pitch were fitted to every tap).
 
 score: for each directory holding a cameras.json and pitch.json (a joint fit,
 or "current" for phase0/cameras.json with pitch/pitch.json), the taps'
@@ -92,8 +107,9 @@ bench: pitchbench.py's marked-field benchmark scored in the phones' 4K pixels
 (the fixture's traced markings carried through its cameras.json), so fits
 made with different cameras compare.
 
-Results so far (taps 2-3x closer than the current fits, no warp; untapped
-fits not dependable yet): docs/FINDINGS.md and docs/BACKLOG.md, 2026-11-09.
+Results so far (taps left out of the fit land about as close as with the
+old stitch + warped pitch fit, with no warp; untapped fits not dependable
+yet): docs/FINDINGS.md and docs/BACKLOG.md, 2026-11-09 and 2026-11-10.
 """
 
 from __future__ import annotations
@@ -126,7 +142,13 @@ TRUNCS = (32, 10, 5)  # px at 4K: coarse to fine (pitch.py's 40/12/6 panorama px
 FOCAL_SD_MANIFEST = 0.08  # the reported field of view can be ~5 deg off (Pixel 11 Pro): weak
 FOCAL_SD_TAPS = 0.10      # with taps, the pitch decides
 DIST_SD = 0.01        # k1, k2 prior sd: looser lets distortion absorb what the pitch should decide
-OFFSET_SD_M = 0.03    # lens offset prior sd (the lenses are ~7 cm apart; looser ran to 20-36 cm without taps)
+OFFSET_SD_M = 0.03    # lens offset prior sd, each axis, about zero: the lenses are ~7 cm apart but which way
+                      # depends on the mount, so the prior only holds the offset near that size (7 cm along
+                      # one axis is 2.3 sd; looser ran to 20-36 cm without taps)
+LOSS_SCALE = 0.3      # soft-L1 scale for the paint and tap residuals (not the priors: see soften)
+MAX_PASSES = 8        # the last stage is repeated until it stops moving, at most this many times
+CONV_COST = 1e-3      # ... a pass that lowers the cost by under this share
+CONV_STEP = 0.05      # ... and moves no parameter by more than this in X_SCALE units (L, W 5 cm; h 5 mm; f 0.5)
 
 # Parameter vector.
 FM, K1M, K2M, FS, K1S, K2S = range(6)
@@ -260,14 +282,36 @@ def lens_key(dev: dict) -> str:
     return f"{dev['model']}|{dev['video'].get('lens', '?')}|{dev['video']['width']}x{dev['video']['height']}"
 
 
+def half_fov_deg(f: float, k1: float, k2: float) -> float:
+    """Half the horizontal field of view, degrees: the angle whose ray lands on the frame's side edge
+    (follow.Camera's radial model, f at follow.REF_W). f, k1 and k2 trade off against each other in
+    a fit; this is what they agree on."""
+    r = follow.REF_W / 2 / f
+    for _ in range(50):
+        r = follow.REF_W / 2 / f / (1 + k1 * r * r + k2 * r ** 4)
+    return float(np.degrees(np.arctan(r)))
+
+
+def dist_spread(e: dict) -> float:
+    """How far a lens's k1 and k2 scatter across its fits: the larger sample sd of the two (0 for one fit)."""
+    rows = e.get("fits", [])
+    if len(rows) < 2:
+        return 0.0
+    return float(max(np.std([r["k1"] for r in rows], ddof=1), np.std([r["k2"] for r in rows], ddof=1)))
+
+
 def lens_priors(manifest: dict, table: dict | None, have_taps: bool) -> dict:
-    """{role: (f, f_sd, k1, k2, source)} for both phones."""
-    out = {}
+    """{role: (f, f_sd, k1, k2, source)} for both phones, and "distSdBy": {role: sd} where the
+    table's k1, k2 for that lens scatter by more than DIST_SD (the Pixel 11 Pro ultrawide: k1
+    -0.022 on rec4cal, -0.0004 on rec6): a prior can't be tighter than the fits it averages."""
+    out = {"distSdBy": {}}
     for d in manifest["devices"]:
         e = (table or {}).get(lens_key(d))
         if e:
             sd = max(e["fSd"] / e["f"], 0.01)
             out[d["role"]] = (e["f"], FOCAL_SD_TAPS if have_taps else sd, e["k1"], e["k2"], f"table (n={e['n']})")
+            if dist_spread(e) > DIST_SD:
+                out["distSdBy"][d["role"]] = dist_spread(e)
         else:
             out[d["role"]] = (manifest_focal(d), FOCAL_SD_TAPS if have_taps else FOCAL_SD_MANIFEST, 0.0, 0.0,
                               "manifest FOV")
@@ -349,42 +393,82 @@ def line_residuals(model: Model, v, paints, trunc, cams=None) -> np.ndarray:
 
 def prior_residuals(v, priors) -> np.ndarray:
     dist_sd, off_sd = priors.get("distSd", DIST_SD), priors.get("offsetSdM", OFFSET_SD_M)
+    by = priors.get("distSdBy", {})
+    dm, ds = max(dist_sd, by.get("main", 0.0)), max(dist_sd, by.get("secondary", 0.0))
     (fm, sdm, k1m, k2m, _), (fs, sds, k1s, k2s, _) = priors["main"], priors["secondary"]
     return np.r_[(v[FM] - fm) / (sdm * fm), (v[FS] - fs) / (sds * fs),
-                 (v[K1M] - k1m) / dist_sd, (v[K2M] - k2m) / dist_sd,
-                 (v[K1S] - k1s) / dist_sd, (v[K2S] - k2s) / dist_sd,
+                 (v[K1M] - k1m) / dm, (v[K2M] - k2m) / dm,
+                 (v[K1S] - k1s) / ds, (v[K2S] - k2s) / ds,
                  np.asarray(v[OFF]) / off_sd]
+
+
+def soften(r: np.ndarray, scale: float = LOSS_SCALE) -> np.ndarray:
+    """Soft-L1 as a residual: squared, it is scipy's loss="soft_l1" at f_scale=scale (quadratic near
+    zero, linear beyond ~scale), so paint off the lines and a misplaced tap pull, but not by their
+    squares. Applied to the paint and the taps only. The priors stay plain: through the loss a
+    prior 10 sd out costs 2.9 where a Gaussian costs 50, about seven stray paint points, and the
+    sds above would mean little."""
+    z = (np.asarray(r, float) / scale) ** 2
+    return np.sign(r) * scale * np.sqrt(2 * (np.sqrt(1 + z) - 1))
 
 
 # ------------------------------------------------------------------- fit
 
-def fit(model: Model, v0, paints, taps, priors, verbose=True) -> np.ndarray:
+def fit(model: Model, v0, paints, taps, priors, verbose=True, log: dict | None = None) -> np.ndarray:
+    """Coarse to fine, the pitch first, then the lenses with it. One least_squares call can stop
+    short (its step falls under xtol; with one-sided differences a synthetic rec7 ended 15 cm high
+    and 0.9 m long with the taps at 0.9 px), so the last stage is run again from its own result
+    until a pass neither lowers the cost by CONV_COST nor moves a parameter by CONV_STEP, at most
+    MAX_PASSES times, and the result says whether it got there. `log`, if given, gets "passes", "cost", "converged",
+    "status" (scipy's, last pass) and "costs" (after each pass of the last stage)."""
     v = v0.copy()
     pose_free = [12, 13, 14, 15, 16, 17, 18, 19]  # not k
     lens_free = [FM, K1M, K2M, FS, K1S, K2S, 6, 7, 8, 9, 10, 11]
     stages = [(TRUNCS[0], pose_free), (TRUNCS[1], pose_free),
               (TRUNCS[1], lens_free + pose_free), (TRUNCS[2], lens_free + pose_free)]
     nl = None
-    for trunc, free in stages:
+    costs, converged, sol = [], False, None
+    for k, (trunc, free) in enumerate(stages):
         free = list(free)
+        last = k == len(stages) - 1
 
         def resid(sub, free=free, trunc=trunc):
             p = v.copy()
             p[free] = sub
             cams = model.cameras(p)
-            r = [line_residuals(model, p, paints, trunc, cams)]
+            r = [soften(line_residuals(model, p, paints, trunc, cams))]
             if taps:
-                r.append(TAP_WEIGHT * tap_residuals(model, p, taps, cams))
+                r.append(soften(TAP_WEIGHT * tap_residuals(model, p, taps, cams)))
             r.append(prior_residuals(p, priors))
             return np.concatenate(r)
 
-        sol = least_squares(resid, v[free], loss="soft_l1", f_scale=0.3, x_scale=X_SCALE[free], diff_step=1e-3)
-        v[free] = sol.x
+        for n_pass in range(MAX_PASSES if last else 1):
+            before = v[free].copy()
+            # Central differences: the paint term is sampled from an image, and one-sided steps gave a
+            # Jacobian biased enough to stall the solver far out (synthetic rec7: cost 7.5 against 0.77).
+            sol = least_squares(resid, before, x_scale=X_SCALE[free], jac="3-point", diff_step=1e-3)
+            moved = float(np.max(np.abs(sol.x - before) / X_SCALE[free]))
+            v[free] = sol.x
+            if not last:
+                break
+            gain = (costs[-1] - sol.cost) if costs else np.inf
+            costs.append(float(sol.cost))
+            if n_pass and gain <= CONV_COST * sol.cost and moved <= CONV_STEP:
+                converged = True
+                break
         if verbose:
             nl = nl or len(line_residuals(model, v, paints, trunc))
             print(f"  trunc {trunc:2d}px, {'lenses+pitch' if FM in free else 'pitch only  '}: "
                   f"f {v[FM]:.1f}/{v[FS]:.1f} @ {follow.REF_W}, camera {v[14]:.2f} m up, "
-                  f"pitch {v[18]:.1f} x {v[19]:.1f} m, paint {trunc * np.abs(sol.fun[:nl]).mean():.2f}px")
+                  f"pitch {v[18]:.1f} x {v[19]:.1f} m, paint {trunc * np.abs(line_residuals(model, v, paints, trunc)).mean():.2f}px"
+                  + (f", {len(costs)} passes" + ("" if converged else ", NOT converged") if last else ""))
+    if not converged:
+        print(f"  warning: the fit was still moving after {len(costs)} passes (cost "
+              + " -> ".join(f"{c:.3f}" for c in costs[-2:]) + "): don't trust its lengths to better than the last change",
+              file=sys.stderr, flush=True)
+    if log is not None:
+        log.update(passes=len(costs), cost=costs[-1], costs=[round(c, 4) for c in costs], converged=converged,
+                   status=int(sol.status))
     return v
 
 
@@ -421,12 +505,23 @@ def draw_overlay(bg, xs, ys, ok, taps, role, pred):
     return cv2.resize(img, (W // 2, H // 2), interpolation=cv2.INTER_AREA)
 
 
+def start_paths(rec: Path, d: Path | None) -> tuple[Path, Path]:
+    """(cameras.json, pitch.json) of the recording itself (d None), of a fit directory, or of a
+    pre_joint-style one (phase0/cameras.json and pitch/pitch.json inside it)."""
+    if d is None:
+        return rec / "phase0" / "cameras.json", rec / "pitch" / "pitch.json"
+    if (d / "phase0" / "cameras.json").exists():
+        return d / "phase0" / "cameras.json", d / "pitch" / "pitch.json"
+    return d / "cameras.json", d / "pitch.json"
+
+
 def fit_main(rec: Path, args) -> None:
     out = Path(args.out) if args.out else rec / "joint"
     manifest, report, _, _ = rec_info(rec)
     seg = args.seg if args.seg is not None else len(report["segments"]) // 2
-    cm, cs, _ = load_cameras(rec / "phase0" / "cameras.json")
-    pose0 = load_pose(rec / "pitch" / "pitch.json")
+    cp, pp = start_paths(rec, Path(args.start) if args.start else None)
+    cm, cs, _ = load_cameras(cp)
+    pose0 = load_pose(pp)
     taps = {} if args.no_taps else load_src_taps(rec)
     table = json.loads(Path(args.lenses).read_text()) if args.lenses else None
     if table and args.exclude_self:
@@ -453,16 +548,19 @@ def fit_write(rec: Path, cm, cs, pose0: P.PitchPose, seg: int, taps: dict, table
     paints = [Paint(bgm, colour), Paint(bgs, colour)]
     model = Model(cm, cs)
     v0 = start_vector(cm, cs, pose0)
-    v = fit(model, v0, paints, taps, priors, verbose=verbose)
+    log: dict = {}
+    v = fit(model, v0, paints, taps, priors, verbose=verbose, log=log)
     cams = model.cameras(v)
     pose = model.pose(v)
     info = {"segment": seg, "taps": len(taps), "paint": colour, "priors": {k: (list(p) if isinstance(p, tuple) else p) for k, p in priors.items()},
+            "fit": log,
             "lensOffsetM": [round(float(x), 4) for x in v[OFF]],
             "models": {r: lens_key(d) for r, d in ((d["role"], d) for d in manifest["devices"])}}
     (out / "cameras.json").write_text(json.dumps(cameras_json(cams, v, info)))
     (out / "pitch.json").write_text(json.dumps({**P.pose_json(pose), "warpDeg": [0.0, 0.0, 0.0],
                                                 "fittedWith": "joint" + ("+taps" if taps else "")}, indent=1))
     rep = score_dir(rec, out, paints)
+    rep["fit"] = log
     (out / "report.json").write_text(json.dumps(rep, indent=1))
     pts = pose.directions(P.pitch_lines(pose.L, pose.W, pose.k, step=0.2))
     proj = model.project(v, pts, cams)
@@ -472,6 +570,84 @@ def fit_write(rec: Path, cm, cs, pose0: P.PitchPose, seg: int, taps: dict, table
         cv2.imwrite(str(out / f"overlay_{role}.jpg"), draw_overlay(bg, *proj[k], all_taps, role, pred),
                     [cv2.IMWRITE_JPEG_QUALITY, 88])
     return rep
+
+
+# ---------------------------------------------------------------- holdout
+
+def tap_px(model: Model, v, taps: dict) -> dict[str, float]:
+    """Each tap's error under v, px at 4K (a post base: its distance to the goal line)."""
+    return {n: float(np.linalg.norm(tap_residuals(model, v, {n: t})) * TAP_PX) for n, t in taps.items()
+            if n.endswith("post base") or n in P.tap_targets(model.pose(v))}
+
+
+def holdout_folds(names: list[str], folds: int) -> list[list[str]]:
+    """The taps dealt into `folds` groups, in name order: the same split every run."""
+    names = sorted(names)
+    folds = max(2, min(folds, len(names)))
+    return [names[i::folds] for i in range(folds)]
+
+
+def holdout_main(rec: Path, args) -> None:
+    out = Path(args.out) if args.out else rec / "joint"
+    out.mkdir(parents=True, exist_ok=True)
+    manifest, report, _, _ = rec_info(rec)
+    seg = args.seg if args.seg is not None else len(report["segments"]) // 2
+    start = Path(args.start) if args.start else None
+    cp, pp = start_paths(rec, start)
+    cm, cs, _ = load_cameras(cp)
+    pose0 = load_pose(pp)
+    taps = {n: t for n, t in load_src_taps(rec).items() if not t.get("fromFit")}
+    if len(taps) < 6:
+        sys.exit(f"holdout needs taps to leave out: {len(taps)} in taps_src.json")
+    table = json.loads(Path(args.lenses).read_text()) if args.lenses else None
+    if table and args.exclude_self:
+        table = drop_recording(table, rec.name)
+    priors = lens_priors(manifest, table, True)
+    priors.update(distSd=args.dist_sd, offsetSdM=args.offset_sd)
+    bgm, bgs = backgrounds(rec, seg, rec / "joint")
+    colour = P.paint_colour(rec)
+    paints = [Paint(bgm, colour), Paint(bgs, colour)]
+    model = Model(cm, cs)
+    v0 = start_vector(cm, cs, pose0)
+    before = {n: e["px"] for n, e in score_dir(rec, start or Path("current"), paints)["taps"].items() if "px" in e}
+
+    def run(use: dict) -> tuple[np.ndarray, dict]:
+        log: dict = {}
+        return fit(model, v0, paints, use, priors, verbose=False, log=log), log
+
+    v_all, log_all = run(taps)
+    fitted = tap_px(model, v_all, taps)
+    rows, held = [], {}
+    for k, names in enumerate(holdout_folds(list(taps), args.folds)):
+        v, log = run({n: t for n, t in taps.items() if n not in names})
+        px = tap_px(model, v, {n: taps[n] for n in names})
+        held.update(px)
+        rows.append({"left out": names, "px": px, "cameraHeightM": float(v[14]), "lengthM": float(v[18]),
+                     "widthM": float(v[19]), "fit": log})
+        print(f"  fold {k + 1}: left out {', '.join(names)}: " + ", ".join(f"{px[n]:.1f}" for n in names if n in px)
+              + f" px; pitch {v[18]:.2f} x {v[19]:.2f} m, camera {v[14]:.2f} m up"
+              + ("" if log["converged"] else " (NOT converged)"), flush=True)
+    names = sorted(held)
+
+    def stat(d: dict) -> list[float]:
+        a = np.array([d[n] for n in names if n in d and np.isfinite(d[n])])
+        return [float(np.median(a)), float(a.max())] if len(a) else [float("nan")] * 2
+
+    L, Wd, hh = (np.array([r[k] for r in rows]) for k in ("lengthM", "widthM", "cameraHeightM"))
+    res = {"about": "jointfit.py holdout: each tap scored by a fit that wasn't given it (px at 4K)",
+           "start": str(cp.parent), "segment": seg, "folds": rows,
+           "medianWorstPx": {"start": stat(before), "fittedWithAll": stat(fitted), "leftOut": stat(held)},
+           "perTap": {n: {"start": before.get(n), "fittedWithAll": fitted.get(n), "leftOut": held[n]} for n in names},
+           "allTaps": {"cameraHeightM": float(v_all[14]), "lengthM": float(v_all[18]), "widthM": float(v_all[19]), "fit": log_all},
+           "acrossFolds": {"lengthM": [float(L.min()), float(L.max())], "widthM": [float(Wd.min()), float(Wd.max())],
+                           "cameraHeightM": [float(hh.min()), float(hh.max())]}}
+    (out / "holdout.json").write_text(json.dumps(res, indent=1))
+    m = res["medianWorstPx"]
+    print(f"{rec.name}: {len(names)} taps, median / worst px at 4K: the start {m['start'][0]:.1f} / {m['start'][1]:.1f}, "
+          f"fitted with all {m['fittedWithAll'][0]:.1f} / {m['fittedWithAll'][1]:.1f}, "
+          f"left out {m['leftOut'][0]:.1f} / {m['leftOut'][1]:.1f}")
+    print(f"  across folds: pitch {L.min():.2f}-{L.max():.2f} x {Wd.min():.2f}-{Wd.max():.2f} m, camera {hh.min():.2f}-{hh.max():.2f} m up "
+          f"(all taps: {v_all[18]:.2f} x {v_all[19]:.2f} m, {v_all[14]:.2f} m)")
 
 
 # ------------------------------------------------------- no stitch: rough
@@ -646,10 +822,7 @@ def install_main(rec: Path, src: Path, seg: int | None) -> None:
 
 def model_from_dir(rec: Path, d: Path):
     """(project(points_world) -> per phone (x, y, ok), offset, pose) for a fit directory or "current"."""
-    if d.name == "current":
-        cp, pp = rec / "phase0" / "cameras.json", rec / "pitch" / "pitch.json"
-    else:
-        cp, pp = d / "cameras.json", d / "pitch.json"
+    cp, pp = start_paths(rec, None if d.name == "current" else d)
     cm, cs, _ = load_cameras(cp)
     pose = load_pose(pp)
     a, b = cm.at(W), cs.at(W)
@@ -758,9 +931,15 @@ def drop_recording(table: dict, rec_name: str) -> dict:
 
 
 def summarize(rows: list[dict]) -> dict:
+    """A lens's table entry from its fits. f, k1 and k2 are means of values that trade off within
+    each fit; halfFovDeg (half_fov_deg of each fit: mean and spread) is the part the fits pin down,
+    and distSd how far k1, k2 scatter (lens_priors widens its prior to it)."""
     f = np.array([r["f"] for r in rows])
+    fov = np.array([half_fov_deg(r["f"], r["k1"], r["k2"]) for r in rows])
     return {"f": float(f.mean()), "fSd": float(f.std(ddof=1)) if len(f) > 1 else float(0.03 * f.mean()),
             "k1": float(np.mean([r["k1"] for r in rows])), "k2": float(np.mean([r["k2"] for r in rows])),
+            "distSd": dist_spread({"fits": rows}), "halfFovDeg": float(fov.mean()),
+            "halfFovSdDeg": float(fov.std(ddof=1)) if len(fov) > 1 else None,
             "n": len(rows), "fits": rows}
 
 
@@ -779,8 +958,9 @@ def lenses_main(recs: list[Path]) -> None:
     table = {k: summarize(v) for k, v in sorted(rows.items())}
     LENS_TABLE.write_text(json.dumps(table, indent=1) + "\n")
     for k, e in table.items():
-        print(f"{k:45s} f {e['f']:7.1f} +- {e['fSd']:5.1f} @ {follow.REF_W}  k1 {e['k1']:+.4f}  k2 {e['k2']:+.4f}  n={e['n']}  "
-              + " ".join(f"{r['recording']}:{r['f']:.1f}" for r in e["fits"]))
+        print(f"{k:45s} f {e['f']:7.1f} +- {e['fSd']:5.1f} @ {follow.REF_W}  k1 {e['k1']:+.4f}  k2 {e['k2']:+.4f} (+- {e['distSd']:.4f})  "
+              f"half FOV {e['halfFovDeg']:.2f}" + (f" +- {e['halfFovSdDeg']:.2f}" if e["halfFovSdDeg"] is not None else "")
+              + f" deg  n={e['n']}  " + " ".join(f"{r['recording']}:{r['f']:.1f}" for r in e["fits"]))
     print(f"wrote {LENS_TABLE}")
 
 
@@ -1106,7 +1286,7 @@ def main() -> None:
         return
     ap = argparse.ArgumentParser()
     ap.add_argument("rec", type=Path)
-    ap.add_argument("cmd", choices=["taps", "fit", "score"])
+    ap.add_argument("cmd", choices=["taps", "fit", "score", "holdout"])
     ap.add_argument("dirs", nargs="*")
     ap.add_argument("--seg", type=int)
     ap.add_argument("--no-taps", action="store_true")
@@ -1114,12 +1294,16 @@ def main() -> None:
     ap.add_argument("--exclude-self", action="store_true", help="leave this recording out of the lens table")
     ap.add_argument("--dist-sd", type=float, default=DIST_SD, help="prior sd of k1, k2")
     ap.add_argument("--offset-sd", type=float, default=OFFSET_SD_M, help="prior sd of the lens offset, metres")
+    ap.add_argument("--start", help="start from this directory's cameras and pitch (a fit's, or <rec>/pre_joint)")
+    ap.add_argument("--folds", type=int, default=5, help="holdout: groups the taps are dealt into")
     ap.add_argument("--out")
     a = ap.parse_args()
     if a.cmd == "taps":
         taps_main(a.rec)
     elif a.cmd == "fit":
         fit_main(a.rec, a)
+    elif a.cmd == "holdout":
+        holdout_main(a.rec, a)
     else:
         score_main(a.rec, a.dirs, a.seg)
 

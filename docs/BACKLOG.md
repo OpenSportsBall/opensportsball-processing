@@ -231,6 +231,67 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
           seam; refine_lines does that. A 20 s render of each looked
           alike, no seam faults. Not adopted yet: 20 moments, ball
           candidates found with the old geometry.
+        - Checked and corrected (2026-11-10). The numbers above are for
+          the taps each fit was given. `jointfit.py <rec> holdout` deals
+          the taps into five groups and scores each by a fit that
+          wasn't given it (from `--start <rec>/pre_joint` on the adopted
+          recordings). Left-out taps at 4K, median / worst, old stitch +
+          warped pitch -> joint (fitted with all in brackets): rec7 6.9 /
+          20.6 -> 3.8 / 7.5 (1.6 / 7.2), rec4cal 2.5 / 35.4 -> 2.2 / 19.6
+          (1.4 / 4.9; the left corner flag 19.6), rec6 4.9 / 16.5 -> 4.8 /
+          9.6 (3.2 / 9.8), rec5-game 6.5 / 49.6 -> 6.1 / 29.7 (3.0 / 17.1;
+          11 taps, length 95-106 m across folds). Median halved on rec7,
+          unchanged on the rest; the worst tap 1.7-2.7x closer on all.
+          The fit itself: `fit()` differentiated one-sidedly a paint term
+          that is sampled from an image, and the solver stopped on xtol
+          far out. Synthetic rec7 (paint drawn through the adopted
+          cameras, exact taps, start at the pre-joint cameras): one run
+          ended at cost 7.5 against 0.77 with central differences, 15 cm
+          high and 0.9 m long with the taps at 0.9 px; repeating the last
+          stage didn't help (7.53 -> 7.53), re-running all four stages
+          did slowly (7.5, 6.9, 6.7, 4.4). Now `jac="3-point"`, and the
+          last stage repeats until a pass gains under 0.1% and moves no
+          parameter 0.05 of its scale (report.json "fit": passes, cost,
+          converged; stderr says when it didn't). A second run from its
+          own result, pitch length: rec7 101.98 -> 102.00, rec4cal 105.29
+          -> 105.35, rec5-game 103.56 -> 103.58, rec6 104.73 -> 105.07
+          (the paint term is flat there). The loss: soft-L1 covered the
+          priors too, so one 10 sd out cost 2.9, not 50; it now covers the
+          paint and taps only. Left-out taps, softened -> Gaussian
+          priors: rec7 3.9 -> 3.8 px, rec4cal 3.4 -> 2.2. The lens offset
+          prior stays zero-centred at 3 cm a side (the lenses are ~7 cm
+          apart, the direction depends on the mount); with it Gaussian
+          the offsets come out under 2 cm (rec6's was 4-6 cm).
+          New fits against the adopted ones (written to scratch, not
+          adopted): rec7 f 751.7 / 727.7 -> 750.6 / 725.8, Secondary k1
+          -0.0103 -> -0.0010, pitch 101.85 x 59.81 -> 101.98 x 59.87 m,
+          camera 6.47 m both. rec4cal f 746.3 / 744.6 -> 749.6 / 740.1,
+          Secondary k1 -0.0223 -> +0.0012, pitch 105.22 x 61.95 -> 105.29
+          x 62.02, camera 2.99 -> 3.07 m (measured 2.6: further off),
+          fitted taps 1.2 / 3.4 -> 1.4 / 4.9 px, halfway far end 0.84 ->
+          1.75 m on the ground. rec5-game pitch 88.7 x 59.4 -> 103.6 x
+          64.9 m, worst tap 45.2 -> 17.1 px. rec6 104.0 x 68.7 -> 104.7 x
+          69.2. Under the old objective the new fits cost less than the
+          adopted ones (rec4cal 92.0 against 97.3, rec7 136.9 against
+          137.9). rec4 traced benchmark, pre-joint -> adopted -> new: all
+          4.5 -> 3.0 -> 3.7 median (90th 16.6 -> 16.3 -> 14.4), halfway
+          17.1 -> 8.8 -> 3.6, circle 22.8 -> 1.5 -> 1.0, far touchline 2.5
+          -> 2.5 -> 2.0, near touchline 7.0 -> 9.2 -> 9.2, goal lines 0.7
+          -> 0.7 -> 0.9, boxes about the same.
+          Lens table if rebuilt from the new fits (not done): Pixel 11
+          747.5 +- 3.4 -> 748.6 +- 1.9 (n=4), Pixel 11 Pro 740.9 +- 5.2 ->
+          741.6 +- 2.1 with k1/k2 scatter 0.0155 -> 0.0036 (rec4cal's
+          -0.022 was the stalled fit), iPhone 14 Pro 718.5 +- 13.1 ->
+          718.7 +- 10.0. f, k1 and k2 still trade off within a fit; half
+          the horizontal field of view is what they agree on (per lens
+          +- 0.1-0.3 deg across recordings) and `lenses` now records it
+          (halfFovDeg) with the k1/k2 scatter (distSd), which the prior
+          uses as its sd where it is over 0.01.
+          Open: re-adopt rec4cal and rec7 on the new fits and rebuild
+          lenses.json (every panorama angle moves again: goals, boxes,
+          candidates), or leave them; the play bench on the new fits
+          isn't run. Untapped fits not retried. `adopt` is still not
+          atomic and `lenses` still drops recordings it isn't given.
         - Adopted on rec4cal and rec7 (2026-11-09, `jointfit.py adopt`):
           the joint cameras.json, pitch.json, goals, taps (rebuilt in the
           new panorama's degrees), panorama, must-see boxes and pass A
@@ -977,6 +1038,61 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
       - Wire into `fullgame.py` as ranges to render (it has only
         `--start`), padded (60 s used here) and never cutting inside a
         half.
+      - Any number of periods, and breaks that have to be shown
+        (2026-11-10). `split` was five states (halves 20-55 min, one
+        break 2-25 min) over a play score scaled between each recording's
+        own 10th and 90th percentile. It is now a DP over any number of
+        periods (up to 8, each 8 min or more, breaks 2 min or more, no
+        upper limits) where every stretch that isn't play (pre-game, a
+        break, post-game) costs BREAK_COST = 20 bins of full play score,
+        and a break between periods is scored against a lower threshold
+        (THR_BREAK: the pitch empties; a warm-up or a lull only slows).
+        The play score is motion as a share of the recording's 90th
+        percentile with 0.45 of it as zero (rec7's own 10th percentile is
+        0.46 of its 90th, so rec7 scores as before; rec3-rec6, all or
+        nearly all play, are 0.40-0.59, which is why their lulls read as
+        breaks). `refine` runs for exactly two periods and only moves a
+        kick-off earlier or an end later, so the equal-halves prior can't
+        shorten a half to match one the recording cut. phases.json gains
+        "periods" (start, end, whether each was seen, its whistle) and
+        "play" (all / some / none); "found" keeps k1/e1/k2/e2 for one or
+        two periods; "refereeHz" is null, not NaN, when no whistle
+        qualifies; a Main file with no audio track is split on motion
+        alone (it crashed in ffmpeg).
+        Real recordings, old -> new: rec7 9:01 / 52:04 / 56:14 / end both
+        (errors +1, +107, +1, +97 s; no play lost; 9-10% cut). rec3 (33
+        min on disk) ended play at 23:10, now keeps all of it: the
+        contact sheet shows play at the far end until the recording
+        stops (read by eye, 2026-11-10; truth.json has only the
+        kick-off). rec4 (segments 2-6) cut 9:29-14:30, now keeps it:
+        quiet, probably before kick-off, no truth; a loss of 5 min of
+        saving if so. rec5-game, rec6: all kept, both.
+        Made-up recordings (motion at a play or a quiet level, 0.9 s
+        whistles at the changes; `processing/tests/test_phases.py`),
+        old -> new: extra time (45+45, then 15+15) all 30 min after the
+        game -> four periods; two games of 2 x 30 on one recording, 11
+        min cut from each -> four periods; one 60-min period given a
+        3-min half-time -> one period; a 12-min stoppage ending the half
+        2.5 min early -> a break; 4 x 12 quarters merged in pairs ->
+        four; 40 min of play given a 7.5-min half-time -> all play.
+        Limits, each erring toward keeping: on motion alone (no
+        whistles) a break needs ~5 min of empty pitch (2-min quarter
+        breaks and a 2-min extra-time break merge; a 5-min half-time
+        between 15-min halves is missed); under 8 min of play at the
+        edge of a recording next to a break isn't a period, so a
+        recording that starts or stops within 8 min of a break loses
+        those minutes; a recording with nobody on the
+        pitch throughout reads as all play (the score has no absolute
+        level: rec7 plays at 0.026 of pitch pixels moving, rec3-rec6
+        at 0.055-0.065); more than two periods get no whistle
+        refinement (rec7's second kick-off was 3 min late without it).
+        How sure (rec3, rec4, rec7): no setting tried cut rec7's play
+        (BREAK_COST 10-40, QUIET_FRAC 0.35-0.55, THR 0.4-0.6, THR_BREAK
+        0.1-0.5, MIN_PLAY_S 5-20 min; the worst is its second kick-off
+        53 s late, inside the 60 s pad). rec7's pre-game is cut only at
+        BREAK_COST 10-20 and QUIET_FRAC 0.45-0.55; rec3's false
+        post-game returns at BREAK_COST 10 or QUIET_FRAC 0.55. Still one
+        whole game.
 - [ ] Full-game runner (`fullgame.py`): name each piece by the
       configuration it was rendered with (a hash of the feature string
       and the constants it uses, plus the candidate and roles file
