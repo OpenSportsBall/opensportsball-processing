@@ -26,15 +26,22 @@ hardware decoder (no network):
 - A thumbnail of both phones every THUMB_EVERY s, as contact sheets
   (phases/sheet_NN.jpg) to read the true phase times off by eye.
 
-`segment` reads those and splits the recording into pre-game / first half /
-half-time / second half / post-game: dynamic programming over a per-bin
-play score with duration limits and a bonus for boundaries on the
-referee's whistles, then (for a whole game) a search among nearby whistles
-that also wants the halves equal. Pre- or post-game under MIN_CUT_S is
-kept. Writes phases/phases.json and phases/plot.png. With phases/truth.json
-({"k1", "e1", "k2", "e2"}: kick-offs and ends of the halves, seconds on
-Main's clock) it prints the boundary errors, the play lost and the time
-saved with `pad` seconds kept either side of each half.
+`segment` reads those and splits the recording into periods of play with
+breaks between them (two halves and half-time, but also one period, four
+quarters, extra time, or two games on one recording): dynamic programming
+over a per-bin play score, with a bonus for boundaries on the referee's
+whistles and a cost for every break inside the game, so a break has to
+be shown (BREAK_COST) rather than assumed. When it finds exactly two
+periods, a search among nearby whistles that also wants the halves equal.
+Pre- or post-game under MIN_CUT_S is kept. Writes phases/phases.json
+("periods": each period's start and end; "play": all, some or none of the
+recording; "found": k1/e1/k2/e2 when there are one or two periods) and
+phases/plot.png. With phases/truth.json ({"k1", "e1", "k2", "e2"}:
+kick-offs and ends of the halves, seconds on Main's clock) it prints the
+boundary errors, the play lost and the time saved with `pad` seconds kept
+either side of each period.
+
+A recording with no audio track is split on motion alone.
 
 `--segs a-b` limits the pass to Main's segments a..b (default: the first
 run of segments both phones have on disk, as older recordings keep only
@@ -51,6 +58,7 @@ import json
 import subprocess
 import sys
 import time
+import warnings
 from pathlib import Path
 
 import cv2
@@ -85,10 +93,15 @@ SHEET_COLS, SHEET_ROWS = 4, 12  # one sheet = 48 thumbnails = 12 min at 15 s
 
 # Segmentation
 BIN_S = 10.0
-HALF_S = (20 * 60.0, 55 * 60.0)
-BREAK_S = (2 * 60.0, 25 * 60.0)
-STATES = ("pre", "h1", "ht", "h2", "post")
+MIN_PLAY_S = 8 * 60.0          # a period of play is at least this long (10-min quarters fit)
+MIN_BREAK_S = 2 * 60.0         # a break between periods is at least this long
+MAX_PERIODS = 8                # two games of four quarters
+BREAK_COST = 20.0              # what a break inside the game must earn, in bins of full play score:
+                               # ~3.5 min of an empty pitch, or ~1 min between two 0.9 s whistles
+QUIET_FRAC = 0.45              # motion at this share of the recording's busy level scores 0
 THR = 0.5                      # play score splitting play from not
+THR_BREAK = 0.2                # ... and inside a break between periods: the pitch empties (rec7's half-time
+                               # scores 0 for minutes), where a warm-up or a lull in play only slows
 SMOOTH_BINS = 3
 HANDLE_X = 5.0
 WHISTLE_W = 8.0                # boundary bonus per whistle second, in bins of full play score
@@ -96,6 +109,7 @@ WHISTLE_CAP_S = 1.2
 EQUAL_W = 0.5                  # penalty per bin of difference between the halves' lengths
 MIN_CUT_S = 5 * 60.0           # pre- or post-game shorter than this is kept: little to save, play to lose
 REFINE_S = 8 * 60.0            # the refinement tries whistles this far from each DP boundary
+REFINE_MAX = 12                # ... and at most this many per boundary
 
 
 def setup(rec: Path):
@@ -115,9 +129,17 @@ def main_starts(devs: dict) -> list[float]:
 # ---------------------------------------------------------------- whistles
 
 def load_audio(path: Path) -> np.ndarray:
-    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-vn", "-ac", "1", "-ar", str(AUDIO_FS),
-                          "-f", "f32le", "-"], capture_output=True, check=True).stdout
-    return np.frombuffer(raw, np.float32)
+    """Main's audio, mono at AUDIO_FS; empty when the file has no audio
+    track (ffmpeg fails with nothing to map), so the split falls back to
+    motion alone."""
+    r = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-vn", "-ac", "1", "-ar", str(AUDIO_FS),
+                        "-f", "f32le", "-"], capture_output=True)
+    if r.returncode != 0:
+        if not path.exists():
+            raise FileNotFoundError(path)
+        print(f"  no audio read from {path.name}: {r.stderr.decode(errors='replace').strip().splitlines()[-1:]}", flush=True)
+        return np.zeros(0, np.float32)
+    return np.frombuffer(r.stdout, np.float32)
 
 
 def whistle_runs(x: np.ndarray, t0: float) -> list[dict]:
@@ -274,6 +296,7 @@ def features(rec: Path, fps: float, width: int, segs: tuple[int, int] | None) ->
     thumb_every = max(1, int(round(THUMB_EVERY * fps)))
     thumbs = []
     t0 = time.time()
+    i = -1
     for i, bufs in enumerate(zip(*gens)):
         if i >= n:
             break
@@ -307,7 +330,9 @@ def features(rec: Path, fps: float, width: int, segs: tuple[int, int] | None) ->
         if i % int(600 * fps) == 0 and i:
             el = time.time() - t0
             print(f"  {i / fps / 60:.0f} min of {total / 60:.0f} in {el / 60:.1f} min", flush=True)
-    n_done = i + 1 if n else 0
+    n_done = min(i + 1, n)
+    if n_done == 0:
+        raise SystemExit("no frames decoded: nothing to measure")
     print(f"motion: {n_done} samples in {(time.time() - t0) / 60:.1f} min", flush=True)
     np.savez_compressed(out / "features.npz", t=t_start + np.arange(n_done) / fps, act=act[:n_done], fg=fg[:n_done],
                         luma=luma[:n_done], pix=pix, segs=np.array(segs), grid=np.array([NX, NZ]), lw=np.array([pose.L, pose.W]))
@@ -336,17 +361,29 @@ def binned(rec: Path):
 
 
 def play_score(A: np.ndarray, F: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Per bin, roughly 0 (nobody on the pitch) .. 1 (play): movement on
-    the pitch, scaled between the game's quiet and busy ends and smoothed
-    over SMOOTH_BINS. Bins where the mount is being handled (the whole frame
-    changes: foreground HANDLE_X times the game's median, and a bin either
-    side) are NaN, as is anything not decoded."""
-    m, f = np.nanmean(A, 1), np.nanmean(F, 1)
-    handled = np.nan_to_num(f) > HANDLE_X * np.nanmedian(f)
+    """Per bin, roughly 0 (a quiet pitch) .. 1 (play): movement on the
+    pitch as a share of the recording's busy level (its 90th percentile),
+    with QUIET_FRAC of that level as 0, smoothed over SMOOTH_BINS. The quiet
+    end is a fixed share, not the recording's own quiet bins: every
+    recording has a quietest tenth, and scaling to it read the lulls of a
+    recording that is all play as a break (rec7, a whole game, has its 10th
+    percentile at 0.46 of its 90th; rec3-rec6, all or nearly all play, at
+    0.40-0.59). A recording with nobody on the pitch throughout therefore
+    reads as play: nothing is cut. Bins where the mount is being handled
+    (the whole frame changes: foreground HANDLE_X times the game's median,
+    and a bin either side) are NaN, as is anything not decoded."""
+    if len(A) == 0:
+        return np.zeros(0), np.zeros(0, bool)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # bins or cells with nothing decoded
+        m, f = np.nanmean(A, 1), np.nanmean(F, 1)
+        handled = np.nan_to_num(f) > HANDLE_X * np.nanmedian(f) if np.isfinite(f).any() else np.zeros(len(f), bool)
     handled = np.convolve(handled, np.ones(3), "same") > 0
     ok = ~handled & np.isfinite(m)
-    lo, hi = np.percentile(m[ok], 10), np.percentile(m[ok], 90)
-    s = np.where(ok, np.clip((m - lo) / max(hi - lo, 1e-9), 0, 1.5), 0.0)
+    if not ok.any():
+        return np.full(len(m), np.nan), handled
+    hi = max(np.percentile(m[ok], 90), 1e-9)
+    s = np.where(ok, np.clip((m / hi - QUIET_FRAC) / (1 - QUIET_FRAC), 0, 1.5), 0.0)
     k = np.ones(SMOOTH_BINS)
     with np.errstate(invalid="ignore"):
         s = np.convolve(s, k, "same") / np.convolve(ok.astype(float), k, "same")
@@ -370,161 +407,230 @@ def boundary_whistles(tb: np.ndarray, ws: list[dict]) -> tuple[list, list]:
     return kick, end
 
 
-def split(score: np.ndarray, kick: list, end: list, thr: float = THR, w_whistle: float = WHISTLE_W) -> list[int | None]:
-    """Bin boundaries [k1, e1, k2, e2] (the first half is bins k1..e1-1, ...)
-    maximising: play score above `thr` inside the halves and below it
-    outside, plus w_whistle per second of referee whistle (capped) at each
-    boundary that has one. Five ordered states with duration limits; the
-    recording may end in any state (an older recording kept only in part),
-    and then the boundaries not reached are None. DP over segment ends."""
+def split(score: np.ndarray, kick: list, end: list, thr: float = THR, w_whistle: float = WHISTLE_W,
+          max_periods: int = MAX_PERIODS) -> list[tuple[int, int]]:
+    """The periods of play as bin boundaries [(start, end), ...] (a period
+    is bins start..end-1), maximising: play score above `thr` inside the
+    periods and below it outside (below THR_BREAK in the breaks between
+    periods), plus w_whistle per second of referee
+    whistle (capped) at each boundary that has one, less BREAK_COST for each
+    stretch that isn't play (pre-game, a break between periods, post-game:
+    each has to be shown, or the recording's lulls and far-end play get cut;
+    rec3's last 8 min, play at the far end, read as post-game without it).
+    Any number of periods up to max_periods, each at
+    least MIN_PLAY_S with breaks of at least MIN_BREAK_S between them; no
+    upper limits (a half with a long stoppage, one period without a break).
+    The recording may begin or end inside a period (start 0, end n: an older
+    recording kept only in part); that part still has to be MIN_PLAY_S long
+    (a few busy minutes at the edge are more often a warm-up), so under
+    MIN_PLAY_S of play at the edge of a recording, next to a break, is not
+    found. [] when nothing reads as play. DP over the boundaries."""
     n = len(score)
-    x = np.nan_to_num(score - thr)
-    cs = np.concatenate([[0.0], np.cumsum(x)])
-    bonus = {"kick": np.array([w_whistle * min(w["dur"], WHISTLE_CAP_S) if w else 0.0 for w in kick]),
-             "end": np.array([w_whistle * min(w["dur"], WHISTLE_CAP_S) if w else 0.0 for w in end])}
-    which = [None, "kick", "end", "kick", "end"]
-    lim = [(0, n), (int(HALF_S[0] / BIN_S), int(HALF_S[1] / BIN_S)),
-           (int(BREAK_S[0] / BIN_S), int(BREAK_S[1] / BIN_S)),
-           (int(HALF_S[0] / BIN_S), int(HALF_S[1] / BIN_S)), (0, n)]
+    if n == 0:
+        return []
+    cs = np.concatenate([[0.0], np.cumsum(np.nan_to_num(score - thr))])
+    cb = np.concatenate([[0.0], np.cumsum(np.nan_to_num(score - THR_BREAK))])  # as cs, for the breaks between periods
+    bk = np.array([w_whistle * min(w["dur"], WHISTLE_CAP_S) if w else 0.0 for w in kick])
+    be = np.array([w_whistle * min(w["dur"], WHISTLE_CAP_S) if w else 0.0 for w in end])
+    lp, lb = max(1, int(MIN_PLAY_S / BIN_S)), max(1, int(MIN_BREAK_S / BIN_S))
     NEG = -1e18
-    best = np.full((5, n + 1), NEG)
-    back = np.zeros((5, n + 1), int)
-    best[0] = -cs  # pre-game: bins 0..e-1
 
-    def step(k, e, lo, hi):
-        sign = 1 if STATES[k] in ("h1", "h2") else -1
-        ss = np.arange(max(0, e - hi), e - lo + 1)
-        if len(ss) == 0:
-            return NEG, 0
-        v = best[k - 1, ss] + sign * (cs[e] - cs[ss]) + bonus[which[k]][ss]
-        j = int(np.argmax(v))
-        return v[j], ss[j]
+    def lagged(g: np.ndarray, lag: int) -> tuple[np.ndarray, np.ndarray]:
+        """For each e: the largest g[s] over s <= e - lag, and that s."""
+        val, arg = np.full(n + 1, NEG), np.zeros(n + 1, int)
+        best, at = NEG, 0
+        for e in range(lag, n + 1):
+            if g[e - lag] > best:
+                best, at = g[e - lag], e - lag
+            val[e], arg[e] = best, at
+        return val, arg
 
-    for k in range(1, 5):
-        for e in range(n + 1):
-            best[k, e], back[k, e] = step(k, e, *lim[k])
-    # Where the recording ends: in post-game as usual, or cut short in any state.
-    finals = [(best[0, n], 0, None), (best[4, n], 4, None)]
-    for k in (1, 2, 3):
-        v, s0 = step(k, n, 1, lim[k][1])
-        finals.append((v, k, s0))
-    _, k, s0 = max(finals, key=lambda f: f[0])
-    b: list[int | None] = [None] * 4
-    e = n
-    if s0 is not None:  # the last state, cut short, began at s0
-        b[k - 1], e, k = int(s0), int(s0), k - 1
-    while k > 0:
-        s_ = int(back[k, e])
-        b[k - 1] = s_
-        e, k = s_, k - 1
-    return b
+    # brk[p][e]: the best value of bins 0..e-1 with p periods played and the next starting at e
+    # (brk[0] is the pre-game); play[p][e]: with period p ending at e. *_from: where that state began.
+    pre = -cs - BREAK_COST
+    pre[0] = 0.0  # no pre-game: nothing to show
+    brk, play, brk_from, play_from = [pre], [None], [None], [None]
+    for p in range(1, max_periods + 1):
+        v, at = lagged(brk[p - 1] + bk - cs, lp)
+        v = v + cs
+        play.append(v)
+        play_from.append(at)
+        v, at = lagged(play[p] + be + cb, lb)
+        brk.append(v - cb - BREAK_COST)
+        brk_from.append(at)
+
+    # How the recording ends: with no play at all, or in or after period p.
+    finals = [(-cs[n] - BREAK_COST, 0, None)]
+    for p in range(1, max_periods + 1):
+        g = play[p] + be + cs - BREAK_COST  # post-game from e0 on
+        g[n] = play[p][n] + cs[n]  # ... or none
+        e0 = int(np.argmax(g))
+        finals.append((g[e0] - cs[n], p, e0))
+    _, p, e = max(finals, key=lambda f: f[0])  # the first of equals: fewer periods
+    out: list[tuple[int, int]] = []
+    while p > 0:
+        s_ = int(play_from[p][e])
+        out.append((s_, int(e)))
+        p -= 1
+        if p > 0:
+            e = int(brk_from[p][s_])
+    return out[::-1]
 
 
-def referee(ws: list[dict]) -> tuple[float, list[dict]]:
+def referee(ws: list[dict]) -> tuple[float | None, list[dict]]:
     """The referee's whistle pitch and the runs near it. Most tonal runs are
     something else (rec7: ~1,000 runs, mostly 1.7-2.5 kHz; the referee's
     ~70 at ~3.5 kHz, longer, louder and more tonal): the pitch is the
-    mode of the runs weighted by all three."""
+    mode of the runs weighted by all three. (None, []) when no run is
+    tonal and loud enough to go by: motion alone then."""
     wt = [max(0.0, w["tonalDb"] - REF_TONAL_DB) * max(0.0, w["loudDb"] - 20) * w["dur"] for w in ws]
     if not any(wt):
-        return float("nan"), []
+        return None, []
     edges = np.arange(WHISTLE_BAND[0], WHISTLE_BAND[1] + 100, 100)
     h, _ = np.histogram([w["hz"] for w in ws], edges, weights=wt)
     h = np.convolve(h, np.ones(5), "same")  # +-200 Hz
-    hz = float(edges[int(h.argmax())] + 50)
+    top = np.flatnonzero(h >= h.max() * (1 - 1e-9))  # one run fills five equal bins: take the middle
+    hz = float(edges[int(top[len(top) // 2])] + 50)
     return hz, [w for w in ws if abs(w["hz"] - hz) <= REF_HZ_TOL and w["tonalDb"] >= REF_TONAL_DB - 10]
 
 
 def objective(b: list[int], score: np.ndarray, kick: list, end: list, thr: float = THR,
               w_whistle: float = WHISTLE_W) -> float:
-    """split()'s objective for whole-game boundaries, plus the halves-are-
-    equal prior (leagues play fixed halves; stoppage time differs by a
-    minute or two)."""
+    """What refine() maximises for two periods: play score above `thr`
+    inside them and below it outside, the whistle bonus at each boundary
+    inside the recording, and the halves-are-equal prior (leagues play
+    fixed halves; stoppage time differs by a minute or two)."""
+    n = len(score)
     x = np.nan_to_num(score - thr)
     cs = np.concatenate([[0.0], np.cumsum(x)])
     k1, e1, k2, e2 = b
     v = 2 * ((cs[e1] - cs[k1]) + (cs[e2] - cs[k2])) - cs[-1]
     for i, ws_ in ((k1, kick), (e1, end), (k2, kick), (e2, end)):
-        if ws_[i]:
+        if ws_[i] and 0 < i < n:
             v += w_whistle * min(ws_[i]["dur"], WHISTLE_CAP_S)
     return v - EQUAL_W * abs((e1 - k1) - (e2 - k2))
 
 
 def refine(b: list[int], score: np.ndarray, kick: list, end: list) -> list[int]:
-    """Whole-game boundaries re-chosen among the bins with a whistle (and the
-    DP's own) within REFINE_S of each, under objective()."""
+    """Two periods' boundaries re-chosen among the bins with a whistle within
+    REFINE_S outside each (an earlier kick-off, a later end), under
+    objective(). Outward only: the search can keep more than the split did,
+    never less, so the equal-halves prior can't cut play from a half when
+    the other is short (a recording that stops in the second half). A
+    boundary at the recording's edge stays. Each boundary keeps at most
+    REFINE_MAX candidates (the longest whistles), so a recording full of
+    whistle-like runs can't make the search explode."""
+    n = len(score)
     r = int(REFINE_S / BIN_S)
+    lb = max(1, int(MIN_BREAK_S / BIN_S))
     cands = []
-    for i, ws_ in zip(b, (kick, end, kick, end)):
-        c = {i} | {j for j in range(max(0, i - r), min(len(ws_), i + r + 1)) if ws_[j]}
-        cands.append(sorted(c))
+    for i, ws_, out in zip(b, (kick, end, kick, end), (-1, 1, -1, 1)):
+        rng = range(max(0, i - r), i) if out < 0 else range(i + 1, min(n, i + r) + 1)
+        near = [j for j in rng if ws_[j]] if 0 < i < n else []
+        near = sorted(near, key=lambda j: -ws_[j]["dur"])[:REFINE_MAX]
+        cands.append(sorted({i, *near}))
     best, best_v = b, objective(b, score, kick, end)
-    lh, lb = (int(HALF_S[0] / BIN_S), int(HALF_S[1] / BIN_S)), (int(BREAK_S[0] / BIN_S), int(BREAK_S[1] / BIN_S))
     for k1 in cands[0]:
         for e1 in cands[1]:
-            if not lh[0] <= e1 - k1 <= lh[1]:
-                continue
             for k2 in cands[2]:
-                if not lb[0] <= k2 - e1 <= lb[1]:
+                if k2 - e1 < lb:
                     continue
                 for e2 in cands[3]:
-                    if not lh[0] <= e2 - k2 <= lh[1]:
-                        continue
                     v = objective([k1, e1, k2, e2], score, kick, end)
                     if v > best_v:
                         best, best_v = [k1, e1, k2, e2], v
     return best
 
 
-def segment(rec: Path, pad: float) -> None:
+def find_periods(tb: np.ndarray, score: np.ndarray, ws: list[dict], t_first: float, t_last: float) -> list[dict]:
+    """The periods of play, in seconds on Main's clock, from the binned play
+    score (bins starting at tb) and the referee's whistles: split(), then
+    refine() when it found exactly two periods. A boundary on a
+    whistle takes the whistle's time (a kick-off its start, an end its
+    end). startSeen / endSeen are False where the recording begins or ends
+    inside the period, or within MIN_CUT_S of it: a short pre-game (rec3:
+    1 min) or a recording begun in play (rec5, rec6) isn't worth the risk
+    of cutting play, so the period runs to the recording's edge."""
+    n = len(score)
+    if n == 0:
+        return []
+    kick, end = boundary_whistles(tb, ws)
+    per = split(score, kick, end)
+    if len(per) == 2:
+        b = refine([*per[0], *per[1]], score, kick, end)
+        per = [(b[0], b[1]), (b[2], b[3])]
+    out = []
+    for i, (s_, e_) in enumerate(per):
+        d = {"startSeen": s_ > 0, "endSeen": e_ < n, "startWhistle": kick[s_] if s_ > 0 else None,
+             "endWhistle": end[e_] if e_ < n else None}
+        w = d["startWhistle"]
+        d["start"] = t_first if s_ == 0 else (w["t"] if w else float(tb[0] + s_ * BIN_S))
+        w = d["endWhistle"]
+        d["end"] = t_last if e_ == n else (w["t"] + w["dur"] if w else float(tb[0] + e_ * BIN_S))
+        if i == 0 and d["startSeen"] and d["start"] - t_first < MIN_CUT_S:
+            d.update(start=t_first, startSeen=False, startWhistle=None)
+        if i == len(per) - 1 and d["endSeen"] and t_last - d["end"] < MIN_CUT_S:
+            d.update(end=t_last, endSeen=False, endWhistle=None, endKept=True)  # an end was found, under MIN_CUT_S from the edge
+        out.append(d)
+    return out
+
+
+def segment(rec: Path, pad: float) -> dict:
     out = rec / "phases"
     tb, A, F, z = binned(rec)
     score, handled = play_score(A, F)
     hz, ws = referee(json.loads((out / "whistles.json").read_text()))
-    kick, end = boundary_whistles(tb, ws)
-    b = split(score, kick, end)
-    if all(i is not None for i in b):
-        b = refine(b, score, kick, end)
-    names = ("k1", "e1", "k2", "e2")
-    found, used = {}, {}
-    for key, i in zip(names, b):
-        if i is None:
-            continue
-        w = (kick if key[0] == "k" else end)[i]
-        used[key] = w
-        found[key] = float(tb[0] + i * BIN_S) if w is None else (w["t"] if key[0] == "k" else w["t"] + w["dur"])
     t_first, t_last = float(z["t"][0]), float(z["t"][-1])
     total = t_last - t_first
-    # A short pre-game (rec3: 1 min) or a recording begun in play (rec5, rec6)
-    # isn't worth the risk of cutting play: keep from the start.
-    if "k1" in found and found["k1"] - t_first < MIN_CUT_S:
-        found["k1"], used["k1"] = t_first, None
-    if "e2" in found and t_last - found["e2"] < MIN_CUT_S:
-        found["e2"], used["e2"] = t_last, None
-    res = {"found": found, "whistle": used, "fromS": t_first, "toS": t_last, "padS": pad, "refereeHz": hz,
-           "handledS": float(handled.sum() * BIN_S)}
-    (out / "phases.json").write_text(json.dumps(res, indent=1))
+    periods = find_periods(tb, score, ws, t_first, t_last)
+    # k1/e1/k2/e2 for one or two periods; the end of a period the recording cuts short is left out.
+    names = ("k1", "e1", "k2", "e2")
+    found, used = {}, {}
+    if len(periods) <= 2:
+        for i, d in enumerate(periods):
+            found[names[2 * i]], used[names[2 * i]] = d["start"], d["startWhistle"]
+            if d["endSeen"] or d.get("endKept"):
+                found[names[2 * i + 1]], used[names[2 * i + 1]] = d["end"], d["endWhistle"]
+    kept_all = len(periods) == 1 and periods[0]["start"] <= t_first and periods[0]["end"] >= t_last
+    play = "none" if not periods else ("all" if kept_all else "some")
+    res = {"periods": periods, "play": play, "found": found, "whistle": used, "fromS": t_first, "toS": t_last,
+           "padS": pad, "refereeHz": hz, "handledS": float(handled.sum() * BIN_S)}
+    (out / "phases.json").write_text(json.dumps(res, indent=1, allow_nan=False))
     fmt = lambda s: f"{int(s // 60):3d}:{int(s % 60):02d}"  # noqa: E731
-    print(f"{rec.name}: {fmt(t_first)}-{fmt(t_last)}; referee's whistle ~{hz:.0f} Hz, {len(ws)} runs; "
-          f"mount handled {handled.sum() * BIN_S:.0f} s")
+    print(f"{rec.name}: {fmt(t_first)}-{fmt(t_last)}; "
+          + (f"referee's whistle ~{hz:.0f} Hz, {len(ws)} runs" if hz is not None else "no referee whistle found (motion alone)")
+          + f"; mount handled {handled.sum() * BIN_S:.0f} s; play: {play}, {len(periods)} period{'s' * (len(periods) != 1)}")
     truth = json.loads((out / "truth.json").read_text()) if (out / "truth.json").exists() else {}
-    for key in names:
-        f = found.get(key)
-        tr = truth.get(key)
-        err = f"  error {f - tr:+5.0f} s" if f is not None and tr is not None else ""
-        wh = f"  whistle {used[key]['dur']:.1f} s" if used.get(key) else ("  (no whistle)" if f is not None else "")
-        print(f"  {key}  {fmt(f) if f is not None else '    -'}  truth {fmt(tr) if tr is not None else '    -'}{err}{wh}")
-    if all(k in found for k in names):
-        kept = (found["e1"] - found["k1"]) + (found["e2"] - found["k2"]) + 4 * pad
+    tnames = [k for k in names if truth.get(k) is not None]
+    flat = [(d["start"], d["startSeen"], d["startWhistle"], d["end"], d["endSeen"], d["endWhistle"]) for d in periods]
+    for i, (st, ss, sw, en, es, ew) in enumerate(flat):
+        def near(v, kind):  # the truth boundary of this kind nearest v
+            c = [truth[k] for k in tnames if k[0] == kind]
+            return min(c, key=lambda x: abs(x - v)) if c else None
+        for label, v, seen, w, kind in ((f"start {i + 1}", st, ss, sw, "k"), (f"end {i + 1}  ", en, es, ew, "e")):
+            tr = near(v, kind)
+            err = f"  truth {fmt(tr)}  error {v - tr:+5.0f} s" if tr is not None else ""
+            how = f"  whistle {w['dur']:.1f} s" if w else ("  (no whistle)" if seen else "  (the recording's edge)")
+            print(f"  {label}  {fmt(v)}{err}{how}")
+    if periods:
+        keep = [(max(t_first, d["start"] - pad), min(t_last, d["end"] + pad)) for d in periods]
+        merged = [list(keep[0])]
+        for x, y in keep[1:]:
+            if x <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], y)
+            else:
+                merged.append([x, y])
+        kept = sum(y - x for x, y in merged)
         print(f"  keep {kept / 60:.1f} of {total / 60:.1f} min ({100 * (1 - kept / total):.0f}% saved, pad {pad:.0f} s)")
-        if all(k in truth for k in names):
-            keep = [(found["k1"] - pad, found["e1"] + pad), (found["k2"] - pad, found["e2"] + pad)]
+        if all(k in truth and truth[k] is not None for k in names):
             lost = 0.0
             for a_, b_ in ((truth["k1"], truth["e1"]), (truth["k2"], truth["e2"])):
-                lost += (b_ - a_) - sum(max(0.0, min(b_, y) - max(a_, x)) for x, y in keep)
+                lost += (b_ - a_) - sum(max(0.0, min(b_, y) - max(a_, x)) for x, y in merged)
             ideal = (truth["e1"] - truth["k1"]) + (truth["e2"] - truth["k2"])
             print(f"  play lost {lost:.0f} s; perfect cut would keep {ideal / 60:.1f} min")
-    plot(out / "plot.png", tb, A, F, score, ws, found, truth, t_first, t_last)
+    marks = {f"{'k' if j == 0 else 'e'}{i + 1}": v for i, d in enumerate(periods) for j, v in enumerate((d["start"], d["end"]))}
+    plot(out / "plot.png", tb, A, F, score, ws, marks, truth, t_first, t_last)
+    return res
 
 
 def plot(path: Path, tb, A, F, score, ws, found, truth, t_first, t_last) -> None:
