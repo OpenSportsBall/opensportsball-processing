@@ -10,8 +10,8 @@ dataset: anyone can read its card, but the files need a maintainer's
 approval of an access request.
 
     uv run processing/spikes/sharedata.py fetch [--annotations-only]   # contributors
-    uv run processing/spikes/sharedata.py list                         # what upload would send
-    uv run processing/spikes/sharedata.py upload                       # maintainers
+    uv run processing/spikes/sharedata.py list [--remote]              # what upload would send (and delete)
+    uv run processing/spikes/sharedata.py upload [--annotations-only]  # maintainers
 
 The dataset mirrors footage/ path for path, so `fetch` drops everything
 where the tools already look:
@@ -20,6 +20,7 @@ where the tools already look:
   models/                        the standard ball detector and judge
   <rec>/pitch/, <rec>/labels*/   pitch maps and ball label sets of recordings outside the bench
   <rec>/manifest.json, <rec>/phase0/report.json   what those labels need to find their frames
+  <rec>/phase0/cameras.json      the cameras those pitch maps were made with (jointfit.py)
 
 Before `fetch`, request access on the dataset's page and log in with
 `hf auth login` (a read token is enough). `upload` needs a write token
@@ -57,20 +58,36 @@ IGNORE = [".DS_Store", "**/.DS_Store", "**/__pycache__/**", ".cache/**"]
 def annotation_patterns() -> list[str]:
     out = []
     for rec, dirs in ANNOTATED.items():
-        out += [f"{rec}/manifest.json", f"{rec}/phase0/report.json"]
+        out += [f"{rec}/manifest.json", f"{rec}/phase0/report.json", f"{rec}/phase0/cameras.json"]
         out += [f"{rec}/{d}/**" for d in dirs]
     return out
+
+
+def mirrored_patterns() -> list[str]:
+    """The shared annotation folders, kept as copies of the local ones: a file
+    that is no longer there locally (a pitch map's old geometry, moved aside)
+    is deleted from the dataset on upload. bench/ and models/ only grow."""
+    return [f"{rec}/{d}/**" for rec, dirs in ANNOTATED.items() for d in dirs]
+
+
+def remote_stale(api) -> list[str]:
+    """Dataset files in the mirrored folders that are not in footage/ any more."""
+    from fnmatch import fnmatch
+
+    local = {f.relative_to(FOOTAGE).as_posix() for f in matching_files()}
+    return sorted(f for f in api.list_repo_files(REPO, repo_type="dataset")
+                  if any(fnmatch(f, x) for x in mirrored_patterns()) and f not in local)
 
 
 def patterns(annotations_only: bool = False) -> list[str]:
     return annotation_patterns() if annotations_only else ["bench/**", "models/**", *annotation_patterns()]
 
 
-def matching_files() -> list[Path]:
+def matching_files(annotations_only: bool = False) -> list[Path]:
     """The local files `upload` sends (for `list` and a sanity check)."""
     from fnmatch import fnmatch
 
-    pats, files = patterns(), []
+    pats, files = patterns(annotations_only), []
     for p in sorted(FOOTAGE.rglob("*")):
         rel = p.relative_to(FOOTAGE).as_posix()
         if p.is_file() and any(fnmatch(rel, x) for x in pats) and not any(fnmatch(rel, x) for x in IGNORE):
@@ -78,8 +95,8 @@ def matching_files() -> list[Path]:
     return files
 
 
-def cmd_list() -> None:
-    files = matching_files()
+def cmd_list(remote: bool = False, annotations_only: bool = False) -> None:
+    files = matching_files(annotations_only)
     by_top: dict[str, list[int]] = {}
     for f in files:
         parts = f.relative_to(FOOTAGE).parts
@@ -91,9 +108,17 @@ def cmd_list() -> None:
         print(f"  {top:28s} {n:6d} files  {size / 1e9:7.2f} GB")
     total = sum(f.stat().st_size for f in files)
     print(f"  {'total':28s} {len(files):6d} files  {total / 1e9:7.2f} GB")
+    if remote:
+        stale = remote_stale(HfApi())
+        print(f"  upload would delete {len(stale)} dataset files no longer here" + (":" if stale else ""))
+        for f in stale:
+            print(f"    {f}")
 
 
-def cmd_upload() -> None:
+def cmd_upload(annotations_only: bool = False) -> None:
+    """--annotations-only leaves bench/ and models/ alone: the benches write
+    their outputs (paths, candidate files) into the bench store, and those
+    stay local until someone means to share them."""
     api = HfApi()
     who = api.whoami()["name"]
     if not api.repo_exists(REPO, repo_type="dataset"):
@@ -103,11 +128,12 @@ def cmd_upload() -> None:
     print(f"{REPO}: gated, manual approval (as {who})")
     api.upload_file(path_or_fileobj=str(CARD), path_in_repo="README.md", repo_id=REPO, repo_type="dataset",
                     commit_message="Dataset card")
-    cmd_list()
+    cmd_list(remote=True, annotations_only=annotations_only)
     # Committed in batches; rerun after an interruption and it skips what is
     # already there.
     api.upload_folder(repo_id=REPO, folder_path=str(FOOTAGE), repo_type="dataset",
-                      allow_patterns=patterns(), ignore_patterns=IGNORE,
+                      allow_patterns=patterns(annotations_only), ignore_patterns=IGNORE,
+                      delete_patterns=mirrored_patterns(),  # re-uploaded files are kept, not deleted
                       commit_message="Bench store, models, pitch maps and ball labels")
     info = api.dataset_info(REPO)
     print(f"done: https://huggingface.co/datasets/{REPO} "
@@ -130,9 +156,9 @@ def main() -> None:
             FOOTAGE.mkdir(exist_ok=True)
             cmd_fetch("--annotations-only" in sys.argv)
         case ["list"]:
-            cmd_list()
+            cmd_list(remote="--remote" in sys.argv, annotations_only="--annotations-only" in sys.argv)
         case ["upload"]:
-            cmd_upload()
+            cmd_upload("--annotations-only" in sys.argv)
         case _:
             sys.exit(__doc__)
 
