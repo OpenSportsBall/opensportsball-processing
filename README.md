@@ -24,6 +24,9 @@ with it, only data:
   (`prepare`, then `run` once the pitch and kit questions are answered;
   JSON progress on stdout). The Mac app drives it this way; see
   [docs/TESTING-PROCESSING.md](docs/TESTING-PROCESSING.md), section 7.
+  A script or a model can drive it the same way: the questions say in
+  words what is asked and come with pictures to look at; see
+  [docs/ENGINE-AGENTS.md](docs/ENGINE-AGENTS.md).
 
 ## Layout
 

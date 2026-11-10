@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://opensportsball.dev/schemas/engine-questions.schema.json",
   "title": "The engine's questions",
-  "description": "Written by `prepare` to <recording>/engine/questions.json: what the user has to check before the game is processed. Image paths are relative to the recording folder. Answers: engine-answers.schema.json.",
+  "description": "Written by `prepare` to <recording>/engine/questions.json: what the user has to check before the game is processed. Image paths are relative to the recording folder. Answers: engine-answers.schema.json. ask, howToAnswer, each point's closeup and each kit group's sheet are for a script or a model driving the engine with no app (`questions`, `answer`).",
   "type": "object",
   "required": [
     "schemaVersion",
@@ -114,6 +114,48 @@
               },
               "pitch": {
                 "type": "number"
+              },
+              "closeup": {
+                "type": "object",
+                "description": "A close-up of the background around this keypoint, the fitted lines in red and a ring where the fit puts it. A pixel (x, y) of it is yaw = yaw0 + x * degPerPx, pitch = pitch0 + y * degPerPx. Absent when the fit puts the point off the panorama.",
+                "required": [
+                  "image",
+                  "width",
+                  "height",
+                  "fit",
+                  "degPerPx",
+                  "yaw0",
+                  "pitch0"
+                ],
+                "properties": {
+                  "image": {
+                    "type": "string"
+                  },
+                  "width": {
+                    "type": "integer"
+                  },
+                  "height": {
+                    "type": "integer"
+                  },
+                  "fit": {
+                    "type": "array",
+                    "items": {
+                      "type": "number"
+                    },
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "description": "Where the fit puts the keypoint, in the close-up's pixels."
+                  },
+                  "degPerPx": {
+                    "type": "number"
+                  },
+                  "yaw0": {
+                    "type": "number"
+                  },
+                  "pitch0": {
+                    "type": "number"
+                  }
+                }
               }
             }
           }
@@ -128,6 +170,17 @@
         "problem": {
           "type": "string",
           "description": "Why the last answer wasn't accepted (e.g. approve when approveAllowed is false)."
+        },
+        "ask": {
+          "type": "string",
+          "description": "What is being asked, in words, for a script or a model with no app to draw the question."
+        },
+        "howToAnswer": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The possible answers and the `answer` command for each."
         }
       }
     },
@@ -220,9 +273,24 @@
                     }
                   }
                 }
+              },
+              "sheet": {
+                "type": "string",
+                "description": "The group's crops in one picture, each with its id under it."
               }
             }
           }
+        },
+        "ask": {
+          "type": "string",
+          "description": "What is being asked, in words, for a script or a model with no app to draw the question."
+        },
+        "howToAnswer": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The possible answers and the `answer` command for each."
         }
       }
     },
@@ -270,6 +338,17 @@
         },
         "reason": {
           "type": "string"
+        },
+        "ask": {
+          "type": "string",
+          "description": "What is being asked, in words, for a script or a model with no app to draw the question."
+        },
+        "howToAnswer": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The possible answers and the `answer` command for each."
         }
       }
     }

@@ -497,11 +497,13 @@ the file formats are `schemas/engine-*.schema.json`.
 
 | Step | Command |
 |---|---|
-| Unit tests (answers to sides, kit score, the schemas, the no-stitch path with stand-in steps, footage hashes, the disk check and cleanup; no footage) | `uv run --with pytest --with numpy --with opencv-python-headless --with jsonschema pytest processing/tests/test_engine.py` |
+| Unit tests (answers to sides, kit score, the schemas, the no-stitch path with stand-in steps, footage hashes, the disk check and cleanup, the questions' words and pictures, answers from flags; no footage) | `uv run --with pytest --with numpy --with opencv-python-headless --with jsonschema pytest processing/tests/test_engine.py` |
 | Sync, pitch fit, kit groups, then the questions | `uv run processing/spikes/engine.py prepare job.json` |
 | Apply answers (asks again after a pitch correction or a split) | `uv run processing/spikes/engine.py prepare job.json --answers answers.json` |
 | The whole game | `uv run processing/spikes/engine.py run job.json --answers answers.json` |
-| What's done and pending | `uv run processing/spikes/engine.py status job.json` |
+| What's done and pending, and the command to run next | `uv run processing/spikes/engine.py status job.json` |
+| The pending questions as one document to read: what is asked, how to answer, the pictures (a close-up per pitch keypoint, a sheet per kit group) | `uv run processing/spikes/engine.py questions job.json` |
+| Write one answer into `<recording>/engine/answers.json` from flags, checked against the question ([ENGINE-AGENTS.md](ENGINE-AGENTS.md)) | `uv run processing/spikes/engine.py answer job.json pitch --approve` (or `--closeup 'NAME=X,Y'`, `kits --ok`, `cameras --left main`) |
 | A ball label set from the finished game (50 frames of Main, half detected, half bridged) | `uv run processing/spikes/engine.py label job.json ball [--count 50]` |
 | A must-see set: panoramas where the user pressed Missed play, plus random moments | `uv run processing/spikes/engine.py label job.json moments --at <s,s,...> [--random 3]` |
 | Store labels (also as `labels.json` / `boxes.json` for the benches) | `uv run processing/spikes/engine.py label job.json --answers labels.json` |

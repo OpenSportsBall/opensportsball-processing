@@ -428,3 +428,138 @@ def test_a_finished_game_isnt_rendered_again(tmp_path, monkeypatch, capsys):
     assert engine.run(job, None) == engine.EXIT_OK
     ev = [json.loads(l) for l in capsys.readouterr().out.splitlines()]
     assert ev[-1]["event"] == "done" and ev[-2] == {**ev[-2], "step": "game", "status": "skipped"}
+
+
+# ------------------------------------- questions a script or a model answers
+
+
+def asked_job(tmp_path):
+    """A prepared recording, small: a 20 x 8 degree panorama with one line and
+    two keypoints (one off the picture), and two kit groups of three people."""
+    import cv2
+    import numpy as np
+
+    job = make_job(tmp_path)
+    rec = job.rec
+    (rec / "pitch").mkdir()
+    pano = {"image": "background.png", "degPerPx": 0.03, "yawRange": [-10.0, 10.0], "pitchRange": [0.0, 8.0]}
+    cv2.imwrite(str(rec / "pitch" / "background.png"), np.full((266, 666, 3), 90, np.uint8))
+    (rec / "pitch" / "pitch.json").write_text("{}")
+    (rec / "pitch" / "review.json").write_text(json.dumps({
+        "pitch": {"lengthM": 100.0, "widthM": 60.0, "cameraHeightM": 6.0, "fittedWith": "lines"},
+        "lines": [[[-9.0, 4.0], [9.0, 4.0]]], "goals": [], "panorama": pano,
+        "points": {"left corner flag": {"yaw": -9.5, "pitch": 4.0}, "halfway far end": {"yaw": 0.0, "pitch": 2.0},
+                   "right corner flag": {"yaw": 14.0, "pitch": 4.0}}}))
+    frames = rec / "labels_engine"
+    frames.mkdir()
+    cv2.imwrite(str(frames / "f0.jpg"), np.full((400, 600, 3), 120, np.uint8))
+    (frames / "items.json").write_text(json.dumps([{"frames": [{"id": "m0_main", "image": "f0.jpg"}]}]))
+    d = rec / "teams" / "engine"
+    d.mkdir(parents=True)
+    (d / "people.json").write_text(json.dumps([
+        {"frame": "m0_main", "component": c, "onPitch": True, "box": [20 + 60 * i, 100, 50 + 60 * i, 180]}
+        for i, c in enumerate([0, 0, 0, 1, 1, 1])]))
+    st = job.state()
+    q = engine.write_questions(job, st)
+    job.save_state(st)
+    return job, q
+
+
+def flags(**kw):
+    import argparse
+
+    base = dict(left=None, approve=False, closeup=[], pano=[], point=[], keep=[], skip=[], ok=False, merge=[],
+                split=None, keeper=None, not_kit=None, tapped=[], share=False)
+    return argparse.Namespace(**{**base, **kw})
+
+
+def test_questions_say_what_is_asked_and_come_with_pictures(tmp_path):
+    job, q = asked_job(tmp_path)
+    for name in ("pitch", "kits"):
+        assert q[name]["ask"] and any("osb-engine answer" in h for h in q[name]["howToAnswer"])
+    pts = q["pitch"]["points"]
+    assert "closeup" not in pts["right corner flag"]  # the fit puts it off the panorama
+    for name in ("left corner flag", "halfway far end"):  # one against the picture's edge, one in the middle
+        c = pts[name]["closeup"]
+        assert (job.rec / c["image"]).exists()
+        assert c["yaw0"] + c["fit"][0] * c["degPerPx"] == pytest.approx(pts[name]["yaw"], abs=c["degPerPx"])
+        assert c["pitch0"] + c["fit"][1] * c["degPerPx"] == pytest.approx(pts[name]["pitch"], abs=c["degPerPx"])
+        assert 0 <= c["fit"][0] < c["width"] and 0 <= c["fit"][1] < c["height"]
+    for g in q["kits"]["groups"]:
+        assert (job.rec / g["sheet"]).exists() and len(g["crops"]) == 3
+
+
+def test_the_brief_is_one_document_with_whole_paths(tmp_path, capsys):
+    job, _ = asked_job(tmp_path)
+    capsys.readouterr()
+    assert engine.questions_brief(job) == 0
+    b = json.loads(capsys.readouterr().out)
+    assert b["pending"] == ["pitch", "kits"] and [x["question"] for x in b["questions"]] == ["pitch", "kits"]
+    pitch, kits = b["questions"]
+    assert Path(pitch["overlay"]).is_absolute() and "lines" not in pitch
+    assert Path(pitch["points"]["halfway far end"]["closeup"]["image"]).exists()
+    assert pitch["points"]["right corner flag"]["closeup"] is None
+    assert Path(kits["groups"][0]["sheet"]).exists() and kits["groups"][0]["crops"] == ["c0_00", "c0_01", "c0_02"]
+    assert "answer" in b["next"]
+
+
+def test_an_answer_from_flags_is_what_the_app_would_send(tmp_path, capsys):
+    job, q = asked_job(tmp_path)
+    c = q["pitch"]["points"]["halfway far end"]["closeup"]
+    x, y = c["fit"][0] + 30, c["fit"][1] - 15  # 30 px right and 15 px up of the fit, in the close-up
+    assert engine.answer(job, "pitch", flags(closeup=[f"halfway far end={x},{y}"], pano=["left corner flag=20,133"],
+                                             skip=["right corner flag"])) == 0
+    assert engine.answer(job, "kits", flags(merge=["0,1"], tapped=["c0_01,c1_02"], share=True)) == 0
+    a = json.loads((job.dir / "answers.json").read_text())  # both answers, in the one file
+    engine.validate(a, "engine-answers.schema.json", "answers")
+    assert a["pitch"]["share"] is False and a["kits"]["share"] is True  # sharing only when asked for
+    assert a["pitch"]["points"]["halfway far end"] == {"yaw": pytest.approx(0.3, abs=0.011), "pitch": pytest.approx(1.85, abs=0.011)}
+    assert a["pitch"]["points"]["left corner flag"] == {"yaw": pytest.approx(-9.4), "pitch": pytest.approx(3.99)}
+    assert a["pitch"]["points"]["right corner flag"] == {"skipped": True}
+    assert a["kits"] == {"round": 1, "share": True, "merge": [[0, 1]], "tapped": {"0": ["c0_01"], "1": ["c1_02"]}}
+    assert "prepare" in json.loads(capsys.readouterr().out.split("\n}\n")[-2] + "\n}")["next"]
+
+
+@pytest.mark.parametrize("question, kw, says", [
+    ("pitch", {}, "needs --approve"),
+    ("pitch", {"approve": True, "keep": ["halfway far end"]}, "stands alone"),
+    ("pitch", {"closeup": ["no such point=1,2"]}, "no such point"),
+    ("pitch", {"closeup": ["right corner flag=1,2"]}, "no close-up"),
+    ("pitch", {"closeup": ["halfway far end=5000,2"]}, "outside its close-up"),
+    ("pitch", {"keep": ["halfway far end"], "skip": ["halfway far end"]}, "more than once"),
+    ("kits", {}, "needs --ok"),
+    ("kits", {"ok": True, "merge": ["0,1"]}, "stands alone"),
+    ("kits", {"merge": ["0,9"]}, "no such group"),
+    ("kits", {"merge": ["0"]}, "two or more"),
+    ("kits", {"tapped": ["c9_00"]}, "no such crop"),
+    ("cameras", {"left": "main"}, "isn't waiting"),
+    ("goals", {}, "takes one of"),
+])
+def test_an_answer_that_doesnt_fit_the_question_is_refused(tmp_path, question, kw, says):
+    job, _ = asked_job(tmp_path)
+    with pytest.raises(engine.Failed) as e:
+        engine.answer(job, question, flags(**kw))
+    assert says in e.value.message and e.value.exit_code == engine.EXIT_BAD_INPUT
+    assert not (job.dir / "answers.json").exists()
+
+
+def test_approving_waits_for_marked_points_when_the_cameras_came_from_the_pitch(tmp_path):
+    job, _ = asked_job(tmp_path)
+    st = job.state()
+    st["pitch"]["approveAllowed"] = False
+    q = engine.write_questions(job, st)
+    assert "isn't allowed yet" in q["pitch"]["howToAnswer"][0]
+    with pytest.raises(engine.Failed, match="can't be approved yet"):
+        engine.answer(job, "pitch", flags(approve=True))
+
+
+def test_status_says_what_to_run_next(tmp_path, capsys):
+    job = make_job(tmp_path)
+    engine.status(job)
+    assert "prepare" in json.loads(capsys.readouterr().out)["next"]
+    job, _ = asked_job(tmp_path / "asked")
+    capsys.readouterr()
+    engine.status(job)
+    line = capsys.readouterr().out
+    engine.validate(json.loads(line), "engine-event.schema.json", "event")
+    assert "questions" in json.loads(line)["next"]
