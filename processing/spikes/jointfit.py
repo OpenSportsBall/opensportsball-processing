@@ -15,6 +15,16 @@
     uv run processing/spikes/jointfit.py lenses <rec> [<rec> ...]
     uv run processing/spikes/jointfit.py bench footage/fixtures/pitch/<name> <rec> <dir> [<dir> ...]
 
+Putting a fit into a recording that already has boxes, goals and detections:
+    uv run processing/spikes/jointfit.py mirror <rec> <fit dir> <mirror> <segment>
+    uv run processing/spikes/jointfit.py convert-detect <rec> <mirror> "*"
+    uv run processing/spikes/jointfit.py convert-passa <rec> <mirror>     # or let playbench.py redo pass A
+    uv run processing/spikes/jointfit.py adopt <rec> <mirror> [<keep>]    # replaced files go to <rec>/<keep>/
+<keep> defaults to pre_joint; a recording adopted before needs another name
+(rec7: pre_joint is the stitch, joint_2026-11-09_files the first joint fit).
+mirror draws the panorama from the segment's video; when that isn't on disk,
+from the two per-phone backgrounds the fit cached (<fit dir>/bg_*_seg<N>.png).
+
 When the phones can't be stitched (follow.setup_cameras: "calibration
 failed", rec5), osb-engine (engine.py) builds the cameras from the pitch:
     uv run processing/spikes/jointfit.py <rec> choices <out dir> [--seg N]
@@ -117,6 +127,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -1074,12 +1085,70 @@ def mirror_main(src: Path, joint: Path, dest: Path, bg_seg: int) -> None:
                            for k, b in boxes.items()]) / 2
         print(f"playeval/{sdir.name}: {len(nb)} boxes converted (median edge shift {shift:.2f} deg)")
     pano = P.Pano()
-    bg = P.background(dest, bg_seg, pano)
+    how = f"panorama from segment {bg_seg}"
+    try:
+        bg = P.background(dest, bg_seg, pano)
+    except subprocess.CalledProcessError:  # the segment's video isn't on disk
+        cached = [joint / f"bg_{r}_seg{bg_seg}.png" for r in ("main", "secondary")]
+        if not all(c.exists() for c in cached):
+            sys.exit(f"segment {bg_seg}'s video isn't on disk and {joint} has no cached backgrounds of it")
+        bg = pano_from_phones((new_cm, new_cs), [cv2.imread(str(c)) for c in cached], pano)
+        how = f"panorama from the fit's cached backgrounds of segment {bg_seg} (its video isn't on disk)"
     cv2.imwrite(str(pd / "background.png"), bg)
     cv2.imwrite(str(pd / "background.jpg"), cv2.resize(bg, (pano.w // 3, pano.h // 3)))
     cv2.imwrite(str(pd / "overlay.jpg"), cv2.resize(P.draw(bg, pano, new_pose), (pano.w // 2, pano.h // 2)),
                 [cv2.IMWRITE_JPEG_QUALITY, 88])
-    print(f"{dest}: cameras and pitch from {joint}, panorama from segment {bg_seg}")
+    print(f"{dest}: cameras and pitch from {joint}, {how}")
+
+
+def pano_from_phones(cams: tuple, bgs: list[np.ndarray], pano: P.Pano) -> np.ndarray:
+    """pitch.background's panorama from one background image per phone (4K, upright) instead of
+    the video: each pixel from the phone that sees it farther from its frame edge."""
+    YY, PP = pano.angles()
+    out = np.zeros((pano.h, pano.w, 3), np.uint8)
+    cams = [c.at(W) for c in cams]
+    for r0 in range(0, pano.h, 256):  # in bands: the whole panorama's directions at once is several GB
+        sl = slice(r0, min(pano.h, r0 + 256))
+        dirs = follow.direction(YY[sl], PP[sl])
+        maps = []
+        for c in cams:
+            x, y, ok = c.project(dirs)
+            d = np.minimum(np.minimum(x, c.w - 1 - x), np.minimum(y, c.h - 1 - y))
+            maps.append((x, y, np.where(ok, d, -1)))
+        wa = cv2.remap(bgs[0], maps[0][0], maps[0][1], cv2.INTER_LINEAR)
+        wb = cv2.remap(bgs[1], maps[1][0], maps[1][1], cv2.INTER_LINEAR)
+        band = np.where((maps[0][2] >= maps[1][2])[..., None], wa, wb)
+        band[(maps[0][2] < 0) & (maps[1][2] < 0)] = 0
+        out[sl] = band
+    return out
+
+
+def convert_passa_main(src: Path, dest: Path) -> None:
+    """follow.py's pass A caches (player blobs per frame in panorama angles: yaw, pitch, area, the
+    feet's pitch) from src's cameras into dest's, each through the phone that sees it farther from
+    its frame edge. For a mirror whose video isn't on disk; with the video, playbench.py redoes
+    pass A and that is the better copy (a blob at the seam may have come from the other phone)."""
+    old_cm, old_cs, _ = load_cameras(src / "phase0" / "cameras.json")
+    new_cm, new_cs, _ = load_cameras(dest / "phase0" / "cameras.json")
+    re = Reangle((old_cm, old_cs), (new_cm, new_cs))
+    (dest / "follow").mkdir(exist_ok=True)
+    for p in sorted((src / "follow").glob("passA_*.json")):
+        j = json.loads(p.read_text())
+        flat = np.array([d for fr in j["dets"] for d in fr], float).reshape(-1, 4)
+        if len(flat):
+            yaw, pit = re(np.degrees(flat[:, 0]), np.degrees(flat[:, 1]))
+            _, feet = re(np.degrees(flat[:, 0]), np.degrees(flat[:, 3]))
+            ok = np.isfinite(yaw) & np.isfinite(feet)
+            moved = float(np.median(np.abs(yaw[ok] - np.degrees(flat[ok, 0])))) if ok.any() else 0.0
+            new = np.where(ok[:, None], np.c_[np.radians(yaw), np.radians(pit), flat[:, 2], np.radians(feet)], flat)
+        else:
+            new, ok, moved = flat, np.zeros(0, bool), 0.0
+        out, i = [], 0
+        for fr in j["dets"]:
+            out.append([[float(v) for v in d] for d in new[i:i + len(fr)]])
+            i += len(fr)
+        (dest / "follow" / p.name).write_text(json.dumps({"dets": out, "extent": j["extent"]}))
+        print(f"converted {p.name}: {int(ok.sum())} of {len(flat)} blobs, median yaw shift {moved:.3f} deg")
 
 
 def convert_detect_main(src: Path, dest: Path, start: str, src_detect: Path | None = None,
@@ -1133,21 +1202,27 @@ ADOPT_PITCH = ("pitch.json", "goals.json", "taps.json", "taps_src.json", "backgr
                "overlay.jpg")
 
 
-def adopt_main(rec: Path, mirror: Path) -> None:
+def adopt_main(rec: Path, mirror: Path, keep: str = "pre_joint") -> None:
     """Puts a mirror's joint cameras and pitch into the recording itself. Everything replaced goes to
-    <rec>/pre_joint/ first (phase0/cameras.json, the pitch/ files, playeval boxes, follow/'s pass A
+    <rec>/<keep>/ first (phase0/cameras.json, the pitch/ files, playeval boxes, follow/'s pass A
     caches, the whole detect/). Then: the mirror's pitch files, boxes and pass A caches are copied in,
-    and every ball candidate and role file is carried into the new angles (convert-detect)."""
+    every ball candidate and role file is carried into the new angles (convert-detect), and what
+    pitch/ derives from the panorama (lines.png, lines_<colour>.png, review.json: only those already
+    there) is made again. `keep` must not exist: a recording adopted before keeps its earlier files
+    where they are and needs another name."""
     import shutil
 
-    pre = rec / "pre_joint"
+    pre = rec / keep
     if pre.exists():
-        sys.exit(f"{pre} exists: already adopted")
+        sys.exit(f"{pre} exists: already adopted (give another folder name to keep the replaced files in)")
+    if not (mirror / "pitch" / "background.png").exists():
+        sys.exit(f"{mirror} has no pitch/background.png: the mirror wasn't finished")
     (pre / "phase0").mkdir(parents=True)
     (pre / "pitch").mkdir()
     shutil.copy2(rec / "phase0" / "cameras.json", pre / "phase0" / "cameras.json")
     shutil.copy2(mirror / "phase0" / "cameras.json", rec / "phase0" / "cameras.json")
-    for n in ADOPT_PITCH:
+    derived = [f.name for f in (rec / "pitch").glob("lines*.png")] + ["review.json"]
+    for n in (*ADOPT_PITCH, *derived):
         if (rec / "pitch" / n).exists():
             shutil.copy2(rec / "pitch" / n, pre / "pitch" / n)
         if (mirror / "pitch" / n).exists():
@@ -1168,12 +1243,24 @@ def adopt_main(rec: Path, mirror: Path) -> None:
         if not (e.suffix == ".json" and e.name.split("_")[0] in ("ball", "roles")):
             (shutil.copytree if e.is_dir() else shutil.copy2)(e, rec / "detect" / e.name)
     convert_detect_main(pre, rec, "*", pre / "detect", rec / "detect")
+    pd = rec / "pitch"
+    bg = cv2.imread(str(pd / "background.png"))
+    if (pd / "lines.png").exists():
+        mask = P.line_mask(bg, P.paint_colour(rec))
+        cv2.imwrite(str(pd / "lines.png"), mask)
+        if (pd / "lines_small.png").exists():
+            cv2.imwrite(str(pd / "lines_small.png"), cv2.resize(mask, (mask.shape[1] // 3, mask.shape[0] // 3),
+                                                              interpolation=cv2.INTER_AREA))
+    if any(n.startswith("lines_") and n != "lines_small.png" for n in derived):
+        P.write_line_overlays(pd, bg)
+    if (pd / "review.json").exists():
+        P.review_main(rec)
     (pre / "README.md").write_text(
-        f"# Before the joint fit\n\nAdopted {time.strftime('%Y-%m-%d %H:%M')} from {mirror} "
+        f"# Before the joint fit adopted {time.strftime('%Y-%m-%d %H:%M')}\n\nAdopted from {mirror} "
         f"(jointfit.py adopt). These are the files it replaced: phase0/cameras.json, the pitch/ files "
-        f"{', '.join(ADOPT_PITCH)}, playeval boxes, follow/'s pass A caches and detect/ (ball candidates and "
-        "roles were carried into the new angles, not re-detected). Outputs made before this (fullgame/, "
-        "phases/, renders, paths) are in the old geometry. To undo: copy these back.\n")
+        f"{', '.join((*ADOPT_PITCH, *derived))}, playeval boxes, follow/'s pass A caches and detect/ (ball "
+        "candidates and roles were carried into the new angles, not re-detected). Outputs made before this "
+        "(fullgame/, phases/, renders, paths) are in the old geometry. To undo: copy these back.\n")
     print(f"{rec}: adopted {mirror}; old files in {pre}")
 
 
@@ -1256,8 +1343,11 @@ def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "convert-detect":
         convert_detect_main(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4])
         return
+    if len(sys.argv) > 1 and sys.argv[1] == "convert-passa":
+        convert_passa_main(Path(sys.argv[2]), Path(sys.argv[3]))
+        return
     if len(sys.argv) > 1 and sys.argv[1] == "adopt":
-        adopt_main(Path(sys.argv[2]), Path(sys.argv[3]))
+        adopt_main(Path(sys.argv[2]), Path(sys.argv[3]), *sys.argv[4:5])
         return
     if len(sys.argv) > 2 and sys.argv[2] in ("rough", "choices", "search", "install"):
         ap = argparse.ArgumentParser()
