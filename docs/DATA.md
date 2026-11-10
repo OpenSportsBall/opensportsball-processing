@@ -106,6 +106,12 @@ S3 only.
     uv run processing/spikes/sharedata.py list                         # what upload would send
     uv run processing/spikes/sharedata.py upload                       # maintainers: after changing any of it
 
+`upload` never sends the app's upload state (`upload.json`: the account id
+and S3 upload ids) and removes it from the dataset if it is there. It stops,
+naming the files, when a text file it would send holds a home-directory
+path, an account id or an `accounts/<id>` key; `list` shows the same. Model
+files aren't looked into: a checkpoint keeps the paths it was trained with.
+
 Approve or reject requests on the dataset's **Settings → Gated user access**
 page (Hugging Face emails the maintainers about new ones). Approve people you
 know are working on the project; removing someone there stops further
