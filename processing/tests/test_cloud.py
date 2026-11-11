@@ -52,8 +52,12 @@ FAKE_ENGINE = textwrap.dedent("""
             "schemaVersion": 1, "recording": str(rec), "pending": ["kits"], "kits": {"round": 2, "problem": "too few"}}))
         say(event="needs_answers", pending=["kits"])
         sys.exit(3)
+    if command == "status":
+        say(event="status", chunkDetails=[{"chunk": 0, "ball": {"seconds": 310}, "follow": {"seconds": 240}}])
+        sys.exit(0)
     if command == "prepare":
         say(event="step", step="sync", status="started")
+        import time; time.sleep(0.3)
         (rec / "pitch").mkdir(exist_ok=True)
         (rec / "pitch" / "overlay.jpg").write_bytes(b"jpeg")
         (rec / "pitch" / "review.json").write_text("{}")
@@ -76,6 +80,16 @@ FAKE_ENGINE = textwrap.dedent("""
 """)
 
 
+# nvidia-smi as cloudprofile.py asks it: the machine once, then the counters.
+FAKE_SMI = textwrap.dedent("""\
+    #!/bin/sh
+    case "$1" in
+      *name*) echo "NVIDIA A10G, 23028, 580.178.04" ;;
+      *) echo "87, 9100, 23028, 35, 0" ;;
+    esac
+""")
+
+
 @pytest.fixture
 def aws(tmp_path, monkeypatch):
     for k, v in {"AWS_ACCESS_KEY_ID": "test", "AWS_SECRET_ACCESS_KEY": "test", "AWS_DEFAULT_REGION": "us-east-1",
@@ -85,6 +99,11 @@ def aws(tmp_path, monkeypatch):
         monkeypatch.setenv(k, v)
     for k in ("ENGINE_FAIL", "ENGINE_NEEDS_FOOTAGE", "ENGINE_REFUSES", "OSB_JOB_OPTIONS", "OSB_REQUIRE_GPU", "AWS_PROFILE", "AWS_ENDPOINT_URL"):
         monkeypatch.delenv(k, raising=False)
+    smi = tmp_path / "nvidia-smi"
+    smi.write_text(FAKE_SMI)
+    smi.chmod(0o755)
+    monkeypatch.setenv("OSB_NVIDIA_SMI", str(smi))
+    monkeypatch.setenv("OSB_PROFILE_EVERY_S", "0.05")
     fake = tmp_path / "fake_engine.py"
     fake.write_text(FAKE_ENGINE)
     monkeypatch.setenv("OSB_ENGINE_CMD", json.dumps([sys.executable, str(fake)]))
@@ -125,7 +144,9 @@ def body(s3, key):
 
 
 def calls(rec):
-    return [json.loads(line) for line in (rec / "engine" / "calls.jsonl").read_text().splitlines()]
+    """The engine commands that did work (not the status read for the profile)."""
+    lines = [json.loads(line) for line in (rec / "engine" / "calls.jsonl").read_text().splitlines()]
+    return [c for c in lines if c[0] != "status"]
 
 
 def test_prepare_fetches_the_footage_and_publishes_the_questions(aws, monkeypatch):
@@ -142,7 +163,7 @@ def test_prepare_fetches_the_footage_and_publishes_the_questions(aws, monkeypatc
     q = json.loads(body(s3, OUT + "questions/questions.json"))
     assert q["recording"] == "." and q["pending"] == ["pitch", "kits"]
     # The pictures it names, where it names them; nothing from outside the folder, nothing missing.
-    assert keys(s3, OUT) == ["questions/pitch/overlay.jpg", "questions/questions.json"]
+    assert [k for k in keys(s3, OUT) if not k.startswith("profile/")] == ["questions/pitch/overlay.jpg", "questions/questions.json"]
     assert s3.head_object(Bucket=BUCKET, Key=OUT + "questions/pitch/overlay.jpg")["ContentType"] == "image/jpeg"
 
     # The folder without the footage is in the work prefix for the next command.
@@ -212,6 +233,48 @@ def test_run_uploads_the_game_and_its_result(aws, monkeypatch):
     assert (p["stage"]["S"], float(p["fraction"]["N"]), p["etaSeconds"]["N"]) == ("upload", 1.0, "0")
 
 
+def test_each_command_leaves_a_profile_of_the_machine(aws, monkeypatch):
+    s3, ddb, rec = aws
+    assert go(monkeypatch, "prepare") == 0
+    p = json.loads(body(s3, OUT + "profile/prepare.json"))
+    assert p["command"] == "prepare" and p["exit"] == 0 and p["engineVersion"] == "osb-engine test"
+    assert p["machine"]["gpu"] == "NVIDIA A10G" and p["machine"]["gpuMemoryMiB"] == 23028 and p["machine"]["driver"] == "580.178.04"
+    marks = [m["mark"] for m in p["timeline"]]
+    assert marks[0] == "start" and marks[-1] == "end"
+    for want in ("work_restored", "footage_fetched", "engine_started", "step:sync", "engine_finished", "published"):
+        assert want in marks, want
+    assert marks.index("footage_fetched") < marks.index("engine_started") < marks.index("engine_finished")
+    assert p["transfers"]["footage"]["bytes"] == sum(len(v) for v in SEGMENTS.values())
+    # The engine's steps with their own times, and what the GPU did during each.
+    [sync] = p["steps"]
+    assert sync["step"] == "sync" and sync["seconds"] == 1 and sync["gpuUtil"]["max"] == 87
+    assert p["usage"]["gpuUtil"] == {"mean": 87.0, "p50": 87.0, "p95": 87.0, "max": 87.0}
+    assert p["usage"]["gpuMemoryMiB"]["max"] == 9100 and p["usage"]["gpuDecoder"]["mean"] == 35
+    samples = [json.loads(line) for line in body(s3, OUT + "profile/prepare-samples.jsonl").decode().splitlines()]
+    assert len(samples) == p["samples"] >= 3 and {"t", "step", "gpuUtil"} <= set(samples[0])
+    assert any(x["step"] == "sync" for x in samples)
+
+    assert go(monkeypatch, "run") == 0
+    r = json.loads(body(s3, OUT + "profile/run.json"))
+    assert r["chunks"] == [{"chunk": 0, "ball": {"seconds": 310}, "follow": {"seconds": 240}}]
+    assert r["transfers"]["video"]["bytes"] == len(b"the game")
+
+    # A failed command leaves one too.
+    monkeypatch.setenv("ENGINE_FAIL", "footage_corrupt")
+    assert go(monkeypatch, "prepare") == 1
+    assert json.loads(body(s3, OUT + "profile/prepare.json"))["exit"] == 1
+
+
+def test_a_gpu_job_stops_when_pytorch_cannot_use_the_gpu(aws, monkeypatch):
+    s3, ddb, rec = aws
+    monkeypatch.setenv("OSB_REQUIRE_GPU", "1")
+    monkeypatch.setattr(cloud.accel, "platform", lambda: "nvidia")
+    monkeypatch.setattr(cloud, "gpu_usable", lambda: False)
+    assert go(monkeypatch, "prepare") == 1
+    assert record(ddb)["error"]["M"]["code"]["S"] == "no_gpu"
+    assert "driver" in record(ddb)["error"]["M"]["message"]["S"]
+
+
 def test_run_asks_again_when_the_engine_refuses_an_answer(aws, monkeypatch):
     s3, ddb, rec = aws
     assert go(monkeypatch, "prepare") == 0
@@ -229,7 +292,7 @@ def test_an_engine_error_goes_on_the_record_with_its_logs(aws, monkeypatch):
     monkeypatch.setenv("ENGINE_FAIL", "footage_corrupt")
     assert go(monkeypatch, "prepare") == 1
     assert record(ddb)["error"]["M"] == {"code": {"S": "footage_corrupt"}, "message": {"S": "segment 3 could not be read"}}
-    assert keys(s3, OUT) == ["logs/sync.log"]
+    assert [k for k in keys(s3, OUT) if not k.startswith("profile/")] == ["logs/sync.log"]
     assert "engine/logs/sync.log" in keys(s3, WORK)
 
 

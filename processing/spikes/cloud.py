@@ -41,6 +41,8 @@ Out, under the output prefix:
                                is at questions/<its path>
     game.mp4, result.json      the video, and the engine's done event (ballAimShare, ballLow)
     logs/                      the engine's logs, when a command fails
+    profile/<command>.json     what the command used of the machine and how long each
+                               part took (cloudprofile.py), with its samples beside it
 
 The recording folder without the footage goes back to the work prefix as
 the engine finishes steps and chunks, and at the end, so the next command
@@ -75,6 +77,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 sys.path.insert(0, str(HERE))
 import accel  # noqa: E402
+from cloudprofile import Profile  # noqa: E402
 
 PROGRESS_EVERY_S = 30.0
 SYNC_EVERY_S = 300.0
@@ -150,12 +153,12 @@ class Cloud:
 
     # -- the recording folder
 
-    def fetch_footage(self, rec: Path) -> None:
+    def fetch_footage(self, rec: Path) -> tuple[int, float]:
         """manifest.json and every segment, as engine.py expects them. A
         file already here at the manifest's size is kept. Each file gets the
         time S3 has for it, so the engine's record of files it has hashed
         (engine/verified.json, kept in the work prefix) still holds on
-        another machine."""
+        another machine. Returns the bytes fetched and the seconds it took."""
         objs = {o["Key"][len(self.footage):]: o for o in self.list(self.footage)}
         if "manifest.json" not in objs:
             raise Failed("footage_missing", "the recording's footage is no longer there")
@@ -171,13 +174,14 @@ class Cloud:
                 if not (f.exists() and f.stat().st_size == o["Size"]):
                     todo.append((s["objectKey"], f, int(o["LastModified"].timestamp()) * 1_000_000_000))
         if not todo:
-            return
+            return 0, 0.0
         size = sum(objs[k]["Size"] for k, _, _ in todo)
         log(f"fetching {len(todo)} segment files, {size / 1e9:.1f} GB")
         t0 = time.time()
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             list(pool.map(lambda t: self.fetch(self.footage + t[0], t[1], t[2]), todo))
         log(f"footage fetched in {time.time() - t0:.0f} s")
+        return size, time.time() - t0
 
     def restore_work(self, rec: Path) -> None:
         """Everything under the work prefix, with the times it had."""
@@ -347,7 +351,47 @@ def engine_cmd() -> list[str]:
     return [*accel.python_cmd(), str(HERE / "engine.py")]
 
 
-def run_engine(cloud: Cloud, rec: Path, args: list[str], footage: set[str]) -> tuple[int, dict]:
+def gpu_usable() -> bool:
+    """Whether PyTorch, in the engine's own Python, can use the GPU: the
+    driver may be too old for the CUDA the wheels were built with, and the
+    pipeline would then quietly run on the CPU for days."""
+    try:
+        out = subprocess.run([*accel.python_cmd()[:1], "-c", "import torch; print(torch.cuda.is_available())"],
+                             capture_output=True, text=True, timeout=300)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    log(f"torch.cuda.is_available(): {out.stdout.strip() or out.stderr.strip()[-300:]}")
+    return out.stdout.strip() == "True"
+
+
+def chunk_details(rec: Path) -> list | None:
+    """Each chunk's stages and times, as engine.py status reports them."""
+    try:
+        out = subprocess.run([*engine_cmd(), "status", str(rec.parent / "job.json")], capture_output=True, text=True,
+                             timeout=300, cwd=rec.parent).stdout
+        for line in out.splitlines():
+            if line.startswith("{") and json.loads(line).get("event") == "status":
+                return json.loads(line).get("chunkDetails")
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def publish_profile(cloud: Cloud, profile: Profile, exit_code: int | None) -> None:
+    try:
+        profile.stop()
+        profile.mark("end")
+        base = f"{cloud.out}profile/{profile.command}"
+        cloud.s3.put_object(Bucket=cloud.bucket, Key=base + ".json",
+                            Body=json.dumps(profile.summary(exit_code), indent=1).encode(), ContentType="application/json")
+        cloud.s3.put_object(Bucket=cloud.bucket, Key=base + "-samples.jsonl",
+                            Body=profile.samples_jsonl().encode(), ContentType="application/x-ndjson")
+        log(f"profile: {json.dumps(profile.summary(exit_code)['usage'])}")
+    except Exception as e:  # never the reason a job fails
+        log(f"could not save the profile: {e}")
+
+
+def run_engine(cloud: Cloud, rec: Path, args: list[str], footage: set[str], profile: Profile | None = None) -> tuple[int, dict]:
     """engine.py with `args`, its events read as they come: progress to the
     job record, the folder to the work prefix as steps and chunks finish.
     Returns its exit code and the last event of each kind."""
@@ -366,6 +410,8 @@ def run_engine(cloud: Cloud, rec: Path, args: list[str], footage: set[str]) -> t
             continue
         print(line, flush=True)  # the job's log keeps the engine's own words
         last[e.get("event", "")] = e
+        if profile:
+            profile.event(e)
         if e.get("event") == "step":
             if e.get("status") in ("done", "skipped"):
                 done_steps += 1
@@ -393,10 +439,17 @@ def main() -> int:
     signal.signal(signal.SIGINT, _on_signal)
     cloud = None
     rec = None
+    profile = Profile(command, engine_version())
+    exit_code: int | None = None
     try:
         cloud = Cloud()
-        if os.environ.get("OSB_REQUIRE_GPU") == "1" and accel.platform() != "nvidia":
-            raise Failed("no_gpu", "this machine has no NVIDIA GPU the engine can use (accel.py)")
+        profile.start()
+        if os.environ.get("OSB_REQUIRE_GPU") == "1":
+            if accel.platform() != "nvidia":
+                raise Failed("no_gpu", "this machine has no NVIDIA GPU the engine can use (accel.py)")
+            if not gpu_usable():
+                raise Failed("no_gpu", "PyTorch cannot use this machine's GPU (is the NVIDIA driver too old for its CUDA build?)")
+        profile.mark("gpu_checked")
         log(f"{command} for job {cloud.job_id} on {accel.platform()}; {engine_version()}")
         rec = Path(env("OSB_SCRATCH", "/scratch")) / cloud.job_id / "rec"
         rec.mkdir(parents=True, exist_ok=True)
@@ -409,6 +462,7 @@ def main() -> int:
                                    **{k: extra[k] for k in ("options", "output") if k in extra}}))
         cloud.progress("download", 0.0, None, force=True)
         cloud.restore_work(rec)
+        profile.mark("work_restored")
         answers = cloud.get_json(cloud.out + "answers.json")
         args = [command if command == "run" else "prepare", str(job)]
         if answers is not None:
@@ -426,24 +480,36 @@ def main() -> int:
             if manifest is None:
                 raise Failed("footage_missing", "the recording's footage is no longer there")
             (rec / "manifest.json").write_text(json.dumps(manifest))
-            rc, last = run_engine(cloud, rec, [*args, "--no-footage"], set())
+            profile.mark("engine_started")
+            rc, last = run_engine(cloud, rec, [*args, "--no-footage"], set(), profile)
             if rc not in (0, EXIT_STOPPED):
                 log(f"refit without the footage failed ({(last.get('error') or {}).get('code')}): trying with it")
                 rc = None
         if rc is None:
             if command != "refit":
                 fetch_models(cloud)
-            cloud.fetch_footage(rec)
-            rc, last = run_engine(cloud, rec, args, footage_files(rec))
+                profile.mark("models_fetched")
+            nbytes, seconds = cloud.fetch_footage(rec)
+            if nbytes:
+                profile.transfer("footage", nbytes, seconds)
+            profile.mark("footage_fetched")
+            profile.mark("engine_started")
+            rc, last = run_engine(cloud, rec, args, footage_files(rec), profile)
+        profile.mark("engine_finished")
+        if command == "run":
+            profile.chunks = chunk_details(rec)
 
         cloud.save_work(rec, footage_files(rec))
+        profile.mark("work_saved")
         if _stopping.is_set() or rc == EXIT_STOPPED:
             log("stopped; the work so far is saved")
+            exit_code = EXIT_STOPPED
             return EXIT_STOPPED
         if command == "run" and rc == 3 and (rec / "engine" / "questions.json").exists():
             # The engine would not use an answer (engine.py: needs_answers) and
             # has written its questions again: the user is asked, not failed.
             publish_questions(cloud, rec)
+            exit_code = 0
             return 0
         if rc != 0:
             e = last.get("error") or {}
@@ -456,15 +522,20 @@ def main() -> int:
             cloud.progress("upload", 0.99, None, force=True)
             cloud.s3.put_object(Bucket=cloud.bucket, Key=cloud.out + "result.json",
                                 Body=json.dumps(last.get("done") or {}).encode(), ContentType="application/json")
+            t = time.time()
             cloud.put(game, cloud.out + "game.mp4", ContentType="video/mp4")
+            profile.transfer("video", game.stat().st_size, time.time() - t)
             cloud.progress("upload", 1.0, 0, force=True)
         else:
             publish_questions(cloud, rec)
+        profile.mark("published")
+        exit_code = 0
         return 0
     except Failed as f:
         print(json.dumps({"event": "error", "code": f.code, "message": f.message}), flush=True)
         if cloud:
             cloud.error(f.code, f.message)
+        exit_code = 1
         return 1
     except Exception as e:  # S3 or the disk, not the engine
         log(f"crashed: {e!r}")
@@ -477,6 +548,8 @@ def main() -> int:
                     pass
         raise
     finally:
+        if cloud:
+            publish_profile(cloud, profile, exit_code)
         # The instance is usually thrown away; a reused one gets its disk back.
         if rec is not None and not _stopping.is_set() and os.environ.get("OSB_KEEP_SCRATCH") != "1":
             shutil.rmtree(rec.parent, ignore_errors=True)

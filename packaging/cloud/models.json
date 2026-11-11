@@ -1,19 +1,21 @@
 {
-  "version": "2026-11-01",
   "models": [
     {
-      "key": "2026-11-01/ball_detector.pth",
+      "source": "footage/models/ball_detector.pth",
       "path": "footage/models/ball_detector.pth",
+      "key": "c69adbc8c417/ball_detector.pth",
       "sha256": "c69adbc8c417d1b1b509730991b33539f7b4a9796ddd9c16a3d0e49a47c2b54b"
     },
     {
-      "key": "2026-11-01/ball_judge.pt",
+      "source": "footage/models/ball_judge.pt",
       "path": "footage/models/ball_judge.pt",
+      "key": "1a94722b8bbb/ball_judge.pt",
       "sha256": "1a94722b8bbb71121034bfc810dee225b9bf5cb3f3c86667c4330e1ed40ed1b6"
     },
     {
-      "key": "rfdetr/rf-detr-medium.pth",
+      "source": "~/.roboflow/models/rf-detr-medium.pth",
       "path": "rf_home/rf-detr-medium.pth",
+      "key": "749ff6071828/rf-detr-medium.pth",
       "sha256": "749ff6071828aaffac63e204c4f4135ed3d6cdae4d702e086c360edc3b5768c8"
     }
   ]

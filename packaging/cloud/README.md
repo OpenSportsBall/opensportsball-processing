@@ -30,27 +30,31 @@ uncommitted files `-dirty`: don't deploy one.
 
 ## Build and push
 
-    packaging/cloud/build_image.sh <tag> [<repository uri>]
+    packaging/cloud/build_image.sh <tag> [<repository uri> <footage bucket>]
 
-The repository is the main repo's stack's `EngineRepositoryUri` output.
+The repository and bucket are the main repo's stack's
+`EngineRepositoryUri` and `FootageBucket` outputs. With them it also
+uploads the models (below) and pushes.
 Then deploy that stack with `-c engineImageTag=<tag> -c engineCompute=gpu`
 (its `infra/README.md`, "Cloud processing").
 
 ## Models
 
-`models.json` lists each model: its key under the bucket's `models/`
-prefix, where the engine expects it, and its SHA-256. A job fetches them
-before `prepare` and `run` and stops with `bad_models` if one in the
-bucket is not the one this image was built for. Upload them once, from a
-machine that has them (`footage/models/`, and RF-DETR's stock weights in
-`~/.roboflow/models/`):
+`models.json` pins each model by its SHA-256: where it is on the build
+machine (`source`), where the engine expects it (`path`), and its key
+under the bucket's `models/` prefix, which carries the start of the hash.
+A job fetches them before `prepare` and `run`, checks each against its
+hash, and stops with `bad_models` if one isn't right.
 
-    aws s3 cp footage/models/ball_detector.pth s3://<footage bucket>/models/2026-11-01/ball_detector.pth
-    aws s3 cp footage/models/ball_judge.pt     s3://<footage bucket>/models/2026-11-01/ball_judge.pt
-    aws s3 cp ~/.roboflow/models/rf-detr-medium.pth s3://<footage bucket>/models/rfdetr/rf-detr-medium.pth
+They are part of a deploy, not a separate chore:
 
-New models go under a new folder with a new `models.json`, so an older
-image still finds the ones it was benched with.
+- `build_image.sh` stops if a model on this machine is not the pinned one.
+  After retraining: `uv run packaging/cloud/models.py pin`, commit
+  `models.json`, build.
+- A push (`build_image.sh <tag> <repository> <bucket>`) first uploads any
+  pinned model the bucket lacks. A changed model is a new key, so nothing
+  is overwritten and an older image still finds the models it was benched
+  with.
 
 ## How a job goes
 
@@ -84,13 +88,24 @@ Things only a real instance can show, cheapest first:
    the PATH (the `utility` capability) and ffmpeg lists `h264_nvenc`.
    `OSB_REQUIRE_GPU=1` (set by the stack on GPU jobs) stops a job at once
    if not.
-2. PyTorch 2.15's wheels are built for CUDA 13: the instance's NVIDIA
-   driver has to be new enough for it. If the ECS GPU image's driver is
-   older, pin a CUDA 12 build of torch in `requirements.in`.
+2. PyTorch can use the GPU. The pinned wheels (torch 2.15, `cu132`) are
+   built with CUDA 13.2. The ECS AL2023 GPU image has NVIDIA driver
+   580.178.04 (release 20261031), and NVIDIA's CUDA notes give 580 as the
+   lowest driver for any CUDA 13.x program, with 13.2's own driver branch
+   being 595. So it should work, by the lowest allowed driver; a job checks
+   `torch.cuda.is_available()` in its first seconds and stops with `no_gpu`
+   if not. If it does, pin a CUDA 12 build of torch in `requirements.in`.
+   The A10G (g5) and L4 (g6) are both supported by CUDA 13, which dropped
+   only GPUs older than Turing.
 3. `ffmpeg -hwaccel cuda` decodes the phones' HEVC, and `h264_nvenc`
    encodes, inside the container (the `video` capability).
 4. One chunk of one game: set `OSB_JOB_OPTIONS={"options":{"maxChunks":1}}`
    on the job. About ten minutes of game; it shows the time per chunk
    before a whole game is paid for.
+
+Every command leaves `profile/<command>.json` in the job's output folder
+(`cloudprofile.py`): when each part began, how busy the GPU, its memory,
+the CPUs and the RAM were per engine step, each chunk's stage times, and
+the footage and video transfer rates.
 5. The must-see bench on the GPU against the Mac's 34/46, and a whole
    game's time and cost.
