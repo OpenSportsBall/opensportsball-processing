@@ -18,13 +18,20 @@ it is measured is in `docs/TESTING-PROCESSING.md`; the dated detail is in
 `docs/BACKLOG.md`; where recordings, labels and models live is in
 `docs/DATA.md`.
 
+## In the cloud
+
+`spikes/cloud.py` runs `engine.py` as one AWS Batch job of the main repo's
+cloud processing: footage from S3, questions and the game video back to
+S3, the folder's state kept between commands. The image is in
+`../packaging/cloud/` (its README says what has and hasn't been run on a
+GPU).
+
 ## Planned: `src/osb_processing/`
 
 The package the spikes move into once they are settled. Its stages are
-listed in `src/osb_processing/__init__.py`. The plan is a container on
-AWS Batch (Spot g5/g6, scaling to zero), started by the main repo's
-`RecordingReady` event: PyAV / FFmpeg with NVDEC and NVENC for video,
-PyTorch for remapping and detection. Not built yet.
+listed in `src/osb_processing/__init__.py`. The cloud job
+runs the spikes through `engine.py` today (above); the package would
+replace them there too. Not built yet.
 
 Input will be the upload manifest (`schemas/manifest.schema.json`, pinned
 from the main repo) plus the segment files in S3. Output: a 1080p MP4, a

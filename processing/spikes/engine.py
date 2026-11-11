@@ -8,7 +8,7 @@
 """osb-engine: one game from footage to game.mp4, driven through files, for
 the Mac app, the cloud job and a terminal alike.
 
-    uv run processing/spikes/engine.py prepare job.json [--answers answers.json]
+    uv run processing/spikes/engine.py prepare job.json [--answers answers.json [--no-footage]]
     uv run processing/spikes/engine.py run     job.json --answers answers.json
     uv run processing/spikes/engine.py status  job.json
     uv run processing/spikes/engine.py questions job.json
@@ -39,7 +39,9 @@ be approved. Given answers
 points are refitted (pitch.py taps) and asked again; a split kit group
 regroups with more components and is asked again (once); merges and
 keeper / not-a-kit marks rewrite the sides roles.py uses. Run it until
-questions.json has nothing pending.
+questions.json has nothing pending. Applying answers reads the pictures
+the first prepare left, not the video, so --no-footage does it without
+the segment files on disk (the cloud job, cloud.py).
 
 run: the whole game (fullgame.py: ball, roles and follow in chunks), once
 every question is answered. Writes <recording>/fullgame/game.mp4. It first
@@ -369,8 +371,17 @@ def sample_clip(job: Job, m: dict) -> tuple[int, float, float]:
     return seg, start, 120.0
 
 
-def prepare(job: Job, answers: dict | None) -> int:
-    m = check_footage(job)
+def prepare(job: Job, answers: dict | None, footage: bool = True) -> int:
+    if footage:
+        m = check_footage(job)
+    else:
+        # Applying answers reads the pictures an earlier prepare left (the
+        # background, the kit sample), not the video: the cloud job does it
+        # without fetching the footage again. A step that does want the
+        # video fails as it would with a file missing.
+        if not answers or not (job.dir / "questions.json").exists():
+            raise Failed("bad_job", "--no-footage is for applying answers after a prepare", exit_code=EXIT_BAD_INPUT)
+        m = job.manifest()
     st = job.state()
     seg, start, secs = sample_clip(job, m)
     rec = str(job.rec)
@@ -1623,6 +1634,8 @@ def main() -> int:
     ap.add_argument("job", type=Path)
     ap.add_argument("what", nargs="?", help="label: ball or moments; answer: cameras, pitch or kits")
     ap.add_argument("--answers", type=Path)
+    ap.add_argument("--no-footage", dest="footage", action="store_false",
+                    help="prepare --answers: apply the answers without the segment files on disk")
     ap.add_argument("--count", type=int, default=BALL_SET_COUNT, help="label ball: frames in the set")
     ap.add_argument("--at", default="", help="label moments: seconds into game.mp4 where the user pressed Missed play")
     ap.add_argument("--random", type=int, default=3, help="label moments: random moments added")
@@ -1674,7 +1687,7 @@ def main() -> int:
         if a.command == "share":
             return share(job, [k.strip() for k in a.kinds.split(",") if k.strip()])
         if a.command == "prepare":
-            return prepare(job, answers)
+            return prepare(job, answers, a.footage)
         if a.command == "run":
             return run(job, answers)
         return status(job)
