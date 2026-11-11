@@ -152,6 +152,7 @@ def main() -> None:
             if piece(k).exists():
                 continue
             t0, rc = time.time(), 0
+            event(event="start", stage="ball", chunk=k)
             if not cands(start, seconds).exists():  # the candidates may be there from an earlier run
                 rc = run([*accel.python_cmd(), str(HERE / "ballwin.py"), str(rec), "0", f"{start:g}", f"{seconds:g}",
                           str(a.detector), "10"], out / "logs" / f"ball_{k:02d}.log", done_file=cands(start, seconds))
@@ -180,6 +181,7 @@ def main() -> None:
                 time.sleep(10)
             else:
                 t0 = time.time()
+                event(event="start", stage="follow", chunk=k)
                 rc = run([*accel.python_cmd(), str(HERE / "follow.py"), str(rec), "0", f"{start:g}", f"{seconds:g}",
                           "play", a.features], out / "logs" / f"follow_{k:02d}.log")
                 src = rec / "follow" / f"follow_{tag}.mp4"

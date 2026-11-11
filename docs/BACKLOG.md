@@ -1601,8 +1601,12 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
       0.035); rec7's own judge_v4 gave 28-64%. The detector still finds
       the ball (6 of 8 sampled no-judge suggestions are on it); the
       judge rejects it. Bench judge_v4 (rec3 + rec5 + rec7) as the
-      standard on rec3, rec4cal and rec6, and have the app offer ball
-      labels when `ballAimShare` is low. `label ball` now fills a set
+      standard on rec3, rec4cal and rec6. The app now offers ball labels
+      early (2026-11-10): `run` emits a `ball` event per followed chunk
+      with `ballLow` from the second (under 10% over the chunks after the
+      first; a threshold from this one game, to check on more), `status`
+      lists each chunk (`chunkDetails`), and `label ball` works while the
+      game is still running. `label ball` now fills a set
       from the detector's candidates without the judge when the ball
       path is thin (`judged: false` in the set).
 - [ ] Pitch check: the keypoints the user can mark are all on the far

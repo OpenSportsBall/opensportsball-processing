@@ -155,14 +155,18 @@
           "type": "number",
           "minimum": 0,
           "maximum": 1,
-          "description": "run: share of the game the camera aimed at the ball. Low (under ~0.2) usually means the models don't know this ball; ball labels fix that."
+          "description": "Share of the game so far the camera aimed at the ball."
         },
         "ballAimByChunk": {
           "type": "array",
           "items": {
             "type": "integer"
           },
-          "description": "run: the same per chunk, in percent."
+          "description": "The same per chunk the camera has followed, in percent."
+        },
+        "ballLow": {
+          "type": "boolean",
+          "description": "True when the models don't know this ball: the camera aimed at it in under 10% of the chunks after the first (the first alone can look fine). Absent while only one chunk of a running game is done. This game's video follows the play less closely; ball labels (label ball) teach later models."
         }
       },
       "required": [
@@ -172,11 +176,155 @@
     {
       "properties": {
         "event": {
+          "const": "ball"
+        },
+        "chunksDone": {
+          "type": "integer",
+          "description": "Chunks the camera has followed so far."
+        },
+        "chunks": {
+          "type": "integer"
+        },
+        "ballAimShare": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Share of the game so far the camera aimed at the ball."
+        },
+        "ballAimByChunk": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "description": "The same per chunk the camera has followed, in percent."
+        },
+        "ballLow": {
+          "type": "boolean",
+          "description": "True when the models don't know this ball: the camera aimed at it in under 10% of the chunks after the first (the first alone can look fine). Absent while only one chunk of a running game is done. This game's video follows the play less closely; ball labels (label ball) teach later models."
+        }
+      },
+      "required": [
+        "chunksDone",
+        "ballAimShare",
+        "ballAimByChunk"
+      ],
+      "description": "run: after each chunk the camera has followed, what it made of the ball so far; ballLow from the second chunk, hours before the game is done."
+    },
+    {
+      "properties": {
+        "event": {
           "const": "status"
         },
         "next": {
           "type": "string",
           "description": "The command to run next (or that the game is done)."
+        },
+        "ballAimShare": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Share of the game so far the camera aimed at the ball."
+        },
+        "ballAimByChunk": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "description": "The same per chunk the camera has followed, in percent."
+        },
+        "ballLow": {
+          "type": "boolean",
+          "description": "True when the models don't know this ball: the camera aimed at it in under 10% of the chunks after the first (the first alone can look fine). Absent while only one chunk of a running game is done. This game's video follows the play less closely; ball labels (label ball) teach later models."
+        },
+        "chunkDetails": {
+          "type": "array",
+          "description": "Each chunk of a game the engine has started: where its two stages stand. Empty before run.",
+          "items": {
+            "type": "object",
+            "required": [
+              "chunk",
+              "startS",
+              "seconds",
+              "ball",
+              "follow"
+            ],
+            "properties": {
+              "chunk": {
+                "type": "integer"
+              },
+              "startS": {
+                "type": "number",
+                "description": "Where the chunk starts, in seconds of the game video."
+              },
+              "seconds": {
+                "type": "number"
+              },
+              "ball": {
+                "type": "object",
+                "required": [
+                  "status"
+                ],
+                "properties": {
+                  "status": {
+                    "enum": [
+                      "waiting",
+                      "running",
+                      "done",
+                      "failed"
+                    ],
+                    "description": "running is the last thing the engine wrote: if no engine is running, it was stopped there."
+                  },
+                  "startedAt": {
+                    "type": "string"
+                  },
+                  "seconds": {
+                    "type": "number",
+                    "description": "How long the stage took."
+                  },
+                  "log": {
+                    "type": "string",
+                    "description": "The stage's log file."
+                  }
+                }
+              },
+              "follow": {
+                "type": "object",
+                "required": [
+                  "status"
+                ],
+                "properties": {
+                  "status": {
+                    "enum": [
+                      "waiting",
+                      "running",
+                      "done",
+                      "failed"
+                    ],
+                    "description": "running is the last thing the engine wrote: if no engine is running, it was stopped there."
+                  },
+                  "startedAt": {
+                    "type": "string"
+                  },
+                  "seconds": {
+                    "type": "number",
+                    "description": "How long the stage took."
+                  },
+                  "log": {
+                    "type": "string",
+                    "description": "The stage's log file."
+                  }
+                }
+              },
+              "ballAimPct": {
+                "type": "integer",
+                "description": "Percent of the chunk the camera aimed at the ball."
+              },
+              "ballDetectedPct": {
+                "type": "integer",
+                "description": "Percent of the chunk's frames with a ball the judge accepted."
+              }
+            }
+          }
         }
       }
     },

@@ -25,6 +25,10 @@
         "moments"
       ]
     },
+    "partial": {
+      "type": "boolean",
+      "description": "ball only: made while the game was still being processed, from the chunks through the ball stage by then."
+    },
     "labelled": {
       "type": "integer",
       "minimum": 0,

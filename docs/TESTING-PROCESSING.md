@@ -504,7 +504,7 @@ the file formats are `schemas/engine-*.schema.json`.
 | What's done and pending, and the command to run next | `uv run processing/spikes/engine.py status job.json` |
 | The pending questions as one document to read: what is asked, how to answer, the pictures (a close-up per pitch keypoint, a sheet per kit group) | `uv run processing/spikes/engine.py questions job.json` |
 | Write one answer into `<recording>/engine/answers.json` from flags, checked against the question ([ENGINE-AGENTS.md](ENGINE-AGENTS.md)) | `uv run processing/spikes/engine.py answer job.json pitch --approve` (or `--closeup 'NAME=X,Y'`, `kits --ok`, `cameras --left main`) |
-| A ball label set from the finished game (50 frames of Main, half detected, half bridged) | `uv run processing/spikes/engine.py label job.json ball [--count 50]` |
+| A ball label set (50 frames of Main, half detected, half bridged); also while `run` is going, from the chunks through the ball stage | `uv run processing/spikes/engine.py label job.json ball [--count 50]` |
 | A must-see set: panoramas where the user pressed Missed play, plus random moments | `uv run processing/spikes/engine.py label job.json moments --at <s,s,...> [--random 3]` |
 | Store labels (also as `labels.json` / `boxes.json` for the benches) | `uv run processing/spikes/engine.py label job.json --answers labels.json` |
 | List what the user agreed to share | `uv run processing/spikes/engine.py share job.json` |

@@ -70,11 +70,19 @@ and prints the prepare command that applies it. It records share as
 false unless --share is given: sharing is the user's choice. These two
 print a JSON document, not progress events.
 
-label (after run, for users who agree to share): makes a label set in
+run says how the ball is going as it goes: a `ball` event after each chunk
+the camera has followed (ballAimShare, ballAimByChunk), with ballLow from
+the second chunk when the models don't know this ball (BALL_LOW_SHARE),
+hours before the game is done. status gives the same, and each chunk's two
+stages with their times and logs (chunkDetails).
+
+label (for users who agree to share): makes a label set in
 <recording>/engine/labels/<set>/set.json (schemas/engine-labelset.schema.json).
 "ball": frames of Main picked across the game as labelset.py's ball mode
 picks them, half where the detector found the ball, half where the
-tracker bridged a gap it missed, each with suggestions. "moments": the
+tracker bridged a gap it missed, each with suggestions. A ball set can be
+made while the game is still running, from the chunks through the ball
+stage by then (`partial` in the set); moments need the finished game. "moments": the
 stitched panorama at each time the user pressed Missed play (--at, seconds
 into game.mp4) plus a few random ones, with where the camera pointed, for
 must-see boxes. A stopped set carries on; a finished one makes the next
@@ -140,6 +148,11 @@ KNOWN_FAILURES = [
 ]
 RANDOM_MOMENT_GAP_S = 20.0    # random must-see moments: at least this far from the others
 BALL_SET_COUNT = 50           # frames in a ball label set
+# The camera aimed at the ball in under this share of the chunks after the
+# first: the models don't know this ball. On rec7 the standard judge gave
+# 31% for chunk 0 and 0-2% for every other chunk; rec7's own judge 28-64%.
+# So one chunk can't tell, and the first is left out once there are two.
+BALL_LOW_SHARE = 0.10
 PIECE_BPS = 16e6 / 8          # follow.py's pieces: 16 Mbit/s (measured ~14.7 on rec7: 11 GB for 100 min)
 GAME_BPS = {1080: PIECE_BPS, 1440: 33e6 / 8}  # game.mp4: fullgame asks 45 Mbit/s, hardware gives ~2/3 (rec7: ~31)
 DISK_MARGIN = 3e9             # free space kept beyond the estimate (logs, caches, the OS)
@@ -1081,17 +1094,28 @@ def run(job: Job, answers: dict | None) -> int:
                     prog["follow"] = set(e["done"])
                     prog["doneBefore"] = 2 * len(e["done"])
                     report(force=True)
+                    report_ball()
                 elif e["event"] == "chunk":
                     if e["ok"]:
                         prog[e["stage"]].add(e["chunk"])
                     else:
                         prog["fail"] = prog["fail"] or e  # the first; the rest follow from it
                     report(force=True)
+                    if e["ok"] and e["stage"] == "follow":
+                        report_ball()
                 elif e["event"] == "mux":
                     emit("step", step="mux", status="started")
                 elif e["event"] in ("done", "failed"):
                     prog["result"] = e
         report()
+
+    def report_ball():
+        """After each chunk the camera has followed: how much of the game so
+        far it aimed at the ball, and from the second chunk whether that is
+        low, hours before the game is done."""
+        b = ball_share(job, final=False)
+        if b:
+            emit("ball", chunksDone=len(b["ballAimByChunk"]), chunks=prog["chunks"], **b)
 
     def report(force=False):
         n = prog["chunks"]
@@ -1190,20 +1214,88 @@ def finish_output(job: Job, game: Path, secs: float) -> None:
     emit("step", step="cleanup", status="done", freedBytes=freed, kept=job.keep_intermediates)
 
 
-def ball_share(job: Job) -> dict:
-    """How much of the game the camera aimed at the ball (follow.py's
-    "aim at the ball in N% of the clip", per chunk). Low means the models
-    don't know this ball: the app can then offer ball labelling."""
+def ball_by_chunk(job: Job) -> dict[int, dict]:
+    """Per chunk the camera has followed, from follow.py's summary line
+    (fullgame/logs/follow_NN.log): `aimPct`, the percent of the chunk the
+    camera aimed at the ball, and `detectedPct`, the percent of frames with
+    a ball the judge accepted."""
     import re
 
-    shares = []
+    out = {}
     for p in sorted((job.rec / "fullgame" / "logs").glob("follow_*.log")):
-        m = re.findall(r"aim at the ball in (\d+)% of the clip", p.read_text())
-        if m:
-            shares.append(int(m[-1]))
-    if not shares:
+        text = p.read_text(errors="replace")
+        m = re.findall(r"aim at the ball in (\d+)% of the clip", text)
+        if not m:
+            continue
+        d = {"aimPct": int(m[-1])}
+        n = re.findall(r"detected in (\d+)/(\d+) frames", text)
+        if n and int(n[-1][1]):
+            d["detectedPct"] = round(100 * int(n[-1][0]) / int(n[-1][1]))
+        out[int(p.stem.split("_")[1])] = d
+    return out
+
+
+def ball_share(job: Job, final: bool = True) -> dict:
+    """How much of the game the camera aimed at the ball (per chunk and
+    over all of them), and `ballLow` when that says the models don't know
+    this ball (BALL_LOW_SHARE): the app then offers ball labelling. Before
+    the game is done (`final` false) one chunk isn't enough to say."""
+    by = ball_by_chunk(job)
+    if not by:
         return {}
-    return {"ballAimShare": round(sum(shares) / len(shares) / 100, 3), "ballAimByChunk": shares}
+    shares = [by[k]["aimPct"] for k in sorted(by)]
+    out = {"ballAimShare": round(sum(shares) / len(shares) / 100, 3), "ballAimByChunk": shares}
+    judged = shares[1:] if len(shares) >= 2 else (shares if final else [])
+    if judged:
+        out["ballLow"] = sum(judged) / len(judged) / 100 < BALL_LOW_SHARE
+    return out
+
+
+def chunk_details(job: Job) -> list[dict]:
+    """Each chunk of the game for `status`: when it starts in the game, how
+    long it is, where its two stages stand (ball: candidates and roles;
+    follow: the camera and the render), how long each took, their logs, and
+    what the camera made of the ball. From fullgame.py's events, so only
+    for a game this engine has started."""
+    events = job.dir / "events.jsonl"
+    if not events.exists():
+        return []
+    plan, stages = None, {}
+    for line in events.read_text().splitlines():
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue  # a line still being written
+        if e.get("event") == "plan":
+            plan = e
+            # A new run: what an earlier one left running was stopped.
+            stages = {k: v for k, v in stages.items() if v["status"] != "running"}
+        elif e.get("event") == "start":
+            stages[(e["chunk"], e["stage"])] = {"status": "running", "startedAt": e["at"]}
+        elif e.get("event") == "chunk":
+            s = {"status": "done" if e["ok"] else "failed", "seconds": e.get("seconds")}
+            stages[(e["chunk"], e["stage"])] = s
+    if plan is None:
+        return []
+    logs = job.rec / "fullgame" / "logs"
+    ball = ball_by_chunk(job)
+    out = []
+    for k in range(plan["chunks"]):
+        start = k * plan["chunkS"]
+        c = {"chunk": k, "startS": round(start, 1), "seconds": round(min(plan["chunkS"], plan["gameS"] - start), 1)}
+        rendered = (job.rec / "fullgame" / "pieces" / f"piece_{k:02d}.mp4").exists() or k in plan.get("done", [])
+        for stage in ("ball", "follow"):
+            s = dict(stages.get((k, stage)) or {"status": "done" if rendered else "waiting"})
+            log = logs / f"{stage}_{k:02d}.log"
+            if log.exists():
+                s["log"] = str(log)
+            c[stage] = {a: b for a, b in s.items() if b is not None}
+        if k in ball:
+            c["ballAimPct"] = ball[k]["aimPct"]
+            if "detectedPct" in ball[k]:
+                c["ballDetectedPct"] = ball[k]["detectedPct"]
+        out.append(c)
+    return out
 
 
 # ------------------------------------------------------------------ status
@@ -1256,8 +1348,10 @@ def camera_at(job: Job, t: float) -> dict | None:
 def label(job: Job, kind: str | None, count: int, at: list[float], n_random: int) -> int:
     if kind not in ("ball", "moments"):
         raise Failed("bad_label", "label needs ball or moments (or --answers)", exit_code=EXIT_BAD_INPUT)
-    if not (job.rec / "fullgame" / "game.mp4").exists():
-        raise Failed("no_game", "label sets are made from a finished game: run it first", exit_code=EXIT_BAD_INPUT)
+    finished = (job.rec / "fullgame" / "game.mp4").exists()
+    if kind == "moments" and not finished:
+        raise Failed("no_game", "must-see moments are marked on a finished game: run it first",
+                     exit_code=EXIT_BAD_INPUT)
     name, sd = label_dir(job, kind)
     req_path = sd / "request.json"
     if req_path.exists():
@@ -1265,23 +1359,34 @@ def label(job: Job, kind: str | None, count: int, at: list[float], n_random: int
     else:
         n_set = int(name.split("-")[1])
         req = {"kind": kind, "count": count, "at": at, "random": n_random, "seed": n_set}
+        if kind == "ball" and not finished:
+            req["partial"] = True  # asked for before the game was done: made from its first chunks
         sd.mkdir(parents=True, exist_ok=True)
         req_path.write_text(json.dumps(req))
     rec = str(job.rec)
     game_s = game_seconds(job)
     out: dict = {"schemaVersion": VERSION, "set": name, "kind": kind, "labelled": 0}
+    if req.get("partial"):
+        out["partial"] = True
     if kind == "ball":
         # The ball stage's candidates, chunk by chunk; frames shared out by length.
+        # While the game is still running the set is made from the chunks
+        # the ball stage has finished (their candidate files are written
+        # last, whole): which ones is kept with the request, so carrying on
+        # with the set later picks from the same chunks.
         chunks = []
         k, t = 0, 0.0
         while t < game_s - 1:
             f = sorted((job.rec / "detect").glob(f"ball_0_{t:g}_*.win.json"))
-            if f:
+            if f and k in req.get("chunks", [k]):
                 chunks.append((k, f[0].name, float(f[0].name.split("_")[3].removesuffix(".win.json"))))
             k, t = k + 1, t + job.chunk_s
         if not chunks:
-            raise Failed("no_candidates", "no ball candidates in detect/: was the game run by this engine?",
-                          exit_code=EXIT_BAD_INPUT)
+            raise Failed("no_candidates", "no ball candidates in detect/ yet: the game's first chunk must be "
+                         "through the ball stage (run it first)", exit_code=EXIT_BAD_INPUT)
+        if "chunks" not in req:
+            req["chunks"] = [c[0] for c in chunks]
+            req_path.write_text(json.dumps(req))
         # Held out for testing before anything is labelled: the last quarter
         # of every chunk, the same stretches for every set of this game, so
         # no set trains on another's test time (docs/TESTING-PROCESSING.md).
@@ -1507,6 +1612,7 @@ def status(job: Job) -> int:
     emit("status", prepared=(job.dir / "questions.json").exists(),
          pending=pending_questions(st),
          pieces=len(pieces), output=str(out / "game.mp4") if (out / "game.mp4").exists() else None,
+         **ball_share(job, final=(out / "done.json").exists()), chunkDetails=chunk_details(job),
          next=next_step(job, st))
     return EXIT_OK
 

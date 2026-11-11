@@ -563,3 +563,148 @@ def test_status_says_what_to_run_next(tmp_path, capsys):
     line = capsys.readouterr().out
     engine.validate(json.loads(line), "engine-event.schema.json", "event")
     assert "questions" in json.loads(line)["next"]
+
+
+# ------------------------------ the ball, chunk by chunk, while the game runs
+
+
+def follow_log(job, k, aim, detected=(0, 100)):
+    logs = job.rec / "fullgame" / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / f"follow_{k:02d}.log").write_text(
+        f"ball: 12 on-pitch candidates, 0 static spots, path detected in {detected[0]}/{detected[1]} frames;"
+        f" aim at the ball in {aim}% of the clip\n")
+
+
+@pytest.mark.parametrize("shares,final,low", [
+    ([31], False, None),            # rec7 with the standard judge: chunk 0 alone looks fine
+    ([31, 2], False, True),         # ... and the second chunk says it isn't
+    ([31, 0, 2, 1, 0, 2, 1, 0, 2, 1], True, True),
+    ([28, 64, 41], False, False),   # rec7 with its own judge
+    ([4], True, True),              # a one-chunk game is judged on that chunk once it is done
+    ([40, 3, 55, 60], False, False),  # one poor chunk (a long stoppage) doesn't say the ball is unknown
+])
+def test_a_ball_the_models_dont_know_shows_from_the_second_chunk(tmp_path, shares, final, low):
+    job = make_job(tmp_path)
+    assert engine.ball_share(job) == {}
+    for k, s in enumerate(shares):
+        follow_log(job, k, s)
+    b = engine.ball_share(job, final=final)
+    assert b["ballAimByChunk"] == shares and b.get("ballLow") is low
+
+
+def ready_to_run(tmp_path):
+    job = footage_job(tmp_path)
+    st = job.state()
+    st["pitch"]["status"] = "approved"
+    st["kits"]["status"] = "answered"
+    job.save_state(st)
+    (job.dir / "questions.json").write_text("{}")
+    return job
+
+
+def fullgame_events(job, lines):
+    with (job.dir / "events.jsonl").open("a") as f:
+        for e in lines:
+            f.write(json.dumps({"at": "2026-11-10T20:00:00-0800", **e}) + "\n")
+
+
+def test_run_says_the_ball_is_low_after_the_second_chunk(tmp_path, monkeypatch, capsys):
+    job = ready_to_run(tmp_path)
+    monkeypatch.setattr(engine, "check_disk", lambda j: None)
+    monkeypatch.setattr(engine, "finish_output", lambda *a: None)
+
+    def fake_fullgame(job_, name, args, *, done=None, uv_with=(), watch=None):
+        fullgame_events(job, [{"event": "plan", "chunks": 3, "chunkS": 600, "gameS": 1800, "done": []}])
+        watch(None)
+        for k, aim in enumerate([31, 2, 0]):
+            fullgame_events(job, [{"event": "start", "stage": "ball", "chunk": k},
+                                  {"event": "chunk", "stage": "ball", "chunk": k, "ok": True, "seconds": 5}])
+            follow_log(job, k, aim)
+            fullgame_events(job, [{"event": "start", "stage": "follow", "chunk": k},
+                                  {"event": "chunk", "stage": "follow", "chunk": k, "ok": True, "seconds": 7}])
+            watch(None)
+    monkeypatch.setattr(engine, "step", fake_fullgame)
+    assert engine.run(job, None) == engine.EXIT_OK
+    ev = [json.loads(l) for l in capsys.readouterr().out.splitlines()]
+    for e in ev:
+        engine.validate(e, "engine-event.schema.json", "event")
+    ball = [e for e in ev if e["event"] == "ball"]
+    assert [(e["chunksDone"], e.get("ballLow")) for e in ball] == [(1, None), (2, True), (3, True)]
+    assert ball[1]["chunks"] == 3 and ball[1]["ballAimByChunk"] == [31, 2]
+    assert ev[-1]["event"] == "done" and ev[-1]["ballLow"] is True
+
+
+def test_status_lists_each_chunk(tmp_path, capsys):
+    job = ready_to_run(tmp_path)
+    engine.status(job)
+    assert json.loads(capsys.readouterr().out)["chunkDetails"] == []
+    # An earlier run did chunk 0 and was stopped in chunk 1; this one is in chunk 2's ball stage.
+    fullgame_events(job, [{"event": "plan", "chunks": 3, "chunkS": 600, "gameS": 1799, "done": []},
+                          {"event": "start", "stage": "ball", "chunk": 0},
+                          {"event": "chunk", "stage": "ball", "chunk": 0, "ok": True, "seconds": 1500.5, "log": "x"},
+                          {"event": "start", "stage": "ball", "chunk": 1},
+                          {"event": "start", "stage": "follow", "chunk": 0},
+                          {"event": "chunk", "stage": "follow", "chunk": 0, "ok": True, "seconds": 1400},
+                          {"event": "plan", "chunks": 3, "chunkS": 600, "gameS": 1799, "done": [0]},
+                          {"event": "start", "stage": "ball", "chunk": 1},
+                          {"event": "chunk", "stage": "ball", "chunk": 1, "ok": True, "seconds": 900},
+                          {"event": "start", "stage": "follow", "chunk": 1},
+                          {"event": "chunk", "stage": "follow", "chunk": 1, "ok": False, "seconds": 20, "log": "x"},
+                          {"event": "start", "stage": "ball", "chunk": 2}])
+    follow_log(job, 0, 31, detected=(50, 200))
+    (job.rec / "fullgame" / "logs" / "ball_00.log").write_text("")
+    engine.status(job)
+    line = json.loads(capsys.readouterr().out)
+    engine.validate(line, "engine-event.schema.json", "event")
+    c = line["chunkDetails"]
+    assert [(x["chunk"], x["startS"], x["seconds"]) for x in c] == [(0, 0, 600), (1, 600, 600), (2, 1200, 599)]
+    assert c[0]["ball"] == {"status": "done", "seconds": 1500.5, "log": str(job.rec / "fullgame" / "logs" / "ball_00.log")}
+    assert c[0]["follow"]["status"] == "done" and c[0]["ballAimPct"] == 31 and c[0]["ballDetectedPct"] == 25
+    assert c[1]["ball"]["status"] == "done" and c[1]["follow"] == {"status": "failed", "seconds": 20}
+    assert c[2]["ball"]["status"] == "running" and c[2]["follow"] == {"status": "waiting"}
+    assert line["ballAimByChunk"] == [31] and "ballLow" not in line
+
+
+def test_a_ball_set_can_be_made_while_the_game_runs(tmp_path, monkeypatch, capsys):
+    job = make_job(tmp_path)
+    segs = [{"index": i, "durationMs": 300000} for i in range(6)]
+    (job.rec / "manifest.json").write_text(json.dumps({"schemaVersion": 1, "gameId": "g1", "sessionId": "s1",
+                                                       "createdAt": "x", "devices": [{"role": "main", "segments": segs}]}))
+    monkeypatch.setattr(engine, "game_seconds", lambda job_: 1800.0)
+    with pytest.raises(engine.Failed) as e:
+        engine.label(job, "moments", 0, [10.0], 0)
+    assert e.value.code == "no_game"
+    (job.rec / "detect").mkdir()
+    with pytest.raises(engine.Failed) as e:
+        engine.label(job, "ball", 4, [], 0)
+    assert e.value.code == "no_candidates"
+    (job.rec / "detect" / "ball_0_0_600.win.json").write_text("{}")
+    used = []
+
+    def fake_labelset(job_, name, args, **kw):
+        used.append(args[3])
+        sd = Path(args[args.index("--out") + 1])
+        p = sd / "items.json"
+        items = json.loads(p.read_text()) if p.exists() else []
+        n = len(items)
+        items += [{"id": f"b{n + i}", "image": f"images/b{n + i}.jpg", "segment": 0, "t": 10.0 * (n + i),
+                   "width": 3840, "height": 2160, "candidates": []} for i in range(int(args[4]))]
+        p.write_text(json.dumps(items))
+    monkeypatch.setattr(engine, "step", fake_labelset)
+    # The first try stopped before the set was written; by the next, chunk 1 is through too.
+    sd = job.dir / "labels" / "ball-1"
+    assert json.loads((sd / "request.json").read_text())["partial"] is True   # kept from the refused try
+    (sd / "request.json").write_text(json.dumps({"kind": "ball", "count": 4, "at": [], "random": 0, "seed": 1,
+                                                 "partial": True, "chunks": [0]}))
+    (job.rec / "detect" / "ball_0_600_600.win.json").write_text("{}")
+    assert engine.label(job, "ball", 4, [], 0) == engine.EXIT_OK
+    assert set(used) == {"ball_0_0_600.win.json"}          # the chunks it was first made from
+    s = json.loads((sd / "set.json").read_text())
+    assert s["partial"] is True and len(s["items"]) == 4
+    engine.validate(json.loads(capsys.readouterr().out.splitlines()[-1]), "engine-event.schema.json", "event")
+    # A new set, asked for now, takes both chunks.
+    used.clear()
+    assert engine.label(job, "ball", 4, [], 0) == engine.EXIT_OK
+    assert set(used) == {"ball_0_0_600.win.json", "ball_0_600_600.win.json"}
+    assert json.loads((job.dir / "labels" / "ball-2" / "request.json").read_text())["chunks"] == [0, 1]
