@@ -17,7 +17,9 @@ dependencies = [
 # CONTRIBUTING.md item 3.
 ultralytics = ["ultralytics>=8.3"]   # AGPL-3.0
 rfdetr = ["rfdetr>=1.2"]             # Apache-2.0
-dev = ["pytest>=8", "jsonschema>=4.20"]  # jsonschema: engine.py checks its files against schemas/
+# jsonschema: engine.py checks its files against schemas/. boto3 and moto:
+# cloud.py's tests run against a local S3 and DynamoDB.
+dev = ["pytest>=8", "jsonschema>=4.20", "boto3>=1.35", "moto[s3,dynamodb]>=5"]
 
 [build-system]
 requires = ["setuptools>=69"]
