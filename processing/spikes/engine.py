@@ -485,6 +485,10 @@ def apply_answers(job: Job, st: dict, answers: dict, seg: int) -> None:
                 st["pitch"]["approveAllowed"] = True
             else:
                 step(job, f"pitch-refit-{a['round']}", ["pitch.py", rec, "taps"])
+                # The goals were found on the pitch before this refit, in its metres: find them again
+                # on the new goal lines (a tapped post fixes its goal).
+                (job.rec / "pitch" / "goals.json").unlink(missing_ok=True)
+                step(job, f"goals-{a['round']}", ["pitch.py", rec, "goals"], done=job.rec / "pitch" / "goals.json")
             st["pitch"]["round"] += 1
             emit("answer", question="pitch", result="refitted", round=st["pitch"]["round"])
         st["applied"].append({"question": "pitch", "answer": a, "at": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
@@ -624,7 +628,8 @@ def write_questions(job: Job, st: dict) -> dict:
                "overlay": "pitch/overlay_taps.jpg" if review["pitch"].get("fittedWith", "").endswith("taps")
                else "pitch/overlay.jpg",
                "panorama": review.get("panorama"), "fit": review["pitch"], "lines": review["lines"],
-               "goals": review["goals"], "points": review["points"]}
+               # only goals that were found: a rejected one is a guess the reader would take for a goal
+               "goals": [g for g in review["goals"] if g.get("valid", True)], "points": review["points"]}
     paint = rec / "pitch" / "paint.json"
     if paint.exists():
         pitch_q["lineColour"] = json.loads(paint.read_text())

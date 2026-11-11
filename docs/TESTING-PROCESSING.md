@@ -40,6 +40,13 @@ period, nothing but play, cut short) the split has to get right.
 
     cd processing && uv run --extra dev pytest tests/test_jointfit.py tests/test_phases.py
 
+Goals staying with the pitch map they are drawn on (in the kept map's
+metres when rejected, found again on a tapped map's goal lines, a tapped
+post fixing its goal) is tested without footage too, on goal frames
+painted into an empty panorama:
+
+    cd processing && uv run --extra dev pytest tests/test_pitch_goals.py
+
 How close a joint fit puts the taps is measured on taps it wasn't given
 (the fit's own taps flatter it); on a recording whose joint fit is adopted,
 start from the files it replaced:
