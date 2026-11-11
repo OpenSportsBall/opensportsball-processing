@@ -13,7 +13,7 @@ change them there and re-sync.
   (`processing/spikes/engine.py`), which the Mac app and the cloud job
   read and write.
 
-Pinned from main repo commit: `0ccaa43`
+Pinned from main repo commit: `e27cee3`
 
 Check or update the copy against a local checkout of the main repo:
 
