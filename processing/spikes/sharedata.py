@@ -28,6 +28,14 @@ for the dataset's organisation. It creates the repository private and
 gated (manual approval) if it does not exist; making it visible, so
 people can request access, is a deliberate step on its settings page.
 
+Never shared: the app's upload state (`upload.json`: the account id and
+S3 upload ids), which `upload` also removes from the dataset if it is
+there. And `upload` stops, naming the files, when a text file it would
+send holds a home-directory path (/Users/<name>/...), an account id or an
+accounts/<id> key: make the path relative or leave the file out, then run
+it again (`list` shows the same). Model files (.pth, .pt) aren't looked
+into: a checkpoint keeps the paths it was trained with.
+
 OSB_HF_DATASET overrides the repository (default below). See
 docs/DATA.md, "Sharing with contributors".
 """
@@ -35,10 +43,9 @@ docs/DATA.md, "Sharing with contributors".
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
-
-from huggingface_hub import HfApi, snapshot_download
 
 REPO = os.environ.get("OSB_HF_DATASET", "OpenSportsBall/bench")
 FOOTAGE = Path("footage")
@@ -52,7 +59,15 @@ ANNOTATED = {
     "rec7": ["pitch", "labels_seg6"],
 }
 
-IGNORE = [".DS_Store", "**/.DS_Store", "**/__pycache__/**", ".cache/**"]
+# The app's upload state: the account id, S3 multipart upload ids and part ETags.
+NEVER = ["upload.json", "**/upload.json"]
+IGNORE = [".DS_Store", "**/.DS_Store", "**/__pycache__/**", ".cache/**", *NEVER]
+
+# What a shared text file must not hold (private_details).
+PRIVATE = {"a home-directory path": re.compile(r"/(?:Users|home)/[^/\s\"']+/"),
+           "an account id": re.compile(r"\"accountId\"\s*:\s*\"[^\"]+\""),
+           "an accounts/<id> key": re.compile(r"accounts/[0-9a-f]{8}-[0-9a-f]{4}-")}
+TEXT = {".json", ".py", ".md", ".txt", ".csv", ".log", ".yaml", ".yml", ".toml", ".sh", ".html", ".js", ""}
 
 
 def annotation_patterns() -> list[str]:
@@ -71,12 +86,13 @@ def mirrored_patterns() -> list[str]:
 
 
 def remote_stale(api) -> list[str]:
-    """Dataset files in the mirrored folders that are not in footage/ any more."""
+    """Dataset files `upload` deletes: those in the mirrored folders that are not in footage/ any
+    more, and any that are never shared (NEVER)."""
     from fnmatch import fnmatch
 
     local = {f.relative_to(FOOTAGE).as_posix() for f in matching_files()}
     return sorted(f for f in api.list_repo_files(REPO, repo_type="dataset")
-                  if any(fnmatch(f, x) for x in mirrored_patterns()) and f not in local)
+                  if any(fnmatch(f, x) for x in (*mirrored_patterns(), *NEVER)) and f not in local)
 
 
 def patterns(annotations_only: bool = False) -> list[str]:
@@ -95,7 +111,21 @@ def matching_files(annotations_only: bool = False) -> list[Path]:
     return files
 
 
-def cmd_list(remote: bool = False, annotations_only: bool = False) -> None:
+def private_details(files: list[Path]) -> dict[str, list[str]]:
+    """{file: what it holds} for the text files among `files` that hold something in PRIVATE."""
+    out = {}
+    for f in files:
+        if f.suffix.lower() not in TEXT or f.stat().st_size > 50e6:
+            continue
+        text = f.read_text(errors="ignore")
+        found = [what for what, rx in PRIVATE.items() if rx.search(text)]
+        if found:
+            out[f.relative_to(FOOTAGE).as_posix()] = found
+    return out
+
+
+def cmd_list(remote: bool = False, annotations_only: bool = False) -> bool:
+    """Prints what upload would send; False when a file holds private details."""
     files = matching_files(annotations_only)
     by_top: dict[str, list[int]] = {}
     for f in files:
@@ -109,16 +139,27 @@ def cmd_list(remote: bool = False, annotations_only: bool = False) -> None:
     total = sum(f.stat().st_size for f in files)
     print(f"  {'total':28s} {len(files):6d} files  {total / 1e9:7.2f} GB")
     if remote:
+        from huggingface_hub import HfApi
+
         stale = remote_stale(HfApi())
-        print(f"  upload would delete {len(stale)} dataset files no longer here" + (":" if stale else ""))
+        print(f"  upload would delete {len(stale)} dataset files no longer here or never shared" + (":" if stale else ""))
         for f in stale:
             print(f"    {f}")
+    private = private_details(files)
+    for rel, found in private.items():
+        print(f"  NOT TO SHARE as it is: {rel} holds {', '.join(found)}")
+    return not private
 
 
 def cmd_upload(annotations_only: bool = False) -> None:
     """--annotations-only leaves bench/ and models/ alone: the benches write
     their outputs (paths, candidate files) into the bench store, and those
     stay local until someone means to share them."""
+    if private_details(matching_files(annotations_only)):
+        cmd_list(annotations_only=annotations_only)
+        sys.exit("nothing uploaded: fix the files marked NOT TO SHARE (see this script's notes) and run it again")
+    from huggingface_hub import HfApi
+
     api = HfApi()
     who = api.whoami()["name"]
     if not api.repo_exists(REPO, repo_type="dataset"):
@@ -133,7 +174,7 @@ def cmd_upload(annotations_only: bool = False) -> None:
     # already there.
     api.upload_folder(repo_id=REPO, folder_path=str(FOOTAGE), repo_type="dataset",
                       allow_patterns=patterns(annotations_only), ignore_patterns=IGNORE,
-                      delete_patterns=mirrored_patterns(),  # re-uploaded files are kept, not deleted
+                      delete_patterns=[*mirrored_patterns(), *NEVER],  # re-uploaded files are kept, not deleted
                       commit_message="Bench store, models, pitch maps and ball labels")
     info = api.dataset_info(REPO)
     print(f"done: https://huggingface.co/datasets/{REPO} "
@@ -141,6 +182,8 @@ def cmd_upload(annotations_only: bool = False) -> None:
 
 
 def cmd_fetch(annotations_only: bool) -> None:
+    from huggingface_hub import snapshot_download
+
     path = snapshot_download(REPO, repo_type="dataset", local_dir=FOOTAGE,
                              allow_patterns=patterns(annotations_only))
     print(f"fetched into {path}")
