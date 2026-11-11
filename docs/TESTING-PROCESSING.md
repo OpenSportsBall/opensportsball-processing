@@ -385,6 +385,23 @@ one (a set marked after it was built), so data built before 2026-11-09
 must be rebuilt before training. Marks are only ever added; removing one
 means deleting the file by hand, and only if nothing was scored on it.
 
+**Unmarked suggestions off the pitch are not negatives.** A detector
+suggestion or motion candidate that nobody marked and whose ground point
+lies outside the pitch lines may be someone else's ball (a warm-up, the
+next pitch, a spare by the bench). Since 2026-11-11 `balldata.py` makes no
+hard-negative tile of it and keeps every tile clear of it (moved; failing
+that a negative tile is dropped and a ball's tile has the spot painted
+over), and `balljudge.py data` makes no negative crop of it, in every
+split; both print how many they left out. Points above the horizon stay
+negatives, and so does everything inside the lines: a picture with a second
+ball on the pitch is still to be labelled "unsure". The tracker drops
+candidates more than 10 m outside the lines anyway (`ball.usable`).
+`OSB_OFF_PITCH_NEG=1` builds the data the old way, to compare. On the
+random sets this leaves out 55% of rec3's unmarked suggestions (865 of
+1,583: mostly lights, cars and kit beyond the fence, some balls on the next
+pitch), 41% of rec5-game's (38 of 93) and 87% of rec6's (693 of 801: many
+are balls behind the goals and by the benches).
+
 An outside test set: SoccerTrack's wide view (`docs/DATA.md`, External
 datasets), never trained on. `uv run processing/spikes/stbench.py 2.0 999
 --expect-row` scores the detector and judges on it frame by frame (~20 min).
