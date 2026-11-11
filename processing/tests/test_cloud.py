@@ -52,6 +52,14 @@ FAKE_ENGINE = textwrap.dedent("""
             "schemaVersion": 1, "recording": str(rec), "pending": ["kits"], "kits": {"round": 2, "problem": "too few"}}))
         say(event="needs_answers", pending=["kits"])
         sys.exit(3)
+    if command == "share":
+        answers = json.loads((rec / "engine" / "answers.json").read_text())
+        (rec / "engine" / "share").mkdir(exist_ok=True)
+        for kind in ("pitch", "kits"):  # like engine.py: nothing for a check the user didn't share
+            if (answers.get(kind) or {}).get("share") is not False:
+                (rec / "engine" / "share" / f"{kind}.json").write_text(json.dumps(
+                    {"kind": kind, "name": kind, "files": [{"path": "pitch/overlay.jpg", "bytes": 4, "sha256": "x"}]}))
+        sys.exit(0)
     if command == "status":
         say(event="status", chunkDetails=[{"chunk": 0, "ball": {"seconds": 310}, "follow": {"seconds": 240}}])
         sys.exit(0)
@@ -146,7 +154,7 @@ def body(s3, key):
 def calls(rec):
     """The engine commands that did work (not the status read for the profile)."""
     lines = [json.loads(line) for line in (rec / "engine" / "calls.jsonl").read_text().splitlines()]
-    return [c for c in lines if c[0] != "status"]
+    return [c for c in lines if c[0] not in ("status", "share")]
 
 
 def test_prepare_fetches_the_footage_and_publishes_the_questions(aws, monkeypatch):
@@ -231,6 +239,25 @@ def test_run_uploads_the_game_and_its_result(aws, monkeypatch):
     assert "fullgame/game.mp4" not in work and "fullgame/video.mp4" not in work
     p = record(ddb)["progress"]["M"]
     assert (p["stage"]["S"], float(p["fraction"]["N"]), p["etaSeconds"]["N"]) == ("upload", 1.0, "0")
+
+
+def test_run_publishes_only_what_the_user_chose_to_share(aws, monkeypatch):
+    s3, ddb, rec = aws
+    assert go(monkeypatch, "prepare") == 0
+    s3.put_object(Bucket=BUCKET, Key=OUT + "answers.json", Body=json.dumps(
+        {"pitch": {"round": 1, "approve": True, "share": True}, "kits": {"round": 1, "share": False}}))
+    assert go(monkeypatch, "run") == 0
+    share = [k for k in keys(s3, OUT) if k.startswith("share/")]
+    assert share == ["share/files/pitch/overlay.jpg", "share/pitch.json"]
+    assert json.loads(body(s3, OUT + "share/pitch.json"))["kind"] == "pitch"
+
+
+def test_run_shares_nothing_unless_asked(aws, monkeypatch):
+    s3, ddb, rec = aws
+    assert go(monkeypatch, "prepare") == 0
+    s3.put_object(Bucket=BUCKET, Key=OUT + "answers.json", Body=json.dumps({"pitch": {"round": 1, "approve": True}}))
+    assert go(monkeypatch, "run") == 0
+    assert not [k for k in keys(s3, OUT) if k.startswith("share/")]
 
 
 def test_each_command_leaves_a_profile_of_the_machine(aws, monkeypatch):

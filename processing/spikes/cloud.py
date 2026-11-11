@@ -40,6 +40,8 @@ Out, under the output prefix:
     questions/questions.json   the engine's questions.json; every picture it names
                                is at questions/<its path>
     game.mp4, result.json      the video, and the engine's done event (ballAimShare, ballLow)
+    share/<name>.json          after a run: a contribution file for each check the user chose
+                               to share (engine.py share), its files under share/files/
     logs/                      the engine's logs, when a command fails
     profile/<command>.json     what the command used of the machine and how long each
                                part took (cloudprofile.py), with its samples beside it
@@ -324,6 +326,31 @@ def publish_questions(cloud: Cloud, rec: Path) -> None:
     log(f"questions published: pending {q.get('pending')}, {len(rels)} pictures")
 
 
+def publish_shares(cloud: Cloud, rec: Path) -> None:
+    """What the user agreed to share to improve the models, for the server to
+    file as contributions: engine.py share writes one contribution file for
+    each check whose answer said share (it skips the others itself), and
+    they go to the output folder as share/<name>.json with every file they
+    list at share/files/<path>. Never a reason for the job to fail."""
+    try:
+        answers = json.loads((rec / "engine" / "answers.json").read_text()) if (rec / "engine" / "answers.json").exists() else {}
+        if not any((answers.get(k) or {}).get("share") is True for k in ("pitch", "kits")):
+            return
+        subprocess.run([*engine_cmd(), "share", str(rec.parent / "job.json"), "--kinds", "pitch,kits"],
+                       capture_output=True, text=True, timeout=600, cwd=rec.parent)
+        for doc in sorted((rec / "engine" / "share").glob("*.json")) if (rec / "engine" / "share").is_dir() else []:
+            c = json.loads(doc.read_text())
+            if c.get("kind") not in ("pitch", "kits") or (answers.get(c["kind"]) or {}).get("share") is not True:
+                continue
+            for f in c.get("files", []):
+                cloud.put(rec / f["path"], f"{cloud.out}share/files/{f['path']}")
+            # Last, so the server never sees a list without its files.
+            cloud.put(doc, f"{cloud.out}share/{doc.name}", ContentType="application/json")
+            log(f"shared {c['kind']}: {len(c.get('files', []))} files")
+    except Exception as e:
+        log(f"could not publish what was shared: {e}")
+
+
 def publish_logs(cloud: Cloud, rec: Path) -> None:
     logs = rec / "engine" / "logs"
     for f in sorted(logs.glob("*.log")) if logs.is_dir() else []:
@@ -525,6 +552,7 @@ def main() -> int:
             t = time.time()
             cloud.put(game, cloud.out + "game.mp4", ContentType="video/mp4")
             profile.transfer("video", game.stat().st_size, time.time() - t)
+            publish_shares(cloud, rec)
             cloud.progress("upload", 1.0, 0, force=True)
         else:
             publish_questions(cloud, rec)
