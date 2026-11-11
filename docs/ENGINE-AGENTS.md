@@ -96,6 +96,16 @@ unless `--share` is given. A model must not pass `--share`, or run
 
 - The pitch overlay after the last round, and the kit sheets, if the user
   wants to check them: these two answers decide the video's quality.
-- From the `done` event: `output` (the video) and `ballAimShare`. Under
-  about 0.2 usually means the models don't know this ball.
+- From the `done` event: `output` (the video), `ballAimShare` and
+  `ballLow`. `ballLow: true` means the models don't know this ball: the
+  video follows the players more than the ball.
+- Don't wait for `done` to say so: `run` prints a `ball` event after each
+  chunk the camera has followed, and from the second chunk it carries
+  `ballLow` (one chunk can't tell: rec7 gave 31% for its first and 0-2%
+  for the rest). `status` has the same fields at any time, and
+  `chunkDetails`: each chunk's two stages, how long they took, their logs
+  and the chunk's ball share.
+- When `ballLow` is true, tell the user, and that ball labels teach later
+  models (not this video). `label <job> ball` works while `run` is still
+  going, from the chunks done so far; it is the user's decision, as above.
 - On exit 4: the `error` event's `message` and `log`.
