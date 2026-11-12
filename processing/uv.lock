@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.12' and sys_platform == 'win32'",
@@ -2494,7 +2494,7 @@ wheels = [
 
 [[package]]
 name = "rfdetr"
-version = "1.11.2"
+version = "1.12.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
@@ -2508,9 +2508,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "transformers" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ee/5c/56408bdb7d30e4fdb7cd332c7d0a29c1fa06bee93fb730359367d8198564/rfdetr-1.11.2.tar.gz", hash = "sha256:11c3395b004c2ffdd30b7bf83c324a2b8caf5e5609c7407c73b484b9ce7454d3", size = 734014, upload-time = "2026-10-04T11:23:11.706Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/13/e1/514be0835a8a9f63a4bdb5549b7d85a3830aa3a2bc21d95a96f4521a92c0/rfdetr-1.12.0.tar.gz", hash = "sha256:fdb1608532e31b9dcd8475059944ed55894088d0927db0aab2c0d7d54ea10076", size = 980362, upload-time = "2026-11-06T14:08:13.287Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/16/94/a592dd9ba73df327ed82a15665948683b88365428139cc175c540f8a8f84/rfdetr-1.11.2-py3-none-any.whl", hash = "sha256:2f23589567123b59302f1cfa9d14d23630f9f583ee6f3468c5891e33fb103b2a", size = 788908, upload-time = "2026-10-04T11:23:09.757Z" },
+    { url = "https://files.pythonhosted.org/packages/9e/26/4a9562f7e2314b70ef6d80df355e05e2e93b17f6f339720c5f4be142f4e5/rfdetr-1.12.0-py3-none-any.whl", hash = "sha256:46e924b789b10a7caee98dc3cf7648b6836d2aa47351bfcc59823d731114f91a", size = 1050065, upload-time = "2026-11-06T14:08:11.186Z" },
 ]
 
 [[package]]
@@ -3110,7 +3110,7 @@ wheels = [
 
 [[package]]
 name = "ultralytics"
-version = "8.4.199"
+version = "8.4.208"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "matplotlib" },
@@ -3127,9 +3127,9 @@ dependencies = [
     { name = "ultralytics-platform" },
     { name = "ultralytics-thop" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/11/c2/7e278d204bcd1497eaecc967005c1e2aa63b99ace04496a1002b4a8f20c6/ultralytics-8.4.199.tar.gz", hash = "sha256:9e29b89e8f80baf43b2b2d5454ee8bb16a54c91c1019a5624763e58505ee4224", size = 1299065, upload-time = "2026-11-03T00:57:01.896Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/2f/d8/aadde4f460759463fa4a017138b04b44b10fae6974a9ab0f6d0ec5f15c49/ultralytics-8.4.208.tar.gz", hash = "sha256:e1fc6a7c8d217c22558f3333ae5f518ed994ca4a97183868b0fed8814fff38f8", size = 1315017, upload-time = "2026-11-08T14:54:53.155Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/34/54/fa68c11820d5b208327284dcb647f4c2d3753d58c00e0e2bdd74c6a6f828/ultralytics-8.4.199-py3-none-any.whl", hash = "sha256:fd19c7bf405fe5ff4491026d722836a4814835b1dc5d619096ee01d8ba7a37a6", size = 1439492, upload-time = "2026-11-03T00:56:56.237Z" },
+    { url = "https://files.pythonhosted.org/packages/22/fb/9973434a136ab921a9b7f3a3083936722fd8a6cb19a4712e92f997490a34/ultralytics-8.4.208-py3-none-any.whl", hash = "sha256:e4798477691ce744e84bfb31d7d7cff2a0875846533d4f330f19d41c477c932e", size = 1455173, upload-time = "2026-11-08T14:54:48.574Z" },
 ]
 
 [[package]]
