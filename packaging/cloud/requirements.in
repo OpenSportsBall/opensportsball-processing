@@ -1,0 +1,14 @@
+# The cloud engine's Python dependencies: the packaged Mac engine's
+# (packaging/mac/requirements.in) without Core ML, plus boto3 for cloud.py.
+# Pinned for Linux x86-64 in requirements.txt:
+#     uv pip compile packaging/cloud/requirements.in --python-version 3.12 \
+#         --python-platform x86_64-manylinux_2_28 -o packaging/cloud/requirements.txt
+numpy>=1.26
+scipy>=1.13
+opencv-python-headless>=4.10
+torch>=2.4
+rfdetr>=1.11
+scikit-learn>=1.4
+pyyaml>=6
+jsonschema>=4.20
+boto3>=1.35
