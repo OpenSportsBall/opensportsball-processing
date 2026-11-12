@@ -509,7 +509,10 @@ the file formats are `schemas/engine-*.schema.json`.
 | Store labels (also as `labels.json` / `boxes.json` for the benches) | `uv run processing/spikes/engine.py label job.json --answers labels.json` |
 | List what the user agreed to share | `uv run processing/spikes/engine.py share job.json` |
 
-A job is `{"schemaVersion": 1, "recording": "<folder>", "output": {"height": 1440}}`;
+A job is `{"schemaVersion": 1, "recording": "<folder>", "output": {"height": 1440}}`
+(`"output": {"height": 1080, "youtubeCopy": true}` keeps `game.mp4` as the
+1080p render and writes the 1440p upload beside it as `game-youtube.mp4`,
++~25 GB in the disk check; on a finished game `run` makes just the copy);
 `"options": {"maxChunks": 1}` renders only the first chunk, for a quick
 check. The questions are in `<recording>/engine/questions.json` with the
 crops and overlay images beside them; answers carry the question's
