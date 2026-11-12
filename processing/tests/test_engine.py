@@ -437,6 +437,7 @@ def test_a_1440p_game_needs_no_youtube_copy(tmp_path):
     assert not job.youtube_copy and engine.youtube_copy(job, job.rec / "fullgame" / "game.mp4") == {}
 
 
+@pytest.mark.skipif(__import__("shutil").which(engine.accel.ffmpeg()) is None, reason="needs ffmpeg")
 def test_the_youtube_copy_of_a_finished_game(tmp_path, monkeypatch, capsys):
     """With ffmpeg itself: game.mp4 stays, game-youtube.mp4 is 1440p with the audio, and a rerun
     of a finished game makes only the copy, once."""

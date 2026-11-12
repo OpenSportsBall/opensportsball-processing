@@ -1677,11 +1677,16 @@ def youtube_copy(job: Job, game: Path) -> dict:
     with log.open("a") as f:
         f.write(f"\n$ {' '.join(cmd)}\n")
         f.flush()
-        _current = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
-        while _current.poll() is None:
-            time.sleep(2)
-        rc = _current.returncode
-        _current = None
+        try:
+            _current = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
+        except OSError as e:  # no ffmpeg to run
+            f.write(f"{e}\n")
+            rc = None
+        else:
+            while _current.poll() is None:
+                time.sleep(2)
+            rc = _current.returncode
+            _current = None
     if _stopping.is_set():
         raise Stop()
     want, got = video_seconds(game), video_seconds(part) if rc == 0 else None
