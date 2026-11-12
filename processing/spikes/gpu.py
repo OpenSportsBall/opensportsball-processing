@@ -200,9 +200,17 @@ class PanoWarper:
             self.w.append(torch.tensor(wt, device=dev).to(DT))
         self.wsum = (self.w[0] + self.w[1]).clamp_min(1e-3)
 
-    def warp(self, frames):
+    def warp(self, frames, main_only: bool = False):
         """Returns the blended panorama as BGR uint8 (for OpenCV) and the
-        seam cost over the overlap columns (float32, CPU)."""
+        seam cost over the overlap columns (float32, CPU). `main_only`:
+        Secondary has no footage for this frame, so the panorama is what
+        Main sees and black elsewhere, and there is no seam to cost."""
+        if main_only:
+            yy, uv = apply_gain(*sample(frames[0], self.grids[0]), self.gains[0])
+            seen = self.w[0] > 0
+            bgr = nv_to_bgr(torch.where(seen, yy[0], torch.full_like(yy[0], 16)).float(),
+                            torch.where(seen, uv, torch.full_like(uv, 128)).float())
+            return bgr.cpu().numpy(), np.zeros((seen.shape[0], self.c1 - self.c0), np.float32)
         s = [apply_gain(*sample(p, g), gn) for p, g, gn in zip(frames, self.grids, self.gains)]
         y = (s[0][0] * self.w[0] + s[1][0] * self.w[1]) / self.wsum
         uv = (s[0][1] * self.w[0] + s[1][1] * self.w[1]) / self.wsum

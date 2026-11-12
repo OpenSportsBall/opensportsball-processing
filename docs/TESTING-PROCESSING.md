@@ -40,6 +40,18 @@ period, nothing but play, cut short) the split has to get right.
 
     cd processing && uv run --extra dev pytest tests/test_jointfit.py tests/test_phases.py
 
+A Secondary with only part of the game (it stopped early, started late, or
+has a hole) is tested the same way, on made-up recordings
+(`tests/test_secondary_gaps.py`): what the sync's report says Secondary
+covers, the blank frames the readers get where it has nothing (and exactly
+as many frames as Main's), the view staying inside Main's frame there,
+corners included, and the engine fitting the pitch on a segment both
+phones have. On footage: cut a recording's manifest so Secondary's later
+files are gone and run `phase0.py`, then `fullgame.py --start` across the
+point where it ends.
+
+    cd processing && uv run --extra dev pytest tests/test_secondary_gaps.py
+
 How close a joint fit puts the taps is measured on taps it wasn't given
 (the fit's own taps flatter it); on a recording whose joint fit is adopted,
 start from the files it replaced:

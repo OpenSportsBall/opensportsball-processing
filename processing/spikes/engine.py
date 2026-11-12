@@ -155,6 +155,8 @@ HEARTBEAT_S = 60.0
 KNOWN_FAILURES = [
     ("calibration failed", "calibration_failed",
      "the two phones' views couldn't be matched to stitch them (too little overlap, or one view soft)"),
+    ("footage doesn't overlap in time", "no_overlap",
+     "the two phones' footage doesn't overlap in time: the second phone has nothing from while the main one filmed"),
 ]
 RANDOM_MOMENT_GAP_S = 20.0    # random must-see moments: at least this far from the others
 BALL_SET_COUNT = 50           # frames in a ball label set
@@ -370,15 +372,37 @@ def verify_footage(job: Job, m: dict) -> None:
     emit("step", step="verify-footage", status="done", seconds=round(time.time() - t0, 1), files=len(todo))
 
 
+def covered_segments(job: Job, m: dict) -> list[int] | None:
+    """Main's segments the second phone has all of, from the sync's report
+    (phase0.py's secondaryCoverage; phase0.covered_segments). None when the
+    report doesn't say: every segment then."""
+    report = job.rec / "phase0" / "report.json"
+    spans = json.loads(report.read_text()).get("secondaryCoverage") if report.exists() else None
+    if spans is None:
+        return None
+    out, g = [], 0.0
+    for k, sg in enumerate(next(d for d in m["devices"] if d["role"] == "main")["segments"]):
+        dur = sg["durationMs"] / 1000
+        if any(a <= g + 2.0 and b >= g + dur - 2.0 for a, b in spans):
+            out.append(k)
+        g += dur
+    return out
+
+
 def sample_clip(job: Job, m: dict) -> tuple[int, float, float]:
     """Where the pitch and the kits are fitted: the job's choice, else a
     quarter of the way into the recording (the warm-up is over, the light
-    hasn't changed much), 2 minutes from 1 minute into that segment."""
+    hasn't changed much), 2 minutes from 1 minute into that segment. When
+    the second phone stopped early (or started late), the nearest segment
+    to that which has both phones: the pitch is fitted on both views."""
     if job.sample:
         return int(job.sample["segment"]), float(job.sample["startS"]), float(job.sample["seconds"])
     main = next(d for d in m["devices"] if d["role"] == "main")
     n = len(main["segments"])
     seg = min(n - 1, max(0, n // 4))
+    covered = covered_segments(job, m)
+    if covered:
+        seg = min(covered, key=lambda k: abs(k - seg))
     dur = main["segments"][seg]["durationMs"] / 1000
     start = min(60.0, max(0.0, dur - 130.0))
     return seg, start, 120.0
@@ -396,11 +420,11 @@ def prepare(job: Job, answers: dict | None, footage: bool = True) -> int:
             raise Failed("bad_job", "--no-footage is for applying answers after a prepare", exit_code=EXIT_BAD_INPUT)
         m = job.manifest()
     st = job.state()
-    seg, start, secs = sample_clip(job, m)
     rec = str(job.rec)
     if answers:
         validate(answers, "engine-answers.schema.json", "answers")
     step(job, "sync", ["phase0.py", rec], done=job.rec / "phase0" / "report.json")
+    seg, start, secs = sample_clip(job, m)  # after the sync: it says where both phones have footage
     pitch_dir = job.rec / "pitch"
     if answers and answers.get("cameras"):
         apply_cameras(job, st, answers["cameras"])
