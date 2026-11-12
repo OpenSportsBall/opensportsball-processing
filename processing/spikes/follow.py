@@ -96,6 +96,8 @@ MAX_PAN_DEG_S = 20.0    # pan speed cap
 SEAM_FEATHER_DEG = 0.3  # detail blend width either side of the seam
 TONE_FEATHER_DEG = 6.0  # brightness/colour blend width across the seam
 SEAM_LAMBDA = 0.003     # seam stickiness between frames, per column per row
+RELEARN_S = 2.0         # after Secondary's footage ends or begins, the background is relearnt for this long ...
+RELEARN_RATE = 0.05     # ... at this rate per frame
 PLAYER_COST = 3.0       # seam cost on a detected player, per pixel
 
 
@@ -503,6 +505,17 @@ def frame_stream(path: Path, start: float, seconds: float, width: int, fps: floa
         proc.wait()
 
 
+HOLD_MAX_S = phase0.HOLD_MAX_S  # a phone with no frame for a moment repeats its nearest one for at most this long
+
+
+def blank_frame(width: int) -> np.ndarray:
+    """A black NV12 frame (flat uint8), for a phone that has no footage."""
+    height = round(width * 9 / 16)
+    f = np.full(width * height * 3 // 2, 128, np.uint8)
+    f[: width * height] = 16
+    return f
+
+
 def piece_runs(pieces: list[dict], t: float, n: int, fps: float) -> list[list]:
     """Splits `n` frames from `t` s into a Main segment into runs that one
     Secondary file covers: [piece (None where no file does), its local
@@ -529,7 +542,7 @@ def phone_at(devs: dict, report: dict, role: str, seg: int, t: float):
         s = devs["main"]["segments"][seg]
         return s["objectKey"], t, s["durationMs"] / 1000
     pieces = report["segments"][seg].get("secondaryPieces")
-    if pieces:
+    if pieces is not None:
         p = next((q for q in pieces if 0 <= t + q["offsetS"] < q["durationMs"] / 1000), None)
         return (p["objectKey"], t + p["offsetS"], p["durationMs"] / 1000) if p else None
     s = devs["secondary"]["segments"][seg]
@@ -545,7 +558,10 @@ def game_stream(rec: Path, devs: dict, report: dict, phone: int, seg: int, start
     of Secondary is read at that segment's own audio offset, which jumps at
     switches. Where a phone has no frame for a moment (the offset puts it
     before its segment began, or a file ends early) its nearest frame is
-    repeated, so the two phones stay frame-aligned.
+    repeated, so the two phones stay frame-aligned. That is for the frame
+    or so lost at a switch: past HOLD_MAX_S of it (Secondary stopped early,
+    started late, or has a hole) the frames are blank (blank_frame), which
+    no detector finds anything in, and phase0.secondary_missing says which.
 
     For phones that cut segments at different lengths, phase0.py lists
     every Secondary file overlapping each Main segment (report segments'
@@ -554,6 +570,7 @@ def game_stream(rec: Path, devs: dict, report: dict, phone: int, seg: int, start
     role = ("main", "secondary")[phone]
     segs_main = devs["main"]["segments"]
     total = int(round(seconds * fps))
+    blank, hold = blank_frame(width), int(round(HOLD_MAX_S * fps))
     sent, t, k, last = 0, start, seg, None
     while sent < total:
         if k >= len(segs_main):
@@ -564,10 +581,18 @@ def game_stream(rec: Path, devs: dict, report: dict, phone: int, seg: int, start
             continue
         n = min(total - sent, int(round((dur - t) * fps)))
         pieces = report["segments"][k].get("secondaryPieces") if phone == 1 else None
-        if pieces:
+        if pieces is not None:
             pending = 0  # frames before any file's first: sent as that first frame
             for p, local, m in piece_runs(pieces, t, n, fps):
                 got = 0
+                if p is None and m > hold:  # no file for this long: its nearest frame for a moment, then blank
+                    for _ in range(pending):
+                        yield blank
+                    pending = 0
+                    for j in range(m):
+                        yield last if last is not None and j < hold else blank
+                    last = None
+                    continue
                 if p is not None:
                     frames = frame_stream(rec / p["objectKey"], local, m / fps + 1 / fps, width, fps)
                     for buf in frames:
@@ -583,6 +608,8 @@ def game_stream(rec: Path, devs: dict, report: dict, phone: int, seg: int, start
                     yield last
                     got += 1
                 pending += m - got
+            for _ in range(pending):  # the segment ended before any file began
+                yield blank
             sent += n
             t, k = 0.0, k + 1
             continue
@@ -659,9 +686,14 @@ def setup_cameras(rec: Path, report: dict, devs: dict, flip: list[bool]) -> tupl
         t = (j.get("lineFit") or {}).get("offsetHeights")
         return (Camera(*j["main"][:5], np.array(j["main"][5])),
                 Camera(*j["secondary"][:5], np.array(j["secondary"][5]), t=t))
-    s0 = report["segments"][0]
-    m0 = devs["main"]["segments"][0]
-    sec0 = devs["secondary"]["segments"][0]
+    # From segments that have both phones: the one phase0 calibrated on
+    # (segment 0 unless Secondary started late), and for the refinement the
+    # ones Secondary has all of (it may have stopped early).
+    cal = report.get("calibrationSegment", 0)
+    covered = phase0.covered_segments(json.loads((rec / "manifest.json").read_text()), report)
+    s0 = report["segments"][cal]
+    m0 = devs["main"]["segments"][cal]
+    sec0 = devs["secondary"]["segments"][cal]
     dur = min(m0["durationMs"], sec0["durationMs"]) / 1000 - abs(s0["offsetS"]) - 1
     t0 = max(0.0, -s0["offsetS"]) + 0.5
     pairs = [(phase0.frames_at(rec / m0["objectKey"], t, 1, FPS, CAL_W, flip[0])[0],
@@ -674,9 +706,9 @@ def setup_cameras(rec: Path, report: dict, devs: dict, flip: list[bool]) -> tupl
     print(f"stitcher: {cal['angleBetweenDeg']} deg apart, focal {cal['focalPx']} @ {CAL_W}")
 
     cm, cs = Camera.from_stitcher(cams[1]), Camera.from_stitcher(cams[0])
-    nseg = len(report["segments"])
+    covered = covered or [cal]
     fit_pairs = []
-    sampled = sorted({round(x) for x in np.linspace(0, nseg - 1, LINE_SEGMENTS)})
+    sampled = sorted({covered[round(x)] for x in np.linspace(0, len(covered) - 1, LINE_SEGMENTS)})
     for sg in sampled:
         o = report["segments"][sg]["offsetS"]
         dur = min(devs["main"]["segments"][sg]["durationMs"], devs["secondary"]["segments"][sg]["durationMs"]) / 1000
@@ -1669,10 +1701,36 @@ def passa_cache(out: Path, seg: int, start: float, seconds: float) -> Path:
     return out / f"passA_{seg}_{start:g}_{seconds:g}.json"
 
 
-def plan_path(rec: Path, out: Path, seg: int, start: float, dets, extent, aim: str, features: tuple):
+ALONE_MAX_SHIFT_DEG = 15.0  # Main alone: the view is turned at most this far to bring its side edge inside Main's frame
+ALONE_EDGE_PX = 8           # ... this many pixels inside it (at REF_W)
+
+
+def inside_main(cam: Camera, yaw: float, pitch: float, hfov: float, side: float, bottom: bool = False) -> bool:
+    """Whether the view's edge on `side` (-1 left, +1 right), top to bottom, lies within Main's
+    frame from left to right; or, with `bottom`, whether the view's bottom edge lies above the
+    frame's. A view pitched down reaches farther sideways at its bottom corners than at its
+    middle, and Main's frame isn't level in the panorama, so the edges' angles alone don't say."""
+    th = np.tan(hfov / 2)
+    z = direction(yaw, pitch)
+    x = np.array([np.cos(yaw), 0.0, -np.sin(yaw)])
+    y = np.cross(z, x)
+    if bottom:
+        u = np.linspace(-1, 1, 9) * th
+        _, py, _ = cam.project(u[:, None] * x + th * OUT_H / OUT_W * y + z)
+        return bool(((py >= 0) & (py <= cam.h - 1 - ALONE_EDGE_PX)).all())
+    v = np.linspace(-1, 1, 7) * th * OUT_H / OUT_W
+    px, _, _ = cam.project(side * th * x + v[:, None] * y + z)
+    return bool(((px >= ALONE_EDGE_PX) & (px <= cam.w - 1 - ALONE_EDGE_PX)).all())
+
+
+def plan_path(rec: Path, out: Path, seg: int, start: float, dets, extent, aim: str, features: tuple,
+              alone=None, main_yaw=None, main_cam: Camera | None = None):
     """From pass A's detections to the camera path (yaw, pitch, hfov per
     frame, radians): the per-frame aim, then smoothing and the pan-speed
-    cap. Writes path_<tag>.json."""
+    cap. Writes path_<tag>.json. `alone`: per frame, True where Secondary
+    has no footage; the view then stays inside what Main sees
+    (`main_yaw`: its left and right edge, radians; `main_cam`: Main's
+    camera, for the view's corners)."""
     y0, y1, p0, p1 = extent
     T = len(dets)
     if aim == "play":
@@ -1700,10 +1758,15 @@ def plan_path(rec: Path, out: Path, seg: int, start: float, dets, extent, aim: s
     # Never show past the canvas's left or right edge: the pan stops at the
     # edge and the view narrows so the edge stays put (the aim point stays
     # in view), down to EDGE_MIN_HFOV.
-    lo, hi = y0 + np.radians(EDGE_MARGIN_DEG), y1 - np.radians(EDGE_MARGIN_DEG)
+    both_lo, both_hi = y0 + np.radians(EDGE_MARGIN_DEG), y1 - np.radians(EDGE_MARGIN_DEG)
     floor = np.radians(EDGE_MIN_HFOV)
     n_edge = 0
+    n_alone = int(np.sum(alone[:T])) if alone is not None and main_yaw is not None else 0
     for i in range(T):
+        lo, hi = both_lo, both_hi
+        if n_alone and i < len(alone) and alone[i]:  # Main alone: its own edges are the canvas's
+            lo, hi = max(lo, main_yaw[0] + np.radians(EDGE_MARGIN_DEG)), min(hi, main_yaw[1] - np.radians(EDGE_MARGIN_DEG))
+            yaw[i] = np.clip(yaw[i], lo + floor / 2, hi - floor / 2)
         half = hfov[i] / 2
         if yaw[i] - half < lo:
             w = max(floor, min(hfov[i], 2 * (yaw[i] - lo)))
@@ -1715,9 +1778,32 @@ def plan_path(rec: Path, out: Path, seg: int, start: float, dets, extent, aim: s
             n_edge += 1
     if n_edge:
         print(f"edges: view held at the canvas edge in {n_edge} frames ({100 * n_edge / T:.0f}%)")
+    if n_alone:
+        print(f"Main alone in {n_alone} frames ({100 * n_alone / T:.0f}%): Secondary has no footage there")
     # Keep the view inside what the phones saw vertically.
     vfov = 2 * np.arctan(np.tan(hfov / 2) * OUT_H / OUT_W)
     pitch = np.clip(pitch, p0 + vfov / 2, p1 - vfov / 2)
+    if n_alone and main_cam is not None:
+        # Main alone, and the view's corners: turn it towards Main until the
+        # edge on Secondary's side is inside Main's frame, top to bottom, and
+        # lift it until its bottom edge is (the canvas reaches lower where
+        # Secondary looked).
+        side = -1.0 if main_yaw[0] - y0 > y1 - main_yaw[1] else 1.0  # the side Secondary is on
+        cam, top = main_cam.at(REF_W), np.radians(ALONE_MAX_SHIFT_DEG)
+
+        def least(fits) -> float:
+            """The least shift (radians, up to `top`) at which fits(shift) holds."""
+            if fits(0.0):
+                return 0.0
+            a, b = 0.0, top
+            for _ in range(10):
+                mid = (a + b) / 2
+                a, b = (a, mid) if fits(mid) else (mid, b)
+            return b
+        for i in np.flatnonzero(alone[:T]):
+            for _ in range(2):  # each moves the other's edge a little
+                yaw[i] -= side * least(lambda s: inside_main(cam, yaw[i] - side * s, pitch[i], hfov[i], side))
+                pitch[i] -= least(lambda s: inside_main(cam, yaw[i], pitch[i] - s, hfov[i], side, bottom=True))
     tag = "_".join([aim, *features])
     (out / f"path_{tag}.json").write_text(json.dumps({
         "segment": seg, "startS": start, "fps": FPS, "aim": aim,
@@ -1741,8 +1827,10 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
     if os.environ.get("OSB_NO_RENDER") and cache.exists():
         c = json.loads(cache.read_text())
         print(f"pass A from {cache.name}")
+        flip = [report["upsideDown"]["main"], report["upsideDown"]["secondary"]]
         plan_path(rec, out, seg, start, [[tuple(d) for d in fd] for fd in c["dets"]], tuple(c["extent"]),
-                  aim, features)
+                  aim, features, np.array(c["alone"], bool) if c.get("alone") else None, c.get("mainYaw"),
+                  setup_cameras(rec, report, devs, flip)[0])
         return
     flip = [report["upsideDown"]["main"], report["upsideDown"]["secondary"]]
     def streams_at(t0, secs, width):
@@ -1780,12 +1868,28 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
     main_right = YY[0][pweights[0].any(0)].mean() > YY[0][pweights[1].any(0)].mean()
     print(f"overlap yaw {np.degrees(y0 + c0 * step):.1f}..{np.degrees(y0 + c1 * step):.1f} deg,"
           f" Main on the {'right' if main_right else 'left'}")
+    # Where Secondary has no footage the game is Main alone: the seam goes
+    # to Secondary's far side (Main fills the overlap), blobs count only
+    # where Main sees, and the view stays between Main's own edges (the
+    # middle half of its left and right frame edges; the corners reach
+    # farther, but not at the height the pitch is).
+    main_sees = pweights[0] > 0
+    c_main = lo[0]
+    mid = np.linspace(c_main.h / 4, 3 * c_main.h / 4, 12)
+    side = [c_main.unproject(np.c_[0 * mid + x, mid]) for x in (0, c_main.w - 1)]
+    side_yaw = [np.arctan2(r[:, 0], r[:, 2]) for r in side]
+    lo_side, hi_side = sorted(side_yaw, key=np.median)
+    main_yaw = [float(lo_side.max()), float(hi_side.min())]
+    seam_alone = (y0 - 1.0) if main_right else (y1 + 1.0)
 
-    # Exposure: match Secondary to Main in the overlap, mid segment 0.
-    s0 = report["segments"][0]
-    t_mid = 0.5 * min(devs["main"]["segments"][0]["durationMs"], devs["secondary"]["segments"][0]["durationMs"]) / 1000
-    a = phase0.frames_at(rec / devs["main"]["segments"][0]["objectKey"], t_mid, 1, FPS, CAL_W, flip[0])[0]
-    b = phase0.frames_at(rec / devs["secondary"]["segments"][0]["objectKey"], t_mid + s0["offsetS"], 1, FPS,
+    # Exposure: match Secondary to Main in the overlap, mid the segment the
+    # cameras were calibrated on (segment 0 unless Secondary started late).
+    cal = report.get("calibrationSegment", 0)
+    s0 = report["segments"][cal]
+    t_mid = 0.5 * min(devs["main"]["segments"][cal]["durationMs"], devs["secondary"]["segments"][cal]["durationMs"]) / 1000
+    t_mid = max(t_mid, -s0["offsetS"] + 1.0)
+    a = phase0.frames_at(rec / devs["main"]["segments"][cal]["objectKey"], t_mid, 1, FPS, CAL_W, flip[0])[0]
+    b = phase0.frames_at(rec / devs["secondary"]["segments"][cal]["objectKey"], t_mid + s0["offsetS"], 1, FPS,
                          CAL_W, flip[1])[0]
     wa, wb = pweights
     ov = (wa > 0) & (wb > 0)
@@ -1805,6 +1909,9 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
     a_start = start - warm
     mog = cv2.createBackgroundSubtractorMOG2(history=300, varThreshold=24, detectShadows=True)
     streams = streams_at(a_start, warm + seconds, CAL_W)
+    missing = phase0.secondary_missing(manifest, report, phase0.game_start(manifest, seg) + a_start,
+                                       int(round((warm + seconds) * FPS)) + 1, FPS)
+    relearn_until = 0
     dets: list[list[tuple[float, float, float]]] = []
     field = None
     n_warm = int(warm * FPS)
@@ -1815,20 +1922,28 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
     for i, (fa, fb) in enumerate(zip(*streams)):
         nA += 1
         sw.lap("A: decode")
-        pano, cost = warper.warp([gpu.upload_nv12(f, CAL_W, lo_h, dev) for f in (fa, fb)])
+        alone = bool(missing[min(i, len(missing) - 1)])
+        pano, cost = warper.warp([gpu.upload_nv12(f, CAL_W, lo_h, dev) for f in (fa, fb)], main_only=alone)
         sw.lap("A: warp+blend")
         # After the warm-up, learn the background slowly (~a minute), so a
         # player standing still (a keeper waiting to take a goal kick) stays
-        # foreground instead of fading in after ~10 s.
-        fg = mog.apply(pano, learningRate=-1 if i < n_warm else 1 / (60 * FPS))
+        # foreground instead of fading in after ~10 s. When Secondary's
+        # footage ends or begins half the panorama changes at once: learn
+        # that quickly, or it is all foreground for the minute.
+        if i and alone != bool(missing[min(i - 1, len(missing) - 1)]):
+            relearn_until = i + int(RELEARN_S * FPS)
+        fg = mog.apply(pano, learningRate=-1 if i < n_warm else RELEARN_RATE if i < relearn_until else 1 / (60 * FPS))
+        if alone:
+            fg[~main_sees] = 0
         sw.lap("A: background")
         # Seam: avoid players and places where the two phones disagree.
         # Searched on row pairs; it moves slowly, so half the rows is plenty.
         players = cv2.dilate((fg[:, c0:c1] == 255).astype(np.uint8), np.ones((7, 7), np.uint8))
         cost += PLAYER_COST * players
         cost[~both[:, c0:c1]] = 50.0
-        half = cost[: PH // 2 * 2].reshape(PH // 2, 2, -1).mean(1)
-        seam_h = seam_dp(half, seam_h, 2 * SEAM_LAMBDA)
+        if not alone or seam_h is None:
+            half = cost[: PH // 2 * 2].reshape(PH // 2, 2, -1).mean(1)
+            seam_h = seam_dp(half, seam_h, 2 * SEAM_LAMBDA)
         seam = np.repeat(seam_h, 2)
         seam = np.r_[seam, seam[-1:]][:PH]
         sw.lap("A: seam")
@@ -1855,7 +1970,7 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
                                float(PP[feet_y, 0])))
         dets.append(frame_dets)
         sw.lap("A: blobs")
-        seams.append(y0 + (c0 + seam) * step)
+        seams.append(np.full(PH, seam_alone) if alone else y0 + (c0 + seam) * step)
         if len(dets) == int(seconds * FPS / 2):
             sample = pano.copy()
             for yw, pt, *_ in frame_dets:
@@ -1866,12 +1981,15 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
     sy = np.degrees(np.array(seams))
     print(f"seam yaw at the horizon row: {np.percentile(sy[:, PH // 2], [5, 50, 95]).round(1)} deg")
     counts = [len(d) for d in dets]
+    alone_frames = missing[n_warm:n_warm + len(dets)]
     print(f"pass A: {len(dets)} frames, players detected per frame median {int(np.median(counts))}"
           f" (range {min(counts)}-{max(counts)})")
 
     if os.environ.get("OSB_NO_RENDER"):
-        passa_cache(out, seg, start, seconds).write_text(json.dumps({"dets": dets, "extent": [y0, y1, p0, p1]}))
-    yaw, pitch, hfov = plan_path(rec, out, seg, start, dets, (y0, y1, p0, p1), aim, features)
+        passa_cache(out, seg, start, seconds).write_text(json.dumps({
+            "dets": dets, "extent": [y0, y1, p0, p1], "alone": alone_frames.tolist(), "mainYaw": main_yaw}))
+    yaw, pitch, hfov = plan_path(rec, out, seg, start, dets, (y0, y1, p0, p1), aim, features, alone_frames, main_yaw,
+                                 cm)
     sw.lap("path")
     if os.environ.get("OSB_NO_RENDER"):
         print("OSB_NO_RENDER set: stopping before pass B")

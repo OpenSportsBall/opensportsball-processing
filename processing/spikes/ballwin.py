@@ -368,6 +368,11 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
         print(f"far band: {len(far[0])} + {len(far[1])} crops at 2x ({FAR_ZOOM} scans)", flush=True)
 
     frames_out, t0 = [], time.time()
+    # Where Secondary has no footage (it stopped early) its frames are blank: Main alone is searched.
+    missing = phase0.secondary_missing(manifest, report, phase0.game_start(manifest, seg) + start,
+                                       int(round(seconds * fps)) + 1, fps)
+    if missing.any():
+        print(f"Secondary has no footage for {missing.mean():.0%} of this clip: Main alone there", flush=True)
     ball_xz, ball_v, last_seen, last_full = None, np.zeros(2), -10 ** 9, -10 ** 9
     tiles_total, n_full = 0, 0
     for i, (fa, fb) in enumerate(zip(*streams)):
@@ -382,6 +387,8 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
             pred = None
         found = []
         for phone, (buf, fl) in enumerate(((fa, flip[0]), (fb, flip[1]))):
+            if phone == 1 and missing[min(i, len(missing) - 1)]:
+                continue
             bufs = buf if wasb else (buf,)
             buf = bufs[1] if wasb else buf
 

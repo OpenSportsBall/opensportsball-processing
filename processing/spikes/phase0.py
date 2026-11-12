@@ -30,6 +30,17 @@ over a game, so each segment's sync is searched around the previous
 segment's measured error rather than the stamps alone. Other scripts get
 the pairing from paired_devices().
 
+A Secondary that stopped early (or started late, or has a hole) leaves
+Main segments with part of it or none. A segment with under COVER_MIN_S of
+Secondary (or under COVER_SURE_S that doesn't lock) isn't synced by audio:
+its offset comes from the stamps and the last measured error
+("synced": false), and with none at all it is marked
+"noSecondary". Such a recording's segments all list "secondaryPieces"
+(empty where there is nothing), the report gives the stretches of the game
+Secondary has ("secondaryCoverage", s on Main's clock), and the stitch is
+calibrated from the first segment that has enough of both phones
+("calibrationSegment"). Readers ask coverage() / covered_segments().
+
 Stitching uses OpenCV's panorama stitcher, which estimates each camera's
 focal length and rotation from the matches. The phones' reported field of
 view isn't used: on the first field clip the Pixel 11 Pro's (108.8 deg)
@@ -64,6 +75,12 @@ SYNC_OK_WINDOWS = 0.5  # ... as does one where this share of its 4 s windows agr
 MIXED_MIN_S = 2.0     # a second Secondary file overlapping a Main segment this much: mixed segment lengths
 PIECE_MIN_S = 0.05    # once mixed, a file overlapping a segment at least this much (a frame or so) is a piece
 PIECE_MIN_SYNC_S = 30.0  # shorter pieces are placed from the stamps (and the segment's error), not synced
+COVER_MIN_S = 10.0    # a Main segment Secondary overlaps less than this isn't synced by audio: placed from the stamps
+COVER_SURE_S = 30.0   # ... and under this, only a sync that locked cleanly is kept (rec of 2026-11-04 cut short:
+                      # 30 s locked 14/14 windows, 122 ms from where the stamps put it)
+GAP_MIN_S = 5.0       # a Main segment missing this much of Secondary gets its pieces listed too (what it has, and when)
+HOLD_MAX_S = 2.0      # Secondary without a frame for up to this long (a file switch, the offset at either end of the
+                      # game) still counts as having footage: readers repeat its nearest frame (follow.game_stream)
 
 
 # ---------------------------------------------------------------- media io
@@ -258,6 +275,68 @@ def paired_devices(manifest: dict, report: dict) -> dict:
     return devs
 
 
+def coverage(manifest: dict, report: dict) -> list[list[float]]:
+    """The stretches of the game Secondary has footage for, as [from, to]
+    in s on Main's clock (its segments back to back from segment 0), in
+    order. From each segment's "secondaryPieces" where the report lists
+    them, else from its paired file and offset. Gaps of up to HOLD_MAX_S
+    (between files, and at the game's start and end) are counted as
+    covered: readers fill them with the nearest frame."""
+    main = next(d for d in manifest["devices"] if d["role"] == "main")
+    sec = {s["index"]: s for d in manifest["devices"] if d["role"] == "secondary" for s in d["segments"]}
+    spans, g = [], 0.0
+    for ms, seg in zip(main["segments"], report["segments"]):
+        dur = ms["durationMs"] / 1000
+        pieces = seg.get("secondaryPieces")
+        if pieces is None:
+            ss = sec.get(seg.get("secondaryIndex", ms["index"]))
+            pieces = [] if ss is None or seg.get("noSecondary") else [{"offsetS": seg["offsetS"], "durationMs": ss["durationMs"]}]
+        for a, b in sorted((max(0.0, -p["offsetS"]), min(dur, p["durationMs"] / 1000 - p["offsetS"])) for p in pieces):
+            if b <= a:
+                continue
+            if spans and g + a - spans[-1][1] <= HOLD_MAX_S:
+                spans[-1][1] = max(spans[-1][1], g + b)
+            else:
+                spans.append([g + a, g + b])
+        g += dur
+    if spans and spans[0][0] <= HOLD_MAX_S:
+        spans[0][0] = 0.0
+    if spans and g - spans[-1][1] <= HOLD_MAX_S:
+        spans[-1][1] = g
+    return [[round(a, 3), round(b, 3)] for a, b in spans]
+
+
+def covered_segments(manifest: dict, report: dict, margin_s: float = 2.0) -> list[int]:
+    """Main's segments (positions in its list) that Secondary has all of,
+    give or take `margin_s` at each end: the ones a stage can take frame
+    pairs from anywhere in."""
+    main = next(d for d in manifest["devices"] if d["role"] == "main")
+    spans = coverage(manifest, report)
+    out, g = [], 0.0
+    for k, ms in enumerate(main["segments"]):
+        dur = ms["durationMs"] / 1000
+        if any(a <= g + margin_s and b >= g + dur - margin_s for a, b in spans):
+            out.append(k)
+        g += dur
+    return out
+
+
+def secondary_missing(manifest: dict, report: dict, start: float, n: int, fps: float) -> np.ndarray:
+    """For `n` frames at `fps` from `start` s into the game (Main's clock
+    from segment 0): True where Secondary has no footage."""
+    t = start + np.arange(n) / fps
+    have = np.zeros(n, bool)
+    for a, b in coverage(manifest, report):
+        have |= (t >= a) & (t < b)
+    return ~have
+
+
+def game_start(manifest: dict, seg: int) -> float:
+    """Where Main's segment `seg` starts in the game, s."""
+    main = next(d for d in manifest["devices"] if d["role"] == "main")
+    return sum(s["durationMs"] for s in main["segments"][:seg]) / 1000
+
+
 class Encoder:
     """Pipes BGR frames to ffmpeg for an H.264 file any player opens."""
 
@@ -336,7 +415,25 @@ def main(rec: Path, preview_at: float | None) -> None:
         ss = max(sec_d["segments"], key=lambda x: overlap(ms, x, stamped(ms, x) + err))
         pairs.append((ms, ss))
         guess = stamped(ms, ss) + err
-        s = sync(audio_of(ms), audio_of(ss), guess, 2.0 if have_err else FIRST_SEARCH_S)
+        ov = overlap(ms, ss, guess)
+        s = None
+        if ov >= COVER_MIN_S:
+            s = sync(audio_of(ms), audio_of(ss), guess, 2.0 if have_err else FIRST_SEARCH_S)
+            if ov < COVER_SURE_S and not confident(s):
+                s = None
+        if s is None:
+            # Secondary has little or none of this segment (it stopped early,
+            # started late, or has a hole): nothing to sync on. The nearest
+            # file stays as the pair, placed from the stamps, so readers that
+            # index by segment still find one; the pieces say what is there.
+            seg = {"index": ms["index"], "secondaryIndex": ss["index"], "bleOffsetS": round(stamped(ms, ss), 4),
+                   "bleErrorMs": round(-1000 * err, 1), "offsetS": round(guess, 6), "sharpness": 0.0,
+                   "windows": [], "windowsUsed": 0, "driftPpm": None, "synced": False,
+                   **({"noSecondary": True} if ov < PIECE_MIN_S else {})}
+            report["segments"].append(seg)
+            print(f"segment {ms['index']}: " + ("no Secondary footage" if ov < PIECE_MIN_S else
+                  f"{ov:.0f} s of secondary {ss['index']}, placed from the stamps"), flush=True)
+            continue
         if confident(s):
             err, have_err = s["offsetS"] - stamped(ms, ss), True
         seg = {"index": ms["index"], "secondaryIndex": ss["index"], "bleOffsetS": round(stamped(ms, ss), 4),
@@ -351,8 +448,12 @@ def main(rec: Path, preview_at: float | None) -> None:
     def pieces_of(ms, seg_err, min_s=PIECE_MIN_S):
         return [x for x in sec_d["segments"] if overlap(ms, x, stamped(ms, x) + seg_err) >= min_s]
     errs = [seg["offsetS"] - stamped(ms, ss) for (ms, ss), seg in zip(pairs, report["segments"])]
-    if any(len(pieces_of(ms, e, MIXED_MIN_S)) > 1 for (ms, _), e in zip(pairs, errs)):
+    mixed = any(len(pieces_of(ms, e, MIXED_MIN_S)) > 1 for (ms, _), e in zip(pairs, errs))
+    gaps = any(ms["durationMs"] / 1000 - max(0.0, overlap(ms, ss, seg["offsetS"])) > GAP_MIN_S
+               for (ms, ss), seg in zip(pairs, report["segments"]))
+    if mixed:
         report["mixedSegmentLengths"] = True
+    if mixed or gaps:
         for (ms, ss), seg, seg_err in zip(pairs, report["segments"], errs):
             pieces = []
             for x in pieces_of(ms, seg_err):
@@ -361,31 +462,44 @@ def main(rec: Path, preview_at: float | None) -> None:
                 p = {"index": x["index"], "objectKey": x["objectKey"], "durationMs": x["durationMs"],
                      "offsetS": round(guess, 6), "overlapS": round(ov, 1), "synced": False}
                 if x is ss:
-                    p.update(offsetS=seg["offsetS"], synced=True, sharpness=seg["sharpness"])
+                    p.update(offsetS=seg["offsetS"], synced=seg.get("synced", True), sharpness=seg["sharpness"])
                 elif ov >= PIECE_MIN_SYNC_S:
                     r = sync(audio_of(ms), audio_of(x), guess)
                     if confident(r) and abs(r["offsetS"] - guess) < 0.5:
                         p.update(offsetS=r["offsetS"], synced=True, sharpness=r["sharpness"])
                 pieces.append(p)
             seg["secondaryPieces"] = pieces
-            print(f"segment {ms['index']}: " + ", ".join(
+            print(f"segment {ms['index']}: " + (", ".join(
                 f"secondary {p['index']} {p['overlapS']:.0f} s at {p['offsetS']:+.3f} s"
-                f"{'' if p['synced'] else ' (from stamps)'}" for p in pieces), flush=True)
+                f"{'' if p['synced'] else ' (from stamps)'}" for p in pieces) or "no Secondary footage"), flush=True)
+    report["secondaryCoverage"] = coverage(manifest, report)
+    total_s = sum(s["durationMs"] for s in main_d["segments"]) / 1000
+    have_s = sum(b - a for a, b in report["secondaryCoverage"])
+    if total_s - have_s > GAP_MIN_S:
+        print(f"Secondary has {have_s / 60:.1f} of the game's {total_s / 60:.1f} min: "
+              + ", ".join(f"{a / 60:.1f}-{b / 60:.1f} min" for a, b in report["secondaryCoverage"])
+              + "; the rest is Main alone", flush=True)
 
-    # Stitch from segment 0: sample frame pairs across it, aligned by d.
-    main_f = rec / pairs[0][0]["objectKey"]
-    sec_f = rec / pairs[0][1]["objectKey"]
-    d = report["segments"][0]["offsetS"]
-    dur = min(pairs[0][0]["durationMs"], pairs[0][1]["durationMs"]) / 1000 - abs(d) - 1
+    # Stitch from the first segment with both phones (segment 0, unless
+    # Secondary started late): sample frame pairs across it, aligned by d.
+    cal_seg = next((i for i, seg in enumerate(report["segments"]) if seg.get("synced", True)), None)
+    if cal_seg is None:
+        sys.exit("the two phones' footage doesn't overlap in time: no Main segment has "
+                 f"{COVER_MIN_S:.0f} s of Secondary that syncs")
+    report["calibrationSegment"] = cal_seg
+    main_f = rec / pairs[cal_seg][0]["objectKey"]
+    sec_f = rec / pairs[cal_seg][1]["objectKey"]
+    d = report["segments"][cal_seg]["offsetS"]
+    dur = min(pairs[cal_seg][0]["durationMs"], pairs[cal_seg][1]["durationMs"]) / 1000 - abs(d) - 1
     t_main0 = max(0.0, -d) + 0.5
     t_end = t_main0 + dur - 0.5
     # Only frames from after both phones last locked their settings: before,
     # one may still have been in someone's hand or on a lowered tripod.
-    settled = max(settled_at(main_d, pairs[0][0]), settled_at(sec_d, pairs[0][1]) - d) + 1
+    settled = max(settled_at(main_d, pairs[cal_seg][0]), settled_at(sec_d, pairs[cal_seg][1]) - d) + 1
     if settled > t_main0 and settled <= t_end - MIN_SETTLED_S:
         t_main0 = settled
     elif settled > t_main0:
-        print(f"settings were last locked {settled:.0f} s into segment 0, leaving under {MIN_SETTLED_S:.0f} s"
+        print(f"settings were last locked {settled:.0f} s into segment {cal_seg}, leaving under {MIN_SETTLED_S:.0f} s"
               " of it; calibrating from all of it")
     report["calibrationFromS"] = round(t_main0, 2)
     times = np.linspace(t_main0, t_end, CALIB_FRAMES)
@@ -412,8 +526,14 @@ def main(rec: Path, preview_at: float | None) -> None:
     # compare the angle between the phones with segment 0's.
     stability = []
     for (ms, ss), seg in zip(pairs, report["segments"]):
+        if not seg.get("synced", True):  # too little of Secondary to compare
+            stability.append({"index": ms["index"], "ok": False, "synced": False})
+            continue
         seg_dur = min(ms["durationMs"], ss["durationMs"]) / 1000 - abs(seg["offsetS"]) - 1
         t0 = max(0.0, -seg["offsetS"]) + 0.5
+        if seg_dur < 2:
+            stability.append({"index": ms["index"], "ok": False})
+            continue
         cal_i = calibrate([(frames_at(rec / ms["objectKey"], t, 1, 30, PREVIEW_W, flip[0])[0],
                             frames_at(rec / ss["objectKey"], t + seg["offsetS"], 1, 30,
                                       PREVIEW_W, flip[1])[0])
@@ -433,10 +553,12 @@ def main(rec: Path, preview_at: float | None) -> None:
         if status == cv2.Stitcher_OK:
             cv2.imwrite(str(out / "stitched.jpg"), pano)
         # Find the segment pair holding the requested game time.
-        i, local = 0, preview_at if preview_at is not None else t_main0
+        i, local = (0, preview_at) if preview_at is not None else (cal_seg, t_main0)
         while i < len(pairs) - 1 and local >= pairs[i][0]["durationMs"] / 1000:
             local -= pairs[i][0]["durationMs"] / 1000
             i += 1
+        if not report["segments"][i].get("synced", True):  # no Secondary there: preview where there is
+            i, local = cal_seg, t_main0
         ms, ss = pairs[i]
         d_i = report["segments"][i]["offsetS"]
         seg_dur = min(ms["durationMs"], ss["durationMs"]) / 1000 - abs(d_i) - 1
