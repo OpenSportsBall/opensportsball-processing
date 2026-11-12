@@ -1679,6 +1679,20 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
       result. On rec7: 50 ball frames across all 10 chunks, a moments set
       with the camera's view at each moment, four share lists (pitch
       10 MB, kits 417 crops 1.6 MB, ball 8.6 MB, moments 2.9 MB).
+- [ ] Retrain and bench with unmarked off-pitch suggestions left out of
+      the negatives (`balldata.py`, `balljudge.py data`, 2026-11-11;
+      TESTING-PROCESSING.md section 3). Untested: no model has been
+      trained on data built this way. It removes 41-87% of the hard
+      negatives on the random sets, so compare against
+      `OSB_OFF_PITCH_NEG=1` data before the standard detector or judge is
+      replaced: held-out labels (`ballheat.py`), wrong suggestions per
+      frame just outside the lines (cones, bags, bottles within the
+      tracker's 10 m margin), and the must-see bench. The judge's crop AP
+      is not comparable across the change (its test negatives change
+      too). Stray balls inside the lines are not covered: the app stores
+      one ball per picture ("Can't tell / Multiple balls" for those), and
+      marking several would need the app, the answers schema and
+      `engine.py label` to change.
 - [ ] The standard judge doesn't know rec7's yellow ball: run from a
       fresh copy with the standard models, the camera aimed at the ball
       31% of chunk 0 and 0-2% of every other chunk (`ballAimShare`

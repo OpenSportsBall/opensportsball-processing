@@ -15,7 +15,14 @@ alike; telling the match ball apart is the tracker's job). Each ball gets
 a tile at a random offset, its box sized from its distance (pitch map and
 camera: a 22 cm ball, plus margin for blur). Negatives: empty field tiles
 from frames without a ball, and hard negatives where the off-the-shelf
-detector's suggestions were wrong (kit, paint, lights). "Unsure" frames
+detector's suggestions were wrong (kit, paint, lights). A suggestion nobody
+marked that lies outside the pitch lines may be someone else's ball (a
+warm-up, the next pitch, a spare by the bench), so it is neither a ball nor
+"not a ball": no hard negative is made of it and no tile may show it (a
+tile is moved off it; failing that a negative tile is dropped and a ball's
+tile has the spot painted over from its surroundings). The tracker drops candidates off the
+pitch anyway (ball.usable). OSB_OFF_PITCH_NEG=1 keeps them as negatives,
+as before 2026-11-11, to compare. "Unsure" frames
 are left out, and so are moments in held-out time (holdout.py: test
 labels no model trains on). Moments are split 80/20 into train and valid (both phones
 of a moment on the same side); test is a copy of valid.
@@ -29,6 +36,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -50,6 +58,10 @@ BOX_PX = (8, 160)       # clamp (a ball a couple of metres from the camera is ~1
 VALID_FRAC = 0.2
 NEG_PER_EMPTY = 2       # empty field tiles per frame without a ball
 HARD_PER_FRAME = 2      # tiles at wrong suggestions per frame
+OFF_PITCH_M = 0.0       # unmarked suggestions this far outside the lines are left out of training
+KEEP_OFF_PITCH = os.environ.get("OSB_OFF_PITCH_NEG") == "1"  # the old way: they are negatives
+TILE_PAD = 24           # a tile is clear of a left-out suggestion this far beyond its edges too (px)
+TILE_TRIES = 20         # placements tried to keep a tile clear before it is dropped or painted
 SEED = 7
 
 
@@ -57,6 +69,49 @@ def balls_of(v: dict) -> list[dict]:
     if "balls" in v:
         return v["balls"]
     return [{"x": v["x"], "y": v["y"], "inPlay": True}] if v.get("status") == "ball" and "x" in v else []
+
+
+def off_pitch(pose, gx: float, gz: float) -> bool:
+    """A ground point (pitch metres) outside the lines. A point above the
+    horizon (NaN: lights, stands) is not: it is no ball on another pitch."""
+    if np.isnan(gx) or np.isnan(gz):
+        return False
+    return bool(abs(gx) > pose.L / 2 + OFF_PITCH_M or abs(gz) > pose.W / 2 + OFF_PITCH_M)
+
+
+def ground_xz(cam, pose, x: float, y: float):
+    """The pitch point under a 4K frame pixel (NaN above the horizon)."""
+    d = cam.unproject(np.array([[x, y]], float))[0]
+    yaw = np.degrees(np.arctan2(d[0], d[2]))
+    pit = np.degrees(np.arctan2(d[1], np.hypot(d[0], d[2])))
+    return pose.to_pitch(yaw, pit)
+
+
+def off_pitch_at(rec: Path):
+    """(phone, x, y) -> whether that 4K frame pixel's ground point is
+    outside the pitch lines, from the recording's cameras and pitch map."""
+    manifest = json.loads((rec / "manifest.json").read_text())
+    report = json.loads((rec / "phase0" / "report.json").read_text())
+    devs = phase0.paired_devices(manifest, report)
+    cm, cs = follow.setup_cameras(rec, report, devs, [report["upsideDown"]["main"], report["upsideDown"]["secondary"]])
+    cams = {"main": cm.at(3840), "secondary": cs.at(3840)}
+    pose = P.load_pose(rec)
+    return lambda phone, x, y: off_pitch(pose, *ground_xz(cams[phone], pose, x, y))
+
+
+def left_out(cands: list[dict], balls: list[dict], is_off, near: float) -> list[dict]:
+    """The suggestions nobody marked (none of `balls` within `near` px)
+    that are off the pitch: `is_off(x, y)`."""
+    if KEEP_OFF_PITCH:
+        return []
+    return [c for c in cands if all(np.hypot(c["x"] - b["x"], c["y"] - b["y"]) > near for b in balls)
+            and is_off(c["x"], c["y"])]
+
+
+def tile_clear(x0: int, y0: int, pts: list[dict]) -> bool:
+    """No left-out suggestion in the tile at (x0, y0) or just beyond its edges."""
+    return not any(x0 - TILE_PAD <= c["x"] < x0 + TILE + TILE_PAD and y0 - TILE_PAD <= c["y"] < y0 + TILE + TILE_PAD
+                   for c in pts)
 
 
 def split_of(moment: str) -> str:
@@ -79,10 +134,7 @@ def main(rec: Path, out: Path) -> None:
     def box_px(phone: str, x: float, y: float) -> float:
         """Ball diameter in pixels at this pixel, if it is on the ground."""
         cam = cams[phone]
-        d = cam.unproject(np.array([[x, y]], float))[0]
-        yaw = np.degrees(np.arctan2(d[0], d[2]))
-        pit = np.degrees(np.arctan2(d[1], np.hypot(d[0], d[2])))
-        gx, gz = pose.to_pitch(yaw, pit)
+        gx, gz = ground_xz(cam, pose, x, y)
         if np.isnan(gx):
             return BOX_PX[0]
         dist = float(np.sqrt((gx - pose.cx) ** 2 + (gz - pose.cz) ** 2 + pose.h ** 2))
@@ -94,12 +146,23 @@ def main(rec: Path, out: Path) -> None:
         shutil.rmtree(out)
     coco = {s: {"images": [], "annotations": [], "categories": [{"id": 1, "name": "ball", "supercategory": "ball"}]}
             for s in ("train", "valid")}
-    counts = {s: {"tiles": 0, "balls": 0, "empty": 0, "hard": 0} for s in coco}
+    counts = {s: {"tiles": 0, "balls": 0, "empty": 0, "hard": 0, "left_out": 0, "dropped": 0, "painted": 0} for s in coco}
     for s in coco:
         (out / s).mkdir(parents=True)
 
-    def add_tile(split, img, x0, y0, balls, phone, kind):
+    def add_tile(split, img, x0, y0, balls, phone, kind, hide=()):
         tile = img[y0:y0 + TILE, x0:x0 + TILE]
+        if hide:  # left-out suggestions the tile couldn't avoid: filled in from around them
+            mask = np.zeros(tile.shape[:2], np.uint8)
+            for c in hide:
+                r = int(box_px(phone, c["x"], c["y"]))
+                for b in balls:  # never onto a marked ball's box
+                    gap = max(abs(c["x"] - b["x"]), abs(c["y"] - b["y"])) - box_px(phone, b["x"], b["y"]) / 2
+                    r = int(max(2, min(r, gap - 2)))
+                cv2.rectangle(mask, (int(c["x"]) - x0 - r, int(c["y"]) - y0 - r),
+                              (int(c["x"]) - x0 + r, int(c["y"]) - y0 + r), 255, -1)
+            tile = cv2.inpaint(tile, mask, 5, cv2.INPAINT_TELEA)
+            counts[split]["painted"] += 1
         iid = len(coco[split]["images"]) + 1
         name = f"{split}_{iid:05d}.jpg"
         cv2.imwrite(str(out / split / name), tile, [cv2.IMWRITE_JPEG_QUALITY, 95])
@@ -137,21 +200,54 @@ def main(rec: Path, out: Path) -> None:
             def clamp(x0, y0):
                 return int(np.clip(x0, 0, w - TILE)), int(np.clip(y0, BAND_TOP - TILE // 2, h - TILE))
 
+            # Unmarked suggestions off the pitch: perhaps another game's ball, so in no tile.
+            skip = left_out(f["candidates"], balls,
+                            lambda x, y: off_pitch(pose, *ground_xz(cams[f["phone"]], pose, x, y)), 20)
+            counts[split]["left_out"] += len(skip)
+
+            def place(corner):
+                """A tile from corner() (a fresh random placement each call)
+                clear of `skip`; None when none is found. With nothing
+                left out the first try is taken, as before."""
+                for _ in range(TILE_TRIES):
+                    x0, y0 = clamp(*corner())
+                    if tile_clear(x0, y0, skip):
+                        return x0, y0
+                return None
+
+            def around(p):
+                def corner():
+                    ox, oy = rng.integers(64, TILE - 64, size=2)
+                    return p["x"] - ox, p["y"] - oy
+                return corner
+
             for b in balls:
-                ox, oy = rng.integers(64, TILE - 64, size=2)
-                add_tile(split, img, *clamp(b["x"] - ox, b["y"] - oy), balls, f["phone"], "ball")
-            # Hard negatives: suggestions that weren't a ball.
-            wrong = [c for c in f["candidates"] if all(np.hypot(c["x"] - b["x"], c["y"] - b["y"]) > 20 for b in balls)]
+                at = place(around(b))
+                if at:
+                    add_tile(split, img, *at, balls, f["phone"], "ball")
+                else:  # a ball is too rare to drop: its tile as it falls, the left-out spots painted over
+                    x0, y0 = clamp(*around(b)())
+                    add_tile(split, img, x0, y0, balls, f["phone"], "ball",
+                             hide=[c for c in skip if not tile_clear(x0, y0, [c])])
+            # Hard negatives: suggestions on the pitch that weren't a ball.
+            wrong = [c for c in f["candidates"] if all(np.hypot(c["x"] - b["x"], c["y"] - b["y"]) > 20 for b in balls)
+                     and not any(c is k for k in skip)]
             for c in wrong[:HARD_PER_FRAME]:
-                ox, oy = rng.integers(64, TILE - 64, size=2)
-                x0, y0 = clamp(c["x"] - ox, c["y"] - oy)
+                at = place(around(c))
+                if not at:
+                    counts[split]["dropped"] += 1
+                    continue
+                x0, y0 = at
                 if any(x0 <= b["x"] < x0 + TILE and y0 <= b["y"] < y0 + TILE for b in balls):
                     continue  # would contain a ball after all; covered by the ball tiles
                 add_tile(split, img, x0, y0, [], f["phone"], "hard")
             if not balls:
                 for _ in range(NEG_PER_EMPTY):
-                    x0, y0 = clamp(rng.integers(0, w - TILE), rng.integers(BAND_TOP, h - TILE))
-                    add_tile(split, img, x0, y0, [], f["phone"], "empty")
+                    at = place(lambda: (rng.integers(0, w - TILE), rng.integers(BAND_TOP, h - TILE)))
+                    if at:
+                        add_tile(split, img, *at, [], f["phone"], "empty")
+                    else:
+                        counts[split]["dropped"] += 1
 
     for s, d in coco.items():
         (out / s / "_annotations.coco.json").write_text(json.dumps(d))
@@ -161,7 +257,8 @@ def main(rec: Path, out: Path) -> None:
         print(f"{n_held} labelled moments in held-out time {held.windows} left out")
     for s, c in counts.items():
         print(f"{s}: {c['tiles']} tiles ({c.get('ball', 0)} around balls, {c['empty']} empty, {c['hard']} hard negatives),"
-              f" {c['balls']} ball boxes")
+              f" {c['balls']} ball boxes; {c['left_out']} unmarked suggestions off the pitch left out,"
+              f" {c['dropped']} negative tiles dropped and {c['painted']} ball tiles painted to stay clear of them")
 
 
 if __name__ == "__main__":

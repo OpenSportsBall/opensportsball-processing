@@ -194,10 +194,19 @@ def data(rec: Path, train_sets=(), test_sets=()) -> None:
     out = rec / "balljudge"
     out.mkdir(exist_ok=True)
     diam_at = expected_at(rec)
+    # An unmarked candidate outside the pitch lines may be another game's
+    # ball: not a negative (balldata.py; the tracker drops those anyway).
+    off = balldata.off_pitch_at(rec)
+    left_out = 0
     rng = np.random.default_rng(3)
     X, y, split, meta = [], [], [], []
     for k, (sp, f, balls, cands, lab_dir) in enumerate(frames):
         img = cv2.imread(str(lab_dir / f["image"]))
+        had = bool(f["candidates"] or cands)
+        skip = balldata.left_out(list(cands) + f["candidates"], balls, lambda x, yy: off(f["phone"], x, yy), HIT_PX)
+        left_out += len(skip)
+        cands = [c for c in cands if not any(c is k for k in skip)]
+        f = dict(f, candidates=[c for c in f["candidates"] if not any(c is k for k in skip)])
         for b in balls:
             d = diam_at(f["phone"], b["x"], b["y"])
             for _ in range(POS_COPIES):
@@ -206,7 +215,7 @@ def data(rec: Path, train_sets=(), test_sets=()) -> None:
                 meta.append((f["id"], "ball"))
         negs = [(c["x"], c["y"], expect_px(c) if c.get("expect") else diam_at(f["phone"], c["x"], c["y"])) for c in cands
                 if all(np.hypot(c["x"] - b["x"], c["y"] - b["y"]) > HIT_PX for b in balls)]
-        if not f["candidates"] and not cands:  # a clip frame with no detections: random field crops
+        if not had:  # a clip frame with no detections: random field crops
             h, w = img.shape[:2]
             negs = [(float(x), float(yy), diam_at(f["phone"], x, yy))
                     for x, yy in zip(rng.integers(0, w, 12), rng.integers(760, h, 12))]
@@ -219,6 +228,7 @@ def data(rec: Path, train_sets=(), test_sets=()) -> None:
             print(f"{k + 1}/{len(frames)} frames, {len(X)} crops", flush=True)
     X = np.stack(X); y = np.array(y, np.uint8); split = np.array(split)
     np.savez_compressed(out / "crops.npz", X=X, y=y, split=split, holdout=json.dumps(held.stamp()))
+    print(f"{left_out} unmarked candidates off the pitch left out")
     if held.windows:
         print(f"held out (left out of train and valid): {held.windows} game s")
     for sp in ("train", "valid", "test"):
