@@ -40,6 +40,13 @@ period, nothing but play, cut short) the split has to get right.
 
     cd processing && uv run --extra dev pytest tests/test_jointfit.py tests/test_phases.py
 
+Goals staying with the pitch map they are drawn on (in the kept map's
+metres when rejected, found again on a tapped map's goal lines, a tapped
+post fixing its goal) is tested without footage too, on goal frames
+painted into an empty panorama:
+
+    cd processing && uv run --extra dev pytest tests/test_pitch_goals.py
+
 A Secondary with only part of the game (it stopped early, started late, or
 has a hole) is tested the same way, on made-up recordings
 (`tests/test_secondary_gaps.py`): what the sync's report says Secondary

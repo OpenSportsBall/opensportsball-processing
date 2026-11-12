@@ -160,6 +160,21 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         away). Junction detection found one box of four on rec4.
       - The start: `best_start` searches camera heights; nothing measures
         the centre circle, halfway line or touchlines to seed the pose.
+        Measured 2026-11-10 after the app showed rec7 (4 segments,
+        panorama from segment 1) as 106.7 x 63.9 m with the far touchline
+        through mid-pitch: every start in a grid of 29 heights (1.9-10 m)
+        and 4 camera distances, on nine panoramas (rec3-rec7), against
+        each one's checked fit (worst of 7 key points within 1 deg). The
+        starts that reach the right fit are few and uneven: 1-5 of 29
+        heights on the five panoramas that have one (rec7 from the app:
+        4.25 and 5.5 m only, not 5.0 or 6.0), none on rec4, rec4cal's old
+        stitch, rec5 and rec6. START_HEIGHTS went from 7 to 15 (half
+        metres): fixes rec7 from the app, changes no panorama that worked;
+        29 heights found nothing more; other camera distances added wrong
+        fits that outscore the right one (rec6 0.669, rec5 0.974). The
+        paint score doesn't tell a wrong fit from a right one (wrong
+        0.45-0.56, right 0.40-0.62), so no "weak fit, ask for taps"
+        threshold was set. A denser grid is a patch: the fit needs a seed.
       Ideas: paint detection per phone at the scale the line should have
       there (its width is known from the current fit); fit the ends
       separately once the middle holds (pitch.fit_end_pose does this in the
@@ -170,6 +185,47 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
       score` / `bench`) for untapped fits started from `best_start`, not
       from a tapped pitch.json; done when every tapped recording's
       untapped fit is within ~2x its tapped fit.
+- [ ] Seed the pitch fit from the lines' geometry instead of a guessed
+      start (proposed 2026-11-10, nothing built). `best_start` runs a
+      local fit from START_POSE at 15 camera heights and keeps the one
+      that scores best; the right fit is reached from 1-5 heights where
+      it is reached at all (see "The start" above), so it works by luck.
+      Compute the start from the panorama instead:
+      1. Straight lines without a pose: each ground line and the camera
+         make a plane, so every paint pixel's viewing direction votes for
+         the planes through it (a Hough over plane normals). Finds
+         touchlines, goal lines, box lines and the halfway line.
+      2. Orientation: the lines fall into two parallel families (along
+         and across the pitch); their two vanishing directions give the
+         ground's tilt and the pitch's rotation, whatever the height.
+      3. Scale: with the orientation known each line is an offset in
+         camera heights; the centre circle's 9.15 m radius (or the
+         16.5 m box depth) gives the height in metres.
+      4. Label and polish: try which line is the near touchline, the
+         halfway line and so on (few combinations), score each with
+         paint_score, and start fit_pose from the best.
+      It also gives the confidence the paint score can't (wrong fits
+      0.45-0.56, right ones 0.40-0.62): a right labelling keeps fixed
+      ratios (box depth to circle radius, 6- to 18-yard box), so a fit
+      that breaks them can ask for taps instead of being shown to
+      approve.
+      Risks: multi-sport turf (rec5, rec6) has other sports' lines on the
+      same two axes, so the orientation holds but there are more
+      labellings to tell apart; far ends too faint for the mask leave
+      only the near touchline, halfway line and circle, which is what
+      fit_pose's first stage uses today.
+      Cheaper fallback if this stalls: keep fit_pose and search the score
+      globally first. One paint_score takes milliseconds against ~2 s a
+      fit, so the 30 s that 15 fits take covers thousands of poses over
+      height, distance, rotation and tilt. Less start-dependent, but
+      still no check that the winner is right.
+      Measure: the 2026-11-10 start grid, as a `pitchbench.py` mode (it
+      was a throwaway script: nine panoramas, rec3, rec4, rec4cal and
+      rec7 with their pre-joint ones, rec5-game, rec6 and rec7 from the
+      app's 4-segment run; a fit is right when the worst of 7 key points
+      is within 1 deg of the checked fit). Today 5 of 9 are right. Done
+      when all nine are right with no start pose, and a wrong fit is
+      flagged rather than offered for approval.
 - [ ] Per-segment Secondary rotation in rendering: refine_lines already
       fits one per sampled segment, but every caller of setup_cameras
       (and game_stream across segment switches) uses one camera pair.

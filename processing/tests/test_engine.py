@@ -226,6 +226,27 @@ def test_ball_sets_hold_out_the_last_quarter_of_each_chunk(tmp_path, monkeypatch
     assert held == {"b100": False, "b500": True, "b700": False, "b1100": True}
 
 
+def test_goals_are_found_again_after_a_tap_refit(tmp_path, monkeypatch, capsys):
+    """Goals from before a refit are in the old pitch's metres (rec7 in the app: 13 m past the
+    tapped pitch's goal lines): the refit drops them and the goals step runs again."""
+    job = make_job(tmp_path)
+    pd = job.rec / "pitch"
+    pd.mkdir()
+    (pd / "review.json").write_text(json.dumps({"points": {"left corner flag": {"yaw": 1, "pitch": 2}}}))
+    (pd / "goals.json").write_text(json.dumps({"goals": [{"side": -1, "x": -64.0}]}))
+    calls = []
+
+    def fake_step(job_, name, args, *, done=None, uv_with=(), watch=None):
+        calls.append((name, args[1:], done is not None and done.exists()))
+        if name.startswith("goals"):
+            (pd / "goals.json").write_text(json.dumps({"goals": []}))
+    monkeypatch.setattr(engine, "step", fake_step)
+    st = job.state()
+    engine.apply_answers(job, st, {"pitch": {"round": 1, "points": {"left corner flag": {"yaw": 1.5, "pitch": 2.5}}}}, 0)
+    assert [(n, a[-1], had) for n, a, had in calls] == [("pitch-refit-1", "taps", False), ("goals-1", "goals", False)]
+    assert json.loads((pd / "goals.json").read_text()) == {"goals": []} and st["pitch"]["round"] == 2
+
+
 # ------------------------------------------------- no stitch: cameras question
 
 

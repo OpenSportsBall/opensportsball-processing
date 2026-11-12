@@ -660,6 +660,98 @@ def detect_goals(bg: np.ndarray, mask: np.ndarray, pano: Pano, pose: PitchPose):
     return goals, q
 
 
+def goals_in(goals: list[dict], found: PitchPose, pose: PitchPose) -> list[dict]:
+    """Goals found under the pose `found`, in `pose`'s pitch metres: each
+    stays where it was seen in the panorama (through its post bases).
+    detect_goals returns goals in its own corrected pose; when that pose
+    isn't kept (a goal was rejected), the goals must follow the pose that
+    is, or they are drawn metres off its goal lines (rec7 in the app: goals
+    at +-64 m from a discarded 128 m trial, on a 107 m pitch)."""
+    out = []
+    for g in goals:
+        bases = np.array([[g["x"], g["z"] - g["width"] / 2], [g["x"], g["z"] + g["width"] / 2]])
+        a = found.angles(bases)
+        nb = pose.to_pitch(a[:, 0], a[:, 1])
+        if np.isnan(nb).any():
+            out.append(dict(g))
+            continue
+        w = float(np.hypot(*(nb[1] - nb[0])))
+        out.append({**g, "x": round(float(nb[:, 0].mean()), 2), "z": round(float(nb[:, 1].mean()), 2),
+                    "width": round(w, 2), "height": round(g["height"] * w / g["width"], 2)})
+    return out
+
+
+TAPPED_GOAL_WIDTHS = (3.0, 7.6)  # searched from a tapped post: 9-a-side goals up to full-size
+TAPPED_GOAL_Z_M = 3.0            # with no post tapped, a goal's centre is within this of the goal line's middle
+POST_TAP_M = 0.3                 # a tapped post base may be this far along the goal line from the post
+# Goal widths as made (12, 16, 18, 21 and 24 ft). Seen from a touchline a goal's width is a few pixels
+# per 0.3 m (rec7: the frame fits within 0.5 px from 7.1 to 7.7 m), so a standard width this close to
+# the best fit is taken instead of it.
+STANDARD_GOAL_WIDTHS = (3.66, 4.88, 5.49, 6.40, 7.32)
+STANDARD_GOAL_PX = 0.5
+POST_TAP = "{e} near post base"  # pitchtap/server.py's name for a goal's tapped post
+
+
+def goals_on_lines(bg: np.ndarray, mask: np.ndarray, pano: Pano, pose: PitchPose, taps: dict) -> list[dict]:
+    """The goals of a pitch whose pose is settled (fitted with tapped
+    keypoints): each stands on its goal line, and the pose isn't refitted.
+    A tapped near post base fixes that post, and the width is the one whose
+    frame lies best on white structure; without a tap the goal's centre is
+    searched too. A tapped post whose frame can't be found (a dark or
+    cluttered end) still gives the goal: centred on the pitch, as goals are.
+    "from" says which: "tap+frame", "frame" or "tap"."""
+    from scipy.ndimage import map_coordinates
+
+    line_dt = cv2.distanceTransform((mask == 0).astype(np.uint8), cv2.DIST_L2, 5)
+    goal_dt = cv2.distanceTransform((white_structures(bg) == 0).astype(np.uint8), cv2.DIST_L2, 5)
+
+    def dist(dt, ang, trunc):
+        x, y = pano.to_px(ang[:, 0], ang[:, 1])
+        ok = (x >= 0) & (x < pano.w - 1) & (y >= 0) & (y < pano.h - 1)
+        d = np.full(len(x), float(trunc))
+        d[ok] = np.minimum(map_coordinates(dt, [y[ok], x[ok]], order=1), trunc)
+        return float(d.mean())
+
+    def height(w):
+        return GOAL_H * min(1.0, w / GOAL_W)
+
+    goals = []
+    for side, e in ((-1, "left"), (1, "right")):
+        x0 = side * pose.L / 2
+
+        def frame(z0, w):
+            return dist(goal_dt, pose.angles3(*goal_frame(x0, z0, w, height(w), step=0.2)), 8)
+
+        tap = taps.get(POST_TAP.format(e=e))
+        zp = None
+        if tap and not tap.get("skipped"):
+            zp = float(pose.to_pitch(np.array([tap["yaw"]]), np.array([tap["pitch"]]))[0, 1])
+            zp = None if np.isnan(zp) else zp
+        if zp is not None:
+            # The near post is the one at smaller z; the goal opens away from the camera.
+            posts = zp + np.arange(-POST_TAP_M, POST_TAP_M + 1e-6, 0.1)
+            widths = np.arange(TAPPED_GOAL_WIDTHS[0], TAPPED_GOAL_WIDTHS[1] + 1e-6, 0.1)
+            centres = lambda w: posts + w / 2  # noqa: E731
+        else:
+            widths = np.arange(GOAL_WIDTHS[0], GOAL_WIDTHS[1] + 1e-6, 0.1)
+            centres = lambda w: np.arange(-TAPPED_GOAL_Z_M, TAPPED_GOAL_Z_M + 1e-6, 0.1)  # noqa: E731
+        d, z0, w = min((frame(c, w), c, w) for w in widths for c in centres(w))
+        std = min((frame(c, w), c, w) for w in STANDARD_GOAL_WIDTHS if widths[0] - 0.05 <= w <= widths[-1] + 0.05
+                  for c in centres(w))
+        if std[0] <= d + STANDARD_GOAL_PX:
+            d, z0, w = std
+        found = d <= GOAL_MAX_DIST_PX
+        src = ("tap+frame" if zp is not None else "frame") if found else None
+        if not found and zp is not None and TAPPED_GOAL_WIDTHS[0] <= 2 * abs(zp) <= TAPPED_GOAL_WIDTHS[1] + 0.5:
+            z0, w, src = 0.0, 2 * abs(zp), "tap"
+            d = frame(z0, w)
+        goals.append({"side": side, "x": round(x0, 2), "z": round(float(z0), 2), "width": round(float(w), 2),
+                      "height": round(height(w), 2), "valid": src is not None,
+                      "endLinesPx": round(dist(line_dt, pose.angles(end_markings(side, pose.L, pose.k)), 12), 2),
+                      "frameToWhitePx": round(d, 2), **({"from": src} if src else {})})
+    return goals
+
+
 GOAL_WEIGHT = 3.0  # goal-frame residuals count this much more than line points
 
 
@@ -752,32 +844,44 @@ def draw_map(bg: np.ndarray, pano: Pano, pose: PitchPose, goals: list[dict]) -> 
 
 
 def goals_main(rec: Path) -> None:
-    """Detect the on-pitch goals once per game and correct the pitch map with
-    them (needs a normal run first). Writes pitch/goals.json, goals.jpg and
-    an updated pitch.json (the lines-only fit is kept as pitch_lines_only.json)."""
+    """Find the on-pitch goals for the current pitch map. Writes
+    pitch/goals.json (always in pitch.json's metres), goals.jpg and map.jpg.
+
+    A map from lines alone (needs a normal run first) is corrected with the
+    goals when both are found: pitch.json is updated and the lines-only fit
+    kept as pitch_lines_only.json. A map fitted with tapped keypoints is
+    left as it is and the goals are found on its goal lines
+    (goals_on_lines): run this again after every refit, since goals from
+    before it are in the old map's metres."""
     out = rec / "pitch"
     pano = Pano()
     bg = cv2.imread(str(out / "background.png"))
-    base = out / "pitch_lines_only.json"
-    if not base.exists():
-        base.write_text((out / "pitch.json").read_text())
-    j = json.loads(base.read_text())
-    pose = PitchPose([*j["cameraXZ"], j["heightM"], j["rotRad"], *j["tiltRad"], j["lengthM"], j["widthM"],
-                      j["markingScale"], *j.get("warpDeg", [0.0, 0.0])])
-    goals, q = detect_goals(bg, line_mask(bg, paint_colour(rec)), pano, pose)
+    mask = line_mask(bg, paint_colour(rec))
+    cur = json.loads((out / "pitch.json").read_text())
+    if cur.get("fittedWith", "").endswith("taps"):
+        pose = q = pose_from_json(cur)
+        taps_path = out / "taps.json"
+        goals = goals_on_lines(bg, mask, pano, pose, json.loads(taps_path.read_text()) if taps_path.exists() else {})
+        corrected = False
+    else:
+        base = out / "pitch_lines_only.json"
+        if cur.get("fittedWith") != "lines+goals" or not base.exists():
+            base.write_text(json.dumps(cur, indent=1))  # a new lines fit: an older one's copy is stale
+        pose = pose_from_json(json.loads(base.read_text()))
+        goals, q = detect_goals(bg, mask, pano, pose)
+        corrected = all(g["valid"] for g in goals)
+        if not corrected:
+            goals, q = goals_in(goals, q, pose), pose  # the lines fit is kept: the goals in its metres
     for g in goals:
         print(f"{'left ' if g['side'] < 0 else 'right'} goal: {'valid' if g['valid'] else 'REJECTED'}; "
-              f"{g['width']} x {g['height']} m; end markings {g['endLinesPx']} px from paint,"
-              f" frame {g['frameToWhitePx']} px from white")
+              f"{g['width']} x {g['height']} m at x {g['x']}, z {g['z']}; end markings {g['endLinesPx']} px from paint,"
+              f" frame {g['frameToWhitePx']} px from white{' (' + g['from'] + ')' if g.get('from') else ''}")
     draw_goals(bg, pano, q, goals, out / "goals.jpg")
     (out / "goals.json").write_text(json.dumps({"goals": goals}, indent=1))
-    if all(g["valid"] for g in goals):
+    if corrected:
         print(f"pitch map corrected: {pose.L:.1f} x {pose.W:.1f} -> {q.L:.1f} x {q.W:.1f} m,"
               f" camera {pose.h:.2f} -> {q.h:.2f} m up")
-        (out / "pitch.json").write_text(json.dumps({
-            "cameraXZ": [q.cx, q.cz], "heightM": q.h, "rotRad": q.rot, "tiltRad": [q.tx, q.tz],
-            "lengthM": q.L, "widthM": q.W, "markingScale": q.k, "warpDeg": q.warp_json(),
-            "fittedWith": "lines+goals"}, indent=1))
+        (out / "pitch.json").write_text(json.dumps({**pose_json(q), "fittedWith": "lines+goals"}, indent=1))
         cv2.imwrite(str(out / "overlay_goals.jpg"), cv2.resize(draw(bg, pano, q), (pano.w // 3, pano.h // 3)))
     cv2.imwrite(str(out / "map.jpg"), cv2.resize(draw_map(bg, pano, q, goals), (pano.w // 2, pano.h // 2)),
                 [cv2.IMWRITE_JPEG_QUALITY, 90])
@@ -899,7 +1003,9 @@ def review_main(rec: Path) -> None:
                        "widthM": g["width"], "heightM": g["height"], "deg": np.round(a, 3).tolist()})
     targets = dict(tap_targets(pose))
     for g in goals:
-        targets[f"{'left' if g['side'] < 0 else 'right'} near post base"] = (g["x"], g["z"] - g["width"] / 2)
+        # A rejected goal isn't where a goal is: its post starts where a full-size goal's would be.
+        targets[POST_TAP.format(e="left" if g["side"] < 0 else "right")] = \
+            (g["x"], g["z"] - g["width"] / 2) if g["valid"] else (g["side"] * pose.L / 2, -GOAL_W / 2)
     names = list(targets)
     a = pose.angles(np.array([targets[n] for n in names]))
     fit = {n: {"yaw": round(float(y), 3), "pitch": round(float(p), 3)} for n, (y, p) in zip(names, a)}
@@ -922,17 +1028,25 @@ def load_goals(rec: Path):
 # Starting guess for the night game (hand-read; see main). Kept here so the
 # regression fixture reproduces the same fit.
 START_POSE = [0.0, -31.5, 1.9, float(np.radians(-4)), 0.0, 0.0, 100.0, 59.0, 1.0, 0.0, 0.0]
-# Camera heights main tries START_POSE at when no start is given: the fit
-# only converges from a start near the true height (rec7, 6.5 m up, ran
-# off from 1.9 m), and each fit takes about a second.
-START_HEIGHTS = (1.9, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0)
+# Camera heights main tries START_POSE at when no start is given. The fit
+# only converges from a start near the true height, and "near" is narrow
+# and uneven: on rec7's panorama from the app (camera 6.4 m up) the starts
+# at 5.0 and 6.0 m both ran off and only 5.5 m found the pitch, so with
+# whole metres the 10 m start's wrong fit won (106.7 x 63.9 m, the far
+# touchline drawn through the middle of the pitch). Half metres through the
+# heights mounts are at; quarter metres found nothing more on nine panoramas
+# (rec3-rec7), and other camera distances only added wrong fits that score
+# well. Each fit takes a few seconds.
+START_HEIGHTS = (1.9, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0, 7.5, 8.0, 9.0, 10.0)
 
 
 def best_start(bg: np.ndarray, pano: Pano, paint: str) -> list[float]:
     """START_POSE at the height in START_HEIGHTS whose lines-only fit lies
     best on the paint (paint_score), among fits of a plausible size. On
     rec7 the 6 m start won by +0.39 to +0.16; on rec6 the 4 m one, closer to
-    its tapped fit than the 1.9 m default."""
+    its tapped fit than the 1.9 m default. The score ranks one panorama's
+    fits; it doesn't say a fit is right (wrong fits have scored 0.45-0.56,
+    right ones 0.40-0.62), so the pitch check still decides."""
     mask = line_mask(bg, "white" if paint == "auto" else paint)
     field = turf(bg, hue_min=20)
     best = None
@@ -970,7 +1084,9 @@ def map_pitch(bg: np.ndarray, start: list[float]):
     mask = line_mask(bg)
     lines = fit_pose(mask, pano, start)
     goals, corrected = detect_goals(bg, mask, pano, lines)
-    return lines, goals, corrected if all(g["valid"] for g in goals) else lines
+    if all(g["valid"] for g in goals):
+        return lines, goals, corrected
+    return lines, goals_in(goals, corrected, lines), lines
 
 
 def key_points(pose: PitchPose, goals: list[dict]) -> dict:
