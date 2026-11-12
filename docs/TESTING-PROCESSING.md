@@ -47,6 +47,18 @@ painted into an empty panorama:
 
     cd processing && uv run --extra dev pytest tests/test_pitch_goals.py
 
+A Secondary with only part of the game (it stopped early, started late, or
+has a hole) is tested the same way, on made-up recordings
+(`tests/test_secondary_gaps.py`): what the sync's report says Secondary
+covers, the blank frames the readers get where it has nothing (and exactly
+as many frames as Main's), the view staying inside Main's frame there,
+corners included, and the engine fitting the pitch on a segment both
+phones have. On footage: cut a recording's manifest so Secondary's later
+files are gone and run `phase0.py`, then `fullgame.py --start` across the
+point where it ends.
+
+    cd processing && uv run --extra dev pytest tests/test_secondary_gaps.py
+
 How close a joint fit puts the taps is measured on taps it wasn't given
 (the fit's own taps flatter it); on a recording whose joint fit is adopted,
 start from the files it replaced:
@@ -516,7 +528,10 @@ the file formats are `schemas/engine-*.schema.json`.
 | Store labels (also as `labels.json` / `boxes.json` for the benches) | `uv run processing/spikes/engine.py label job.json --answers labels.json` |
 | List what the user agreed to share | `uv run processing/spikes/engine.py share job.json` |
 
-A job is `{"schemaVersion": 1, "recording": "<folder>", "output": {"height": 1440}}`;
+A job is `{"schemaVersion": 1, "recording": "<folder>", "output": {"height": 1440}}`
+(`"output": {"height": 1080, "youtubeCopy": true}` keeps `game.mp4` as the
+1080p render and writes the 1440p upload beside it as `game-youtube.mp4`,
++~25 GB in the disk check; on a finished game `run` makes just the copy);
 `"options": {"maxChunks": 1}` renders only the first chunk, for a quick
 check. The questions are in `<recording>/engine/questions.json` with the
 crops and overlay images beside them; answers carry the question's

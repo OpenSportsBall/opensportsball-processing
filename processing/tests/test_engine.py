@@ -431,6 +431,104 @@ def test_cleanup_after_a_checked_game(tmp_path, monkeypatch, capsys, length, kee
     assert ev[-1]["step"] == "cleanup" and ev[-1]["freedBytes"] == (0 if keep else 300)
 
 
+def test_the_youtube_copy_is_counted_in_the_disk_check(tmp_path, monkeypatch):
+    job = footage_job(tmp_path, segs=10)
+    monkeypatch.setattr(engine, "game_seconds", lambda j: 6000.0)
+    job.height = 1080
+    need = engine.disk_needed(job)               # pieces 12 + video.mp4 12 + game.mp4 12 GB
+    job.youtube_copy = True
+    copy = 5999 * engine.GAME_BPS[1440]          # ~25 GB (the last chunk stops 1 s short)
+    assert engine.disk_needed(job) == pytest.approx(need + copy)
+    out = job.rec / "fullgame"
+    out.mkdir()
+    (out / "game.mp4").write_bytes(b"x")
+    (out / "done.json").write_text("{}")         # the game is done: only the copy is still to be written
+    assert engine.disk_needed(job) == pytest.approx(copy)
+    (out / "game-youtube.mp4").write_bytes(b"x")
+    (out / "done.json").write_text(json.dumps({"youtube": "game-youtube.mp4"}))
+    assert engine.disk_needed(job) == 0
+
+
+def test_a_1440p_game_needs_no_youtube_copy(tmp_path):
+    job = make_job(tmp_path)
+    for height, wanted in ((1080, True), (1440, False)):
+        (tmp_path / "job.json").write_text(json.dumps({"schemaVersion": 1, "recording": "rec",
+                                                       "output": {"height": height, "youtubeCopy": True}}))
+        assert engine.Job(tmp_path / "job.json").youtube_copy == wanted
+    assert not job.youtube_copy and engine.youtube_copy(job, job.rec / "fullgame" / "game.mp4") == {}
+
+
+@pytest.mark.skipif(__import__("shutil").which(engine.accel.ffmpeg()) is None, reason="needs ffmpeg")
+def test_the_youtube_copy_of_a_finished_game(tmp_path, monkeypatch, capsys):
+    """With ffmpeg itself: game.mp4 stays, game-youtube.mp4 is 1440p with the audio, and a rerun
+    of a finished game makes only the copy, once."""
+    import subprocess
+
+    job = make_job(tmp_path)
+    job.height, job.youtube_copy = 1080, True
+    monkeypatch.setattr(engine, "game_seconds", lambda j: 2.0)
+    out = job.rec / "fullgame"
+    out.mkdir()
+    game = out / "game.mp4"
+    subprocess.run([engine.accel.ffmpeg(), "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=30",
+                    "-f", "lavfi", "-i", "sine=frequency=440", "-t", "2", "-c:v", "libx264", "-preset", "ultrafast",
+                    "-pix_fmt", "yuv420p", "-c:a", "aac", str(game)], check=True)
+    before = game.read_bytes()
+    (out / "done.json").write_text(json.dumps({"output": "game.mp4", "seconds": 5}))
+    assert engine.youtube_made(job) is None and "YouTube copy" in engine.next_step(job, None)
+    got = engine.youtube_copy(job, game)
+    copy = out / "game-youtube.mp4"
+    assert got == {"youtubeOutput": str(copy)} and engine.youtube_made(job) == copy
+    probe = subprocess.run([engine.accel.ffprobe(), "-v", "error", "-show_entries", "stream=codec_type,width,height",
+                            "-of", "json", str(copy)], capture_output=True, text=True, check=True)
+    streams = {s["codec_type"]: s for s in json.loads(probe.stdout)["streams"]}
+    assert (streams["video"]["width"], streams["video"]["height"]) == (2560, 1440) and "audio" in streams
+    assert game.read_bytes() == before and not (out / "game-youtube.part.mp4").exists()
+    d = json.loads((out / "done.json").read_text())
+    assert d["youtube"] == "game-youtube.mp4" and d["youtubeBytes"] == copy.stat().st_size and d["seconds"] == 5
+    assert engine.next_step(job, None).startswith("done")
+    capsys.readouterr()
+    st = job.state()
+    st["pitch"]["status"] = "approved"
+    st["kits"]["status"] = "answered"
+    job.save_state(st)
+    (job.dir / "questions.json").write_text("{}")
+    monkeypatch.setattr(engine, "check_footage", lambda j: {})
+    monkeypatch.setattr(engine, "step", lambda *a, **k: (_ for _ in ()).throw(AssertionError("rendered again")))
+    assert engine.run(job, None) == engine.EXIT_OK
+    ev = [json.loads(l) for l in capsys.readouterr().out.splitlines()]
+    for e in ev:
+        engine.validate(e, "engine-event.schema.json", "event")
+    assert ev[-1]["event"] == "done" and ev[-1]["youtubeOutput"] == str(copy)
+    assert {"step": "youtube", "status": "skipped"}.items() <= ev[-2].items()
+
+
+def test_a_youtube_copy_that_fails_keeps_the_game(tmp_path, monkeypatch, capsys):
+    job = make_job(tmp_path)
+    job.height, job.youtube_copy = 1080, True
+    monkeypatch.setattr(engine, "game_seconds", lambda j: 2.0)
+    out = job.rec / "fullgame"
+    out.mkdir()
+    (out / "game.mp4").write_bytes(b"not a video")
+    (out / "done.json").write_text(json.dumps({"output": "game.mp4"}))
+    with pytest.raises(engine.Failed) as e:
+        engine.youtube_copy(job, out / "game.mp4")
+    assert e.value.code == "youtube_copy_failed" and (out / "game.mp4").exists()
+    assert not (out / "game-youtube.mp4").exists() and "youtube" not in json.loads((out / "done.json").read_text())
+
+
+def test_a_game_that_is_1440p_already_is_its_own_youtube_copy(tmp_path, monkeypatch):
+    job = make_job(tmp_path)
+    job.height, job.youtube_copy = 1080, True    # asked for after game.mp4 was made at 1440p
+    out = job.rec / "fullgame"
+    out.mkdir()
+    (out / "game.mp4").write_bytes(b"x")
+    (out / "done.json").write_text(json.dumps({"output": "game.mp4"}))
+    monkeypatch.setattr(engine, "video_height", lambda p: 1440)
+    assert engine.youtube_copy(job, out / "game.mp4") == {"youtubeOutput": str(out / "game.mp4")}
+    assert engine.youtube_made(job) == out / "game.mp4" and not (out / "game-youtube.mp4").exists()
+
+
 def test_a_finished_game_isnt_rendered_again(tmp_path, monkeypatch, capsys):
     job = footage_job(tmp_path)
     st = job.state()

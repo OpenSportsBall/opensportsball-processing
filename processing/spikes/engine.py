@@ -8,7 +8,7 @@
 """osb-engine: one game from footage to game.mp4, driven through files, for
 the Mac app, the cloud job and a terminal alike.
 
-    uv run processing/spikes/engine.py prepare job.json [--answers answers.json]
+    uv run processing/spikes/engine.py prepare job.json [--answers answers.json [--no-footage]]
     uv run processing/spikes/engine.py run     job.json --answers answers.json
     uv run processing/spikes/engine.py status  job.json
     uv run processing/spikes/engine.py questions job.json
@@ -39,7 +39,9 @@ be approved. Given answers
 points are refitted (pitch.py taps) and asked again; a split kit group
 regroups with more components and is asked again (once); merges and
 keeper / not-a-kit marks rewrite the sides roles.py uses. Run it until
-questions.json has nothing pending.
+questions.json has nothing pending. Applying answers reads the pictures
+the first prepare left, not the video, so --no-footage does it without
+the segment files on disk (the cloud job, cloud.py).
 
 run: the whole game (fullgame.py: ball, roles and follow in chunks), once
 every question is answered. Writes <recording>/fullgame/game.mp4. It first
@@ -50,6 +52,14 @@ written and as long as the game, it deletes the pieces, video.mp4 and
 audio.m4a (job option keepIntermediates keeps them) and writes
 fullgame/done.json, so a rerun reports the game done instead of
 rendering it again.
+
+With the job's output.youtubeCopy (and height 1080), run then also writes
+fullgame/game-youtube.mp4: game.mp4 scaled up to 1440p, which YouTube
+serves with VP9 and a much higher bitrate than a 1080p upload (FINDINGS.md;
+no detail is added). game.mp4 stays the 1080p render, half the size, to
+keep and to play. The copy takes ~26 min and ~23 GB for 100 minutes, is
+counted in the disk check, and is made from game.mp4 alone: asking for it
+after the game is done makes just the copy.
 
 prepare and run check every segment file against the manifest's size and
 SHA-256 (footage_corrupt: download it again); a file is hashed once, then
@@ -145,6 +155,8 @@ HEARTBEAT_S = 60.0
 KNOWN_FAILURES = [
     ("calibration failed", "calibration_failed",
      "the two phones' views couldn't be matched to stitch them (too little overlap, or one view soft)"),
+    ("footage doesn't overlap in time", "no_overlap",
+     "the two phones' footage doesn't overlap in time: the second phone has nothing from while the main one filmed"),
 ]
 RANDOM_MOMENT_GAP_S = 20.0    # random must-see moments: at least this far from the others
 BALL_SET_COUNT = 50           # frames in a ball label set
@@ -155,6 +167,9 @@ BALL_SET_COUNT = 50           # frames in a ball label set
 BALL_LOW_SHARE = 0.10
 PIECE_BPS = 16e6 / 8          # follow.py's pieces: 16 Mbit/s (measured ~14.7 on rec7: 11 GB for 100 min)
 GAME_BPS = {1080: PIECE_BPS, 1440: 33e6 / 8}  # game.mp4: fullgame asks 45 Mbit/s, hardware gives ~2/3 (rec7: ~31)
+YOUTUBE_H = 1440              # the YouTube copy: the least height YouTube serves as VP9 at its higher bitrate
+YOUTUBE_NAME = "game-youtube.mp4"
+YOUTUBE_BITRATE = "45M"       # as fullgame.UPLOAD_BITRATE: hardware H.264 lands at ~2/3 of it
 DISK_MARGIN = 3e9             # free space kept beyond the estimate (logs, caches, the OS)
 LENGTH_TOLERANCE = 0.02       # game.mp4 within 2% of the rendered chunks before the intermediates go
 HELD_OUT_SHARE = 0.25         # ball sets: the last quarter of every chunk is held out for testing (holdout.py)
@@ -202,6 +217,8 @@ class Job:
         self.rec = rec if rec.is_absolute() else (path.parent / rec).resolve()
         o = j.get("options", {})
         self.height = j.get("output", {}).get("height", 1440)
+        # A 1440p game.mp4 is the YouTube file already: no second one then.
+        self.youtube_copy = bool(j.get("output", {}).get("youtubeCopy", False)) and self.height < YOUTUBE_H
         self.chunk_s = float(o.get("chunkS", 600))
         self.max_chunks = int(o.get("maxChunks", 0))
         self.sample = o.get("sample")       # {"segment", "startS", "seconds"}: where pitch and kits are fitted
@@ -355,28 +372,59 @@ def verify_footage(job: Job, m: dict) -> None:
     emit("step", step="verify-footage", status="done", seconds=round(time.time() - t0, 1), files=len(todo))
 
 
+def covered_segments(job: Job, m: dict) -> list[int] | None:
+    """Main's segments the second phone has all of, from the sync's report
+    (phase0.py's secondaryCoverage; phase0.covered_segments). None when the
+    report doesn't say: every segment then."""
+    report = job.rec / "phase0" / "report.json"
+    spans = json.loads(report.read_text()).get("secondaryCoverage") if report.exists() else None
+    if spans is None:
+        return None
+    out, g = [], 0.0
+    for k, sg in enumerate(next(d for d in m["devices"] if d["role"] == "main")["segments"]):
+        dur = sg["durationMs"] / 1000
+        if any(a <= g + 2.0 and b >= g + dur - 2.0 for a, b in spans):
+            out.append(k)
+        g += dur
+    return out
+
+
 def sample_clip(job: Job, m: dict) -> tuple[int, float, float]:
     """Where the pitch and the kits are fitted: the job's choice, else a
     quarter of the way into the recording (the warm-up is over, the light
-    hasn't changed much), 2 minutes from 1 minute into that segment."""
+    hasn't changed much), 2 minutes from 1 minute into that segment. When
+    the second phone stopped early (or started late), the nearest segment
+    to that which has both phones: the pitch is fitted on both views."""
     if job.sample:
         return int(job.sample["segment"]), float(job.sample["startS"]), float(job.sample["seconds"])
     main = next(d for d in m["devices"] if d["role"] == "main")
     n = len(main["segments"])
     seg = min(n - 1, max(0, n // 4))
+    covered = covered_segments(job, m)
+    if covered:
+        seg = min(covered, key=lambda k: abs(k - seg))
     dur = main["segments"][seg]["durationMs"] / 1000
     start = min(60.0, max(0.0, dur - 130.0))
     return seg, start, 120.0
 
 
-def prepare(job: Job, answers: dict | None) -> int:
-    m = check_footage(job)
+def prepare(job: Job, answers: dict | None, footage: bool = True) -> int:
+    if footage:
+        m = check_footage(job)
+    else:
+        # Applying answers reads the pictures an earlier prepare left (the
+        # background, the kit sample), not the video: the cloud job does it
+        # without fetching the footage again. A step that does want the
+        # video fails as it would with a file missing.
+        if not answers or not (job.dir / "questions.json").exists():
+            raise Failed("bad_job", "--no-footage is for applying answers after a prepare", exit_code=EXIT_BAD_INPUT)
+        m = job.manifest()
     st = job.state()
-    seg, start, secs = sample_clip(job, m)
     rec = str(job.rec)
     if answers:
         validate(answers, "engine-answers.schema.json", "answers")
     step(job, "sync", ["phase0.py", rec], done=job.rec / "phase0" / "report.json")
+    seg, start, secs = sample_clip(job, m)  # after the sync: it says where both phones have footage
     pitch_dir = job.rec / "pitch"
     if answers and answers.get("cameras"):
         apply_cameras(job, st, answers["cameras"])
@@ -867,6 +915,8 @@ def next_step(job: Job, st: dict | None) -> str:
     """What to do next, for status and the briefs."""
     job_arg = "<job>"
     if (job.rec / "fullgame" / "game.mp4").exists() and (job.rec / "fullgame" / "done.json").exists():
+        if job.youtube_copy and youtube_made(job) is None:
+            return f"osb-engine run {job_arg} (the game video is written; this makes its YouTube copy, about half an hour)"
         return "done: the game video is written"
     if not (job.dir / "questions.json").exists():
         return f"osb-engine prepare {job_arg}"
@@ -1073,7 +1123,8 @@ def run(job: Job, answers: dict | None) -> int:
     if done_mark.exists() and (out / "game.mp4").exists():
         d = json.loads(done_mark.read_text())
         emit("step", step="game", status="skipped")
-        emit("done", output=str(out / "game.mp4"), seconds=d.get("seconds", 0), **ball_share(job))
+        yt = youtube_copy(job, out / "game.mp4")
+        emit("done", output=str(out / "game.mp4"), **yt, seconds=d.get("seconds", 0), **ball_share(job))
         return EXIT_OK
     check_disk(job)
     events = job.dir / "events.jsonl"
@@ -1151,7 +1202,8 @@ def run(job: Job, answers: dict | None) -> int:
     watch(None)
     secs = round(time.time() - prog["start"], 1)
     finish_output(job, game, secs)
-    emit("done", output=str(game), seconds=secs, **ball_share(job))
+    yt = youtube_copy(job, game)
+    emit("done", output=str(game), **yt, seconds=round(time.time() - prog["start"], 1), **ball_share(job))
     return EXIT_OK
 
 
@@ -1167,13 +1219,17 @@ def planned_chunks(job: Job) -> list[float]:
 
 def disk_needed(job: Job) -> float:
     """Bytes run still has to write: the pieces not made yet, their join (video.mp4) and game.mp4,
-    all on disk together at the end."""
+    all on disk together at the end, and the YouTube copy if the job asks for one. For a finished
+    game, only a copy that is still to be made."""
     chunks = planned_chunks(job)
+    copy = sum(chunks) * GAME_BPS[YOUTUBE_H] if job.youtube_copy and youtube_made(job) is None else 0.0
+    if (job.rec / "fullgame" / "done.json").exists() and (job.rec / "fullgame" / "game.mp4").exists():
+        return copy
     pieces = job.rec / "fullgame" / "pieces"
     todo = sum(sec for k, sec in enumerate(chunks) if not (pieces / f"piece_{k:02d}.mp4").exists())
     total = sum(chunks)
     game_bps = GAME_BPS.get(job.height, GAME_BPS[1440])
-    return todo * PIECE_BPS + total * PIECE_BPS + total * game_bps
+    return todo * PIECE_BPS + total * PIECE_BPS + total * game_bps + copy
 
 
 def check_disk(job: Job) -> None:
@@ -1191,6 +1247,15 @@ def video_seconds(path: Path) -> float | None:
         r = subprocess.run([accel.ffprobe(), "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
                            capture_output=True, text=True, timeout=60)
         return float(r.stdout.strip())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def video_height(path: Path) -> int | None:
+    try:
+        r = subprocess.run([accel.ffprobe(), "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=height",
+                            "-of", "csv=p=0", str(path)], capture_output=True, text=True, timeout=60)
+        return int(r.stdout.strip().split(",")[0])
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
 
@@ -1610,6 +1675,74 @@ def share(job: Job, kinds: list[str]) -> int:
     return EXIT_OK
 
 
+def youtube_made(job: Job) -> Path | None:
+    """The finished YouTube copy, if there is one (done.json names it once it is checked)."""
+    out = job.rec / "fullgame"
+    try:
+        named = json.loads((out / "done.json").read_text()).get("youtube")
+    except (OSError, json.JSONDecodeError):
+        return None
+    return out / named if named and (out / named).exists() else None
+
+
+def youtube_copy(job: Job, game: Path) -> dict:
+    """The job's YouTube copy of a finished game.mp4, made now if it isn't there yet: scaled up to
+    1440p, the audio as it is. {"youtubeOutput": its path} for the done event; {} when the job
+    asks for none. Written under another name first, so a stopped copy is never taken for one.
+    A game.mp4 that is 1440p already (made before the job asked for 1080p) is itself that file."""
+    global _current
+    if not job.youtube_copy:
+        return {}
+    made = youtube_made(job)
+    if made is not None:
+        emit("step", step="youtube", status="skipped")
+        return {"youtubeOutput": str(made)}
+    if _stopping.is_set():
+        raise Stop()
+    done_mark = game.with_name("done.json")
+    if (video_height(game) or 0) >= YOUTUBE_H:
+        done_mark.write_text(json.dumps({**json.loads(done_mark.read_text()), "youtube": game.name}, indent=1))
+        emit("step", step="youtube", status="skipped")
+        return {"youtubeOutput": str(game)}
+    check_disk(job)
+    copy, part = game.with_name(YOUTUBE_NAME), game.with_name("game-youtube.part.mp4")
+    job.logs.mkdir(parents=True, exist_ok=True)
+    log = job.logs / "youtube.log"
+    cmd = [accel.ffmpeg(), "-v", "error", "-y", "-i", str(game),
+           "-vf", f"scale={YOUTUBE_H * 16 // 9}:{YOUTUBE_H}:flags=lanczos",
+           *accel.h264_args(YOUTUBE_BITRATE, YOUTUBE_BITRATE), "-profile:v", "high", "-pix_fmt", "yuv420p",
+           "-c:a", "copy", "-movflags", "+faststart", str(part)]
+    emit("step", step="youtube", status="started", log=str(log))
+    t0 = time.time()
+    with log.open("a") as f:
+        f.write(f"\n$ {' '.join(cmd)}\n")
+        f.flush()
+        try:
+            _current = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
+        except OSError as e:  # no ffmpeg to run
+            f.write(f"{e}\n")
+            rc = None
+        else:
+            while _current.poll() is None:
+                time.sleep(2)
+            rc = _current.returncode
+            _current = None
+    if _stopping.is_set():
+        raise Stop()
+    want, got = video_seconds(game), video_seconds(part) if rc == 0 else None
+    if got is None or want is None or abs(got - want) > LENGTH_TOLERANCE * want:
+        raise Failed("youtube_copy_failed", f"the YouTube copy wasn't made (ffmpeg exit {rc}, "
+                     f"{got if got is None else round(got)} s of {want if want is None else round(want)} s); "
+                     f"game.mp4 is finished and kept: run again for the copy alone", log)
+    part.replace(copy)
+    d = json.loads(done_mark.read_text())
+    d.update(youtube=YOUTUBE_NAME, youtubeBytes=copy.stat().st_size, youtubeHeight=YOUTUBE_H,
+             youtubeSeconds=round(time.time() - t0, 1))
+    done_mark.write_text(json.dumps(d, indent=1))
+    emit("step", step="youtube", status="done", seconds=round(time.time() - t0, 1))
+    return {"youtubeOutput": str(copy)}
+
+
 def status(job: Job) -> int:
     st = job.state() if job.state_path.exists() else None
     out = job.rec / "fullgame"
@@ -1617,6 +1750,7 @@ def status(job: Job) -> int:
     emit("status", prepared=(job.dir / "questions.json").exists(),
          pending=pending_questions(st),
          pieces=len(pieces), output=str(out / "game.mp4") if (out / "game.mp4").exists() else None,
+         youtubeOutput=(lambda y: str(y) if y else None)(youtube_made(job)),
          **ball_share(job, final=(out / "done.json").exists()), chunkDetails=chunk_details(job),
          next=next_step(job, st))
     return EXIT_OK
@@ -1628,6 +1762,8 @@ def main() -> int:
     ap.add_argument("job", type=Path)
     ap.add_argument("what", nargs="?", help="label: ball or moments; answer: cameras, pitch or kits")
     ap.add_argument("--answers", type=Path)
+    ap.add_argument("--no-footage", dest="footage", action="store_false",
+                    help="prepare --answers: apply the answers without the segment files on disk")
     ap.add_argument("--count", type=int, default=BALL_SET_COUNT, help="label ball: frames in the set")
     ap.add_argument("--at", default="", help="label moments: seconds into game.mp4 where the user pressed Missed play")
     ap.add_argument("--random", type=int, default=3, help="label moments: random moments added")
@@ -1679,7 +1815,7 @@ def main() -> int:
         if a.command == "share":
             return share(job, [k.strip() for k in a.kinds.split(",") if k.strip()])
         if a.command == "prepare":
-            return prepare(job, answers)
+            return prepare(job, answers, a.footage)
         if a.command == "run":
             return run(job, answers)
         return status(job)

@@ -29,6 +29,11 @@
           ],
           "default": 1440,
           "description": "game.mp4's height. 1440 scales the 1080p render up, which YouTube serves with a better codec and bitrate."
+        },
+        "youtubeCopy": {
+          "type": "boolean",
+          "default": false,
+          "description": "With height 1080: also write game-youtube.mp4 beside game.mp4, the same video scaled up to 1440p. YouTube serves a 1440p upload with a better codec and a much higher bitrate than a 1080p one; game.mp4 stays the smaller file to keep and play. About half an hour and 23 GB more for 100 minutes. Ignored at height 1440, where game.mp4 is that file."
         }
       }
     },

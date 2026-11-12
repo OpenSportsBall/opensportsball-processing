@@ -81,11 +81,16 @@ def main(rec: Path, seg: int, start: float, seconds: float, tset: str, fps: floa
     streams = [follow.prefetch(follow.game_stream(rec, devs, report, ph, seg, start, seconds, W, fps=fps))
                for ph in (0, 1)]
     frames_out, t0, t_det = [], time.time(), 0.0
+    # Where Secondary has no footage (it stopped early) its frames are blank: Main's people alone.
+    missing = phase0.secondary_missing(manifest, report, phase0.game_start(manifest, seg) + start,
+                                       int(round(seconds * fps)) + 1, fps)
     from collections import Counter
     tally = Counter()
     for i, (fa, fb) in enumerate(zip(*streams)):
         people = []
         for phone, (buf, fl) in enumerate(((fa, flip[0]), (fb, flip[1]))):
+            if phone == 1 and missing[min(i, len(missing) - 1)]:
+                continue
             bgr = cv2.cvtColor(np.asarray(buf).reshape(H * 3 // 2, W), cv2.COLOR_YUV2BGR_NV12)
             if fl:
                 bgr = cv2.rotate(bgr, cv2.ROTATE_180)

@@ -72,6 +72,34 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         rec5 matches the hand-built rec5-game (offsets within 0.02 ms,
         frames across a switch identical); rec2-rec4 pair as before
         (7cfd1f2).
+      - A Secondary that stopped early (the game of 2026-11-11: Pixel 11
+        Main 99.5 min in 21 segments, iPhone Secondary 44.9 min in 9
+        files; 2026-11-12). phase0.py paired every later Main segment
+        with Secondary's last file and died asking it for a frame past
+        its end (the mount check: `IndexError` in `frames_at(...)[0]`),
+        so `prepare` failed at the sync; past that, game_stream repeated
+        Secondary's last frame for the rest of the game, which the
+        detectors and the render would have taken as live. Now a Main
+        segment with under 10 s of Secondary (or under 30 s that doesn't
+        lock) is placed from the stamps and not synced, one with none is
+        marked `noSecondary`, the report gives `secondaryCoverage` (the
+        stretches of the game Secondary has; gaps up to 2 s count as
+        covered, as readers hold a frame across them), and the stitch,
+        the camera refinement, the exposure match and the engine's pitch
+        and kit sample use segments that have both phones. Where
+        Secondary has nothing, game_stream gives blank frames, ballwin
+        and roles search Main alone, and follow.py renders Main alone:
+        the seam goes to Secondary's far side, blobs count only where
+        Main sees, the background is relearnt for 2 s when half the
+        panorama changes, and the view stays inside Main's frame
+        (corners included). Play on Secondary's side is then not in the
+        video: nothing filmed it. Tried on the 2026-11-04 game (Pixel +
+        iPhone) with Secondary cut to its first two files: sync,
+        cameras, and two 60 s chunks across the end of its footage
+        render with no frozen or black half. Not yet run on a whole game
+        with a gap, and the app doesn't say that part of the game is
+        Main alone. A phones' footage that never overlaps fails as
+        `no_overlap`.
       - The stitcher failed on rec5: 0/8 pairs over the game, 1/8 on
         segments 7, 12 and 17 (focal 415/449 px, 72.8 deg apart), with
         overlap features in 3 of 20 segments. The phones overlap on a

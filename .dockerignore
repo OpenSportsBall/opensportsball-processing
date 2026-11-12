@@ -1,0 +1,6 @@
+# The cloud image copies what it needs by name (packaging/cloud/Dockerfile).
+footage
+datasets
+.git
+**/__pycache__
+**/.venv
