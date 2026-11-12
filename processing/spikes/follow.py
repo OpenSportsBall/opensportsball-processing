@@ -348,6 +348,9 @@ def line_errors(cm: Camera, cs: Camera, d: LineData) -> tuple[np.ndarray, np.nda
     a, b = cm.at(SRC_W), cs.at(SRC_W)
     out = []
     for src, dst, pts, dt in ((a, b, d.pm, d.dts), (b, a, d.ps, d.dtm)):
+        if not len(pts):  # no paint found in this phone (a dark stretch): remap refuses an empty map
+            out.append(np.empty(0))
+            continue
         x, y, ok = dst.project(src.unproject(pts))
         e = cv2.remap(dt, x.reshape(-1, 1), y.reshape(-1, 1), cv2.INTER_LINEAR,
                       borderMode=cv2.BORDER_CONSTANT, borderValue=40.0).ravel()
@@ -696,12 +699,16 @@ def setup_cameras(rec: Path, report: dict, devs: dict, flip: list[bool]) -> tupl
     sec0 = devs["secondary"]["segments"][cal]
     dur = min(m0["durationMs"], sec0["durationMs"]) / 1000 - abs(s0["offsetS"]) - 1
     t0 = max(0.0, -s0["offsetS"]) + 0.5
+    t1 = t0 + dur - 0.5
+    # The frames phase0 calibrated on: from after both phones settled
+    # (before, one may still have been in someone's hand).
+    t0 = max(t0, min(report.get("calibrationFromS", t0), t1))
     pairs = [(phase0.frames_at(rec / m0["objectKey"], t, 1, FPS, CAL_W, flip[0])[0],
               phase0.frames_at(rec / sec0["objectKey"], t + s0["offsetS"], 1, FPS, CAL_W, flip[1])[0])
-             for t in np.linspace(t0, t0 + dur - 0.5, phase0.CALIB_FRAMES)]
-    st, cal = phase0.calibrate(pairs)
+             for t in np.linspace(t0, t1, phase0.CALIB_FRAMES)]
+    st, cal = phase0.calibrate(pairs, phase0.expected_focals(devs["secondary"], devs["main"], CAL_W))
     if st is None:
-        sys.exit("calibration failed")
+        sys.exit("calibration failed: no frame pair gave a stitch these lenses could have made")
     cams = st.cameras()  # order [secondary, main]
     print(f"stitcher: {cal['angleBetweenDeg']} deg apart, focal {cal['focalPx']} @ {CAL_W}")
 
@@ -725,6 +732,8 @@ def setup_cameras(rec: Path, report: dict, devs: dict, flip: list[bool]) -> tupl
     (cm, cs), n = refine(cm, cs, matches)
     after = transfer_error(cm, cs, ps, pm)
     near = before < 40
+    if n == 0:  # the stitch is wrong: nothing the phones both see lands where it puts it
+        sys.exit("calibration failed: no matches between the phones agree with the stitch")
     print(f"refined on {n} matches: median error {2 * np.median(before[near]):.1f} ->"
           f" {2 * np.median(after[near]):.1f} px at 4K; k1 {cm.k1:.4f}/{cs.k1:.4f}")
 

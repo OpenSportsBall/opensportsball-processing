@@ -238,18 +238,49 @@ def angle_between(st) -> float:
     return float(np.degrees(np.linalg.norm(cv2.Rodrigues(r1 @ r0.T)[0])))
 
 
-def calibrate(pairs: list[tuple[np.ndarray, np.ndarray]]):
+FOCAL_RATIO = (0.6, 1.6)        # an estimate's focal length, over the one the phone reports: outside, it failed
+FOCAL_HFOV_DEG = (40.0, 150.0)  # ... from a phone that reports none: the lens sees between these
+
+
+def expected_focals(sec_d: dict, main_d: dict, width: int) -> list[float | None]:
+    """Each phone's focal length at `width` from the field of view its
+    manifest reports, [secondary, main] as calibrate() orders them; None
+    for a phone that reports none (older recordings)."""
+    fov = [(d.get("video") or {}).get("horizontalFovDeg") for d in (sec_d, main_d)]
+    return [(width / 2) / np.tan(np.radians(f) / 2) if f else None for f in fov]
+
+
+def plausible_focals(focals, expected, width: int) -> bool:
+    """Whether estimated focal lengths could be these phones'. The
+    stitcher reports success on estimates that are nonsense (the 11 Nov
+    2026 night game: 20 and 10 px at 960 wide, lenses of ~104 deg), and
+    everything downstream is built on what it returns."""
+    for f, e in zip(focals, expected or [None] * len(focals)):
+        lo, hi = ((e * FOCAL_RATIO[0], e * FOCAL_RATIO[1]) if e else
+                  tuple((width / 2) / np.tan(np.radians(a) / 2) for a in FOCAL_HFOV_DEG[::-1]))
+        if not (np.isfinite(f) and lo <= f <= hi):
+            return False
+    return True
+
+
+def calibrate(pairs: list[tuple[np.ndarray, np.ndarray]], expected=None):
     """A stitcher whose cameras are estimated from one frame pair.
 
-    Estimates on every pair, then keeps the pair whose focal lengths are
-    closest to the median, since a single pair can be thrown off by
-    players crowding the overlap.
+    Estimates on every pair, drops the estimates whose focal lengths the
+    phones can't have (plausible_focals; `expected` from expected_focals),
+    then keeps the pair whose focal lengths are closest to the median,
+    since a single pair can be thrown off by players crowding the overlap.
     """
     fits = []
     for m, s in pairs:
         st = cv2.Stitcher_create(cv2.Stitcher_PANORAMA)
         if st.estimateTransform([s, m]) == cv2.Stitcher_OK:
-            fits.append(([s, m], [c.focal for c in st.cameras()], st))
+            focals = [c.focal for c in st.cameras()]
+            if plausible_focals(focals, expected, s.shape[1]):
+                fits.append(([s, m], focals, st))
+            else:
+                print(f"stitch estimate dropped: focal {[round(float(f), 1) for f in focals]} px at"
+                      f" {s.shape[1]} wide is not these lenses", flush=True)
     if not fits:
         return None, {"ok": False, "pairsTried": len(pairs), "pairsOk": 0}
     med = np.median([f for _, f, _ in fits], axis=0)
@@ -526,7 +557,8 @@ def main(rec: Path, preview_at: float | None) -> None:
     report["upsideDown"] = {"main": flip[0], "secondary": flip[1], "from": source}
     cal_pairs = [(frames_at(main_f, t, 1, 30, PREVIEW_W, flip[0])[0],
                   frames_at(sec_f, t + d, 1, 30, PREVIEW_W, flip[1])[0]) for t in times]
-    st, cal = calibrate(cal_pairs)
+    expected = expected_focals(sec_d, main_d, PREVIEW_W)
+    st, cal = calibrate(cal_pairs, expected)
     report["calibration"] = cal
     print(f"upside down: main {flip[0]}, secondary {flip[1]} (from {'/'.join(source)})")
     print("stitch: " + (f"ok on {cal['pairsOk']}/{cal['pairsTried']} pairs, focal {cal['focalPx']} px"
@@ -548,7 +580,7 @@ def main(rec: Path, preview_at: float | None) -> None:
         cal_i = calibrate([(frames_at(rec / ms["objectKey"], t, 1, 30, PREVIEW_W, flip[0])[0],
                             frames_at(rec / ss["objectKey"], t + seg["offsetS"], 1, 30,
                                       PREVIEW_W, flip[1])[0])
-                           for t in np.linspace(t0, t0 + seg_dur - 0.5, 3)])[1]
+                           for t in np.linspace(t0, t0 + seg_dur - 0.5, 3)], expected)[1]
         stability.append({"index": ms["index"], **({"angleBetweenDeg": cal_i["angleBetweenDeg"],
                                                     "focalPx": cal_i["focalPx"]} if cal_i["ok"] else {"ok": False})})
     angles = [x["angleBetweenDeg"] for x in stability if "angleBetweenDeg" in x]
