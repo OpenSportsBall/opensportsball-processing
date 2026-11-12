@@ -87,20 +87,29 @@ def load_audio(path: Path) -> np.ndarray:
     return np.frombuffer(raw, dtype=np.float32)
 
 
+SEEK_LEAD_IN_S = 1.5  # longer than the phones' GOP (about 1 s)
+
+
 def frames_at(path: Path, start: float, count: int, fps: float,
               width: int, rotate180: bool = False) -> list[np.ndarray]:
     """`count` BGR frames resampled to constant `fps` from file time `start`."""
     height = round(width * 9 / 16 / 2) * 2
+    # Decode from a little before `start` and throw that lead-in away. The
+    # phones' later segments mark every packet a keyframe, so a seek lands
+    # mid-GOP: an older ffmpeg (6.1, the cloud image's) then gives grey
+    # frames with only the changes drawn on them, and a newer one drops
+    # them and gives a later frame instead. Either is over within a GOP.
+    pre = min(SEEK_LEAD_IN_S, max(0.0, start))
     vf = ("hflip,vflip," if rotate180 else "") + f"fps={fps},scale={width}:{height}"
     raw = subprocess.run(
         # -noautorotate: the files' display rotation is handled from the
         # manifest's orientation, so don't let ffmpeg apply it as well.
-        [accel.ffmpeg(), "-v", "error", "-noautorotate", "-ss", f"{start:.4f}", "-i", str(path),
-         "-vf", vf, "-frames:v", str(count),
+        [accel.ffmpeg(), "-v", "error", "-noautorotate", "-ss", f"{start - pre:.4f}", "-i", str(path),
+         "-ss", f"{pre:.4f}", "-vf", vf, "-frames:v", str(count),
          "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
         check=True, capture_output=True).stdout
     n = len(raw) // (width * height * 3)
-    return list(np.frombuffer(raw[: n * width * height * 3], np.uint8)
+    return list(np.frombuffer(raw, np.uint8, count=n * width * height * 3)
                 .reshape(n, height, width, 3))
 
 
@@ -129,7 +138,9 @@ def frame_at(path: Path, t: float, width: int, rotate180: bool = False,
     small = [cv2.resize(f[..., 1], (480, 270), interpolation=cv2.INTER_AREA).astype(np.int16) for f in frames]
     if not any(np.abs(small[i] - small[i - 1]).mean() > 0.05 for i in range(1, n)):
         return None
-    return frames[-1]
+    # A copy: the frame is a view of the whole window's buffer (over 1 GB at
+    # 4K), which a caller keeping several frames would keep whole each time.
+    return frames[-1].copy()
 
 
 # -------------------------------------------------------------------- sync

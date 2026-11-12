@@ -16,9 +16,9 @@ PyTorch on CUDA) have never run on real footage; see "First run" below.
 
 | Part | From | Notes |
 |---|---|---|
-| Base | `ubuntu:24.04` | No NVIDIA base image: PyTorch's wheels carry their CUDA libraries, and the instance's NVIDIA container runtime brings the driver's |
-| ffmpeg | Ubuntu's package (6.1) | Built with `h264_nvenc` and the `cuda` hwaccel; the build checks. GPL build, run as a separate program |
-| Python 3.12 packages | `requirements.txt`, pinned for Linux x86-64 from `requirements.in` | The Mac package's list without Core ML, plus boto3 |
+| Base | `ubuntu:26.04` | No NVIDIA base image: PyTorch's wheels carry their CUDA libraries, and the instance's NVIDIA container runtime brings the driver's |
+| ffmpeg | Ubuntu's package (8.0) | Built with `h264_nvenc` and the `cuda` hwaccel; the build checks. 24.04's 6.1 gave grey frames after a seek into a Pixel segment. GPL build, run as a separate program |
+| Python packages | `requirements.txt`, pinned for Linux x86-64 from `requirements.in`. The pins are compiled for Python 3.12 and installed on Ubuntu's 3.14; the build imports them | The Mac package's list without Core ML, plus boto3 |
 | Engine code | `processing/spikes/*.py`, `lenses.json`, `schemas/` | The repo's layout, as in the Mac package |
 | Models | not in the image | Fetched at job start from the footage bucket's `models/` prefix and checked against `models.json` |
 

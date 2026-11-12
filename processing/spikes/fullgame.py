@@ -234,7 +234,12 @@ def main() -> None:
         video = ["-map", "0:v", "-map", "1:a", "-vf", f"scale={a.height * 16 // 9}:{a.height}:flags=lanczos",
                  *accel.h264_args(br, br), "-profile:v", "high", "-pix_fmt", "yuv420p",
                  "-c:a", "copy", "-movflags", "+faststart"]
-    rc = run([accel.ffmpeg(), "-v", "error", "-y", "-i", str(out / "video.mp4"), "-ss", f"{a.start:g}", "-i", str(out / "audio.m4a"),
+    # The sound is cut to the video's length here: with --max-chunks the video
+    # is only part of the game, and -shortest alone has left all of the sound
+    # in (ffmpeg 6.1, copied audio: a 30 min video came out 100 min long).
+    video_s = sum(seconds for _, seconds in chunks)
+    rc = run([accel.ffmpeg(), "-v", "error", "-y", "-i", str(out / "video.mp4"),
+              "-ss", f"{a.start:g}", "-t", f"{video_s:g}", "-i", str(out / "audio.m4a"),
               *video, "-shortest", str(out / "game.mp4")], log)
     print(f"{'done' if rc == 0 else 'mux FAILED'}: {out / 'game.mp4'} ({a.height}p) in {(time.time() - t0) / 3600:.1f} h",
           flush=True)

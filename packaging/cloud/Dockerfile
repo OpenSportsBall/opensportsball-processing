@@ -11,7 +11,7 @@
 # the instance's NVIDIA container runtime brings the driver's (CUDA,
 # NVDEC, NVENC) for the capabilities named below. Ubuntu's ffmpeg is built
 # with NVENC and the cuda hwaccel; the build checks.
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
