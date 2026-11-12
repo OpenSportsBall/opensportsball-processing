@@ -167,6 +167,13 @@
         "ballLow": {
           "type": "boolean",
           "description": "True when the models don't know this ball: the camera aimed at it in under 10% of the chunks after the first (the first alone can look fine). Absent while only one chunk of a running game is done. This game's video follows the play less closely; ball labels (label ball) teach later models."
+        },
+        "youtubeOutput": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The YouTube copy (game-youtube.mp4, 1440p) when the job asked for one and it is made."
         }
       },
       "required": [
@@ -325,6 +332,13 @@
               }
             }
           }
+        },
+        "youtubeOutput": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The YouTube copy (game-youtube.mp4, 1440p) when the job asked for one and it is made."
         }
       }
     },
