@@ -228,6 +228,9 @@ def test_no_stitch_asks_left_right_then_needs_taps(tmp_path, monkeypatch, capsys
 
     def fake_step(job_, name, args, *, done=None, uv_with=(), watch=None):
         calls.append(name)
+        if name == "kits":
+            # not people.json: a folder from an engine that asked about the kit groups has that and no sides
+            assert done.name == "sides.json"
         if done is not None and done.exists():
             return
         r = job_.rec

@@ -435,7 +435,9 @@ def prepare(job: Job, answers: dict | None, footage: bool = True) -> int:
     step(job, "kit-sample", ["labelset.py", rec, "clip", TEAMS_SET, str(seg), f"{start:g}", f"{secs:g}", "2"],
          done=job.rec / f"labels_{TEAMS_SET}" / "items.json")
     teams_dir = job.rec / "teams" / TEAMS_SET
-    step(job, "kits", ["teams.py", rec, TEAMS_SET, str(TEAMS_K)], done=teams_dir / "people.json")
+    # sides.json is the last thing teams.py writes that roles.py reads. A folder set up by an engine
+    # that still asked about the kit groups has people.json without it, and every ball chunk then fails.
+    step(job, "kits", ["teams.py", rec, TEAMS_SET, str(TEAMS_K)], done=teams_dir / "sides.json")
 
     if answers:
         apply_answers(job, st, answers, seg)
