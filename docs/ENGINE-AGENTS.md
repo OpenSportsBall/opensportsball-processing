@@ -13,7 +13,7 @@ must already be on disk; the engine downloads nothing and sends nothing.
 
 ```
 osb-engine status    job.json      # one JSON line; "next" is the command to run
-osb-engine prepare   job.json      # minutes: sync, pitch fit, kit groups, questions
+osb-engine prepare   job.json      # minutes: sync, pitch fit, questions
 osb-engine questions job.json      # what is waiting for an answer
 osb-engine answer    job.json <question> <flags>
 osb-engine prepare   job.json --answers <recording>/engine/answers.json
@@ -68,16 +68,8 @@ on the paint. A wrong pitch spoils everything after it, so this is the
 question to take time over. When `approveAllowed` is false the points must
 be marked once before approving.
 
-**kits**: one contact sheet per group (`groups[].sheet`), each person with
-an id under the picture. Every group should be one kit and every kit one
-group.
-
-    osb-engine answer job.json kits --ok
-    osb-engine answer job.json kits --merge 0,7 --merge 1,2 --keeper 5,6 --not-kit 3,4
-    osb-engine answer job.json kits --split 3
-
-`--tapped c0_03,c2_11` names people in the wrong group; it scores the
-grouping and moves nobody. A split regroups and asks again, once.
+The teams are not asked about: prepare sorts the two sides, the keepers
+and the referee by kit colour itself (`teams.py`).
 
 `answer` checks the answer against what was asked (a point or group that
 doesn't exist, a pixel outside its close-up, approving when it isn't
@@ -86,16 +78,16 @@ allowed) and exits 2 with the reason. It writes only
 
 ## Sharing is the user's decision
 
-The pitch and kit answers carry a `share` switch: whether the user agrees
-to share that result (pictures of the pitch and of people) to improve the
+The pitch answer carries a `share` switch: whether the user agrees
+to share that result (pictures of the pitch) to improve the
 models. The app shows it to the user. `answer` records `share: false`
 unless `--share` is given. A model must not pass `--share`, or run
 `osb-engine share` or `label`, unless the user has said so for this game.
 
 ## What a model should hand back to the user
 
-- The pitch overlay after the last round, and the kit sheets, if the user
-  wants to check them: these two answers decide the video's quality.
+- The pitch overlay after the last round, if the user wants to check
+  it: this answer decides the video's quality.
 - From the `done` event: `output` (the video), `ballAimShare` and
   `ballLow`. `ballLow: true` means the models don't know this ball: the
   video follows the players more than the ball.

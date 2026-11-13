@@ -73,8 +73,7 @@
         "question": {
           "enum": [
             "cameras",
-            "pitch",
-            "kits"
+            "pitch"
           ]
         },
         "result": {

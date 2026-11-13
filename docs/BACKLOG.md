@@ -967,8 +967,14 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
       still wrong by eye; set by hand (A white [0,7], B yellow [1,2],
       keeper/referee [5,6]); on unseen footage (segment 10) white still
       runs low. roles.py now runs without goals.json (goal-line
-      centres). The kit-component thresholds need more than one game;
-      asking in the app is the fallback.
+      centres). The kit-component thresholds need more than one game.
+      The app no longer asks (2026-11-12): the engine
+      runs on teams.py's own sides, right on rec3 only. On a game like
+      rec4 or rec7 that means no keeper/referee group (the referee is
+      followed as a player) and sides that fail the kick-off rule's
+      own-halves test; with one kit component (rec5) side B is empty
+      and that test is skipped. Getting white kits and the two-shade
+      split right is now the only way to better roles.
 - [ ] Camera-log review of the second full render (2026-10-18/19,
       `camlog.txt`: one line per change of the rule driving the camera):
       - 25:05 framed a goal kick at the right end during open play at

@@ -142,7 +142,13 @@ def sides(out: Path, people, X, comp, n_moments: int, k: int) -> None:
             if best is None or cost < best[0]:
                 best = (cost, list(a), b, ca, cb)
     if best is None:
-        print("sides: fewer than two kit components")
+        # One kit found, or none (rec5: white is under the saturation floor). Nobody is asked, so
+        # roles.py still needs a sides.json: the kit that was found is side A, side B is empty
+        # (follow.py's kick-off rule then goes without the sides), keepers and referee as found.
+        print("sides: fewer than two kit components; side B left empty")
+        (out / "sides.json").write_text(json.dumps({"A": kits, "B": [], "keeperOrReferee": solos, "kitComponents": kits,
+                                                    "perMoment": per_moment.round(2).tolist(), "saturation": sat.round(1).tolist(),
+                                                    "meanAbsDiff": None, "nextBest": None}))
         return
     cost, a, b, ca, cb = best
     # Confidence: how much worse the next-best split is, relative.
