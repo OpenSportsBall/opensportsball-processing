@@ -16,7 +16,7 @@ the Mac app, the cloud job and a terminal alike.
     uv run processing/spikes/engine.py label   job.json ball [--count 50]
     uv run processing/spikes/engine.py label   job.json moments [--at 61.5,1834] [--random 3]
     uv run processing/spikes/engine.py label   job.json --answers labels.json
-    uv run processing/spikes/engine.py share   job.json [--kinds pitch,kits,ball,moments]
+    uv run processing/spikes/engine.py share   job.json [--kinds pitch,ball,moments]
 
 The job (schemas/engine-job.schema.json) names a recording folder: the
 merged manifest.json and every segment file at its objectKey, as
@@ -24,9 +24,10 @@ footagestore.py fetch or the app's download leaves it.
 
 prepare: syncs the phones (phase0.py), fits the pitch (pitch.py: lines,
 goals, review) and groups a sample of people by kit (labelset.py clip,
-teams.py), then writes <recording>/engine/questions.json
-(schemas/engine-questions.schema.json): the pitch to approve or correct,
-and the kit groups to check. When the phones' views can't be stitched
+teams.py: the two sides, the keepers and the referee, which roles.py reads;
+nobody is asked about them), then writes <recording>/engine/questions.json
+(schemas/engine-questions.schema.json): the pitch to approve or correct.
+When the phones' views can't be stitched
 (rec5: too little overlap, one view soft), it first asks only which phone
 filmed the left side (the panorama drawn both ways, jointfit.py choices: the
 right one shows the pitch in one piece), then builds
@@ -36,9 +37,7 @@ points), and the taps fit the cameras and pitch together over a range of
 starting angles (jointfit.py taps, search, install) before the pitch can
 be approved. Given answers
 (schemas/engine-answers.schema.json) it applies them: corrected pitch
-points are refitted (pitch.py taps) and asked again; a split kit group
-regroups with more components and is asked again (once); merges and
-keeper / not-a-kit marks rewrite the sides roles.py uses. Run it until
+points are refitted (pitch.py taps) and asked again. Run it until
 questions.json has nothing pending. Applying answers reads the pictures
 the first prepare left, not the video, so --no-footage does it without
 the segment files on disk (the cloud job, cloud.py).
@@ -71,11 +70,10 @@ one JSON line.
 questions, answer: the same questions for a script or a model with no app
 to draw them (docs/ENGINE-AGENTS.md). Every question in questions.json
 says in words what is asked and how to answer (ask, howToAnswer), each
-pitch keypoint has a close-up picture and each kit group one contact
-sheet. `questions` prints what is pending as one JSON document made to be
+pitch keypoint has a close-up picture. `questions` prints what is pending as one JSON document made to be
 read (absolute image paths, no polylines); `answer` writes one question's
 answer into <recording>/engine/answers.json from flags, checked against
-what was asked (pitch points as a pixel of a close-up, groups by number),
+what was asked (pitch points as a pixel of a close-up),
 and prints the prepare command that applies it. It records share as
 false unless --share is given: sharing is the user's choice. These two
 print a JSON document, not progress events.
@@ -102,7 +100,7 @@ and boxes.json (playeval.py's).
 
 share: writes <recording>/engine/share/<name>.json
 (schemas/engine-contribution.schema.json) for each result the user agreed
-to share: the pitch and the kit groups (each answer's share switch, on by
+to share: the pitch (its answer's share switch, on by
 default) and every label set with labels. It lists files; it sends
 nothing. The app uploads them.
 
@@ -142,14 +140,9 @@ SCHEMAS = HERE.parents[1] / "schemas"
 VERSION = 1
 TEAMS_SET = "engine"          # labels_engine/ and teams/engine/: the kit sample this engine makes
 TEAMS_K = 8                   # teams.py components: kits, keepers, referee, and room for the rest
-SPLIT_K = TEAMS_K + 2         # after the user says a group holds two kits
-CROPS_PER_GROUP = 24          # people shown per kit group
-STAT_MIN_HEIGHT_PX = 45       # teams.py: people this tall (on the pitch) shape the groups; shown first
-CROP_H = 160                  # crop height in the question, px
-SHEET_COLS, SHEET_CELL_W = 8, 110  # a kit group's contact sheet: crops per row, px per crop
 CLOSEUP_DEG = (9.0, 6.0)      # a keypoint's close-up: this much panorama (yaw, pitch) around it
 CLOSEUP_SCALE = 3             # close-up pixels per panorama pixel
-QUESTIONS = ("cameras", "pitch", "kits")
+QUESTIONS = ("cameras", "pitch")
 HEARTBEAT_S = 60.0
 # Failures a user can understand, found by the line a step ends with.
 KNOWN_FAILURES = [
@@ -236,8 +229,7 @@ class Job:
     def state(self) -> dict:
         if self.state_path.exists():
             return json.loads(self.state_path.read_text())
-        return {"schemaVersion": VERSION, "pitch": {"round": 1, "status": "pending"},
-                "kits": {"round": 1, "status": "pending", "k": TEAMS_K}, "applied": []}
+        return {"schemaVersion": VERSION, "pitch": {"round": 1, "status": "pending"}, "applied": []}
 
     def save_state(self, st: dict) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -443,7 +435,7 @@ def prepare(job: Job, answers: dict | None, footage: bool = True) -> int:
     step(job, "kit-sample", ["labelset.py", rec, "clip", TEAMS_SET, str(seg), f"{start:g}", f"{secs:g}", "2"],
          done=job.rec / f"labels_{TEAMS_SET}" / "items.json")
     teams_dir = job.rec / "teams" / TEAMS_SET
-    step(job, "kits", ["teams.py", rec, TEAMS_SET, str(st["kits"]["k"])], done=teams_dir / "people.json")
+    step(job, "kits", ["teams.py", rec, TEAMS_SET, str(TEAMS_K)], done=teams_dir / "people.json")
 
     if answers:
         apply_answers(job, st, answers, seg)
@@ -481,12 +473,18 @@ def apply_cameras(job: Job, st: dict, a: dict) -> None:
     emit("answer", question="cameras", result="rough cameras", leftPhone=a["leftPhone"])
 
 
+def current_answers(answers: dict) -> dict:
+    """Answers without the kit-group check, which is no longer asked: an
+    answers file written before that may still carry one."""
+    return {k: v for k, v in answers.items() if k != "kits"}
+
+
 def pending_questions(st: dict | None) -> list[str]:
     if not st:
-        return ["pitch", "kits"]
+        return ["pitch"]
     if (st.get("cameras") or {}).get("status") == "pending":
         return ["cameras"]
-    return [n for n in ("pitch", "kits") if st[n]["status"] == "pending"]
+    return ["pitch"] if st["pitch"]["status"] == "pending" else []
 
 
 def apply_answers(job: Job, st: dict, answers: dict, seg: int) -> None:
@@ -540,102 +538,6 @@ def apply_answers(job: Job, st: dict, answers: dict, seg: int) -> None:
             st["pitch"]["round"] += 1
             emit("answer", question="pitch", result="refitted", round=st["pitch"]["round"])
         st["applied"].append({"question": "pitch", "answer": a, "at": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
-    k = answers.get("kits")
-    if k and k["round"] == st["kits"]["round"] and st["kits"]["status"] == "pending":
-        st["kits"].setdefault("scores", []).append(kit_score(job, st, k))
-        teams_dir = job.rec / "teams" / TEAMS_SET
-        if k.get("split") is not None and st["kits"]["k"] == TEAMS_K:
-            # Regroup with more components; the groups are new, so ask again.
-            for f in ("people.json", "model.npz", "sides.json", "sides_auto.json", "sheet.jpg"):
-                (teams_dir / f).unlink(missing_ok=True)
-            st["kits"]["k"] = SPLIT_K
-            step(job, f"kits-k{SPLIT_K}", ["teams.py", rec, TEAMS_SET, str(SPLIT_K)], done=teams_dir / "people.json")
-            st["kits"]["round"] += 1
-            emit("answer", question="kits", result="regrouped", round=st["kits"]["round"])
-        else:
-            sides = sides_from_answer(teams_dir, k)
-            if sides is None:
-                st["kits"]["round"] += 1
-                st["kits"]["problem"] = "fewer than two kit groups left: merge fewer, or mark fewer as not a kit"
-                emit("answer", question="kits", result="rejected", round=st["kits"]["round"])
-            else:
-                auto = teams_dir / "sides_auto.json"
-                if (teams_dir / "sides.json").exists() and not auto.exists():
-                    (teams_dir / "sides.json").replace(auto)
-                (teams_dir / "sides.json").write_text(json.dumps(sides, indent=1))
-                st["kits"]["status"] = "answered"
-                st["kits"].pop("problem", None)
-                emit("answer", question="kits", result="answered", sides={"A": sides["A"], "B": sides["B"]})
-        st["applied"].append({"question": "kits", "answer": k, "at": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
-
-
-def kit_score(job: Job, st: dict, k: dict) -> dict:
-    """Group purity (the share of the shown people not tapped as in the wrong
-    group, per group and weighted by group size) and the structure answer."""
-    q = json.loads((job.dir / "questions.json").read_text())["kits"]
-    shown = {str(g["component"]): (len(g["crops"]), g["people"]) for g in q["groups"]}
-    per = {}
-    for c, (n, _) in shown.items():
-        tapped = len(set(k.get("tapped", {}).get(c, [])))
-        per[c] = round(1 - tapped / n, 3) if n else None
-    w = [(per[c], shown[c][1]) for c in per if per[c] is not None]
-    purity = round(sum(p * n for p, n in w) / max(1, sum(n for _, n in w)), 3) if w else None
-    structure = "split" if k.get("split") is not None else "merged" if k.get("merge") else "ok"
-    return {"round": k["round"], "groupPurity": per, "purity": purity, "structure": structure}
-
-
-def sides_from_answer(teams_dir: Path, k: dict) -> dict | None:
-    """sides.json for roles.py from the user's groups: merged components are
-    one kit; the two largest kit groups (people on the pitch per moment) are
-    the sides; keeper/referee as marked, else teams.py's candidates."""
-    auto = {}
-    for name in ("sides_auto.json", "sides.json"):  # teams.py's own, kept aside once answers replace it
-        if (teams_dir / name).exists():
-            auto = json.loads((teams_dir / name).read_text())
-            break
-    people = json.loads((teams_dir / "people.json").read_text())
-    ncomp = 1 + max(p["component"] for p in people)
-    per_moment = auto.get("perMoment") or per_moment_from(people, ncomp)
-    kor = set(k.get("keeperOrReferee") or [])
-    not_kit = set(k.get("notKit") or [])
-    parent = list(range(ncomp))
-
-    def find(c):
-        while parent[c] != c:
-            parent[c] = parent[parent[c]]
-            c = parent[c]
-        return c
-
-    merged = set()
-    for g in k.get("merge") or []:
-        g = [c for c in g if c < ncomp]
-        merged.update(g)
-        for c in g[1:]:
-            parent[find(c)] = find(g[0])
-    kit_like = set(auto.get("kitComponents", [])) | merged
-    groups: dict[int, list[int]] = {}
-    for c in range(ncomp):
-        if c in kor or c in not_kit:
-            continue
-        groups.setdefault(find(c), []).append(c)
-    cands = [g for g in groups.values() if any(c in kit_like for c in g)]
-    cands.sort(key=lambda g: -sum(per_moment[c] for c in g))
-    if len(cands) < 2:
-        return None
-    a, b = sorted(cands[0]), sorted(cands[1])
-    solos = sorted(kor) if k.get("keeperOrReferee") is not None else \
-        [c for c in auto.get("keeperOrReferee", []) if c not in a + b and c not in not_kit]
-    return {"A": a, "B": b, "keeperOrReferee": solos, "kitComponents": sorted(set(a + b)),
-            "perMoment": per_moment, "source": "engine answers", "answer": k}
-
-
-def per_moment_from(people: list, ncomp: int) -> list[float]:
-    moments = {p["frame"].rsplit("_", 1)[0] for p in people}
-    counts = [0] * ncomp
-    for p in people:
-        if p["onPitch"] and p["box"][3] - p["box"][1] >= STAT_MIN_HEIGHT_PX:
-            counts[p["component"]] += 1
-    return [round(c / max(1, len(moments)), 2) for c in counts]
 
 
 def cameras_question(job: Job, st: dict) -> dict | None:
@@ -663,8 +565,6 @@ def save_questions(job: Job, q: dict) -> dict:
 
 
 def write_questions(job: Job, st: dict) -> dict:
-    import cv2
-
     rec = job.rec
     cams_q = cameras_question(job, st)
     if cams_q and cams_q["status"] == "pending":
@@ -694,65 +594,7 @@ def write_questions(job: Job, st: dict) -> dict:
         # Our first guess, before any correction: shared next to the final fit.
         job.dir.mkdir(parents=True, exist_ok=True)
         guess.write_text((rec / "pitch" / "pitch.json").read_text())
-
-    teams_dir = rec / "teams" / TEAMS_SET
-    people = json.loads((teams_dir / "people.json").read_text())
-    items = json.loads((rec / f"labels_{TEAMS_SET}" / "items.json").read_text())
-    image_of = {f["id"]: rec / f"labels_{TEAMS_SET}" / f["image"] for it in items for f in it["frames"]}
-    sides = {}
-    for name in ("sides.json", "sides_auto.json"):
-        if (teams_dir / name).exists() and not sides:
-            sides = json.loads((teams_dir / name).read_text())
-    ncomp = 1 + max(p["component"] for p in people)
-    per_moment = sides.get("perMoment") or per_moment_from(people, ncomp)
-    rnd = st["kits"]["round"]
-    crop_dir = job.dir / "crops" / f"kits{rnd}"
-    crop_dir.mkdir(parents=True, exist_ok=True)
-    rng = random.Random(rnd)
-    cache: dict[Path, object] = {}
-    groups = []
-    for c in range(ncomp):
-        mine = [p for p in people if p["component"] == c]
-        tall = [p for p in mine if p["onPitch"] and p["box"][3] - p["box"][1] >= STAT_MIN_HEIGHT_PX]
-        pool = tall if len(tall) >= CROPS_PER_GROUP else mine
-        pick = rng.sample(pool, min(CROPS_PER_GROUP, len(pool)))
-        crops = []
-        for n, p in enumerate(pick):
-            path = image_of.get(p["frame"])
-            if path is None:
-                continue
-            if path not in cache:
-                if len(cache) > 8:
-                    cache.clear()
-                cache[path] = cv2.imread(str(path))
-            img = cache[path]
-            if img is None:
-                continue
-            x1, y1, x2, y2 = p["box"]
-            pad = int(0.15 * (y2 - y1))
-            h, w = img.shape[:2]
-            cut = img[max(0, y1 - pad):min(h, y2 + pad), max(0, x1 - pad):min(w, x2 + pad)]
-            if cut.size == 0:
-                continue
-            scale = CROP_H / cut.shape[0]
-            cut = cv2.resize(cut, (max(1, round(cut.shape[1] * scale)), CROP_H),
-                             interpolation=cv2.INTER_CUBIC if scale > 1 else cv2.INTER_AREA)
-            cid = f"c{c}_{n:02d}"
-            out = crop_dir / f"{cid}.jpg"
-            if not out.exists():
-                cv2.imwrite(str(out), cut, [cv2.IMWRITE_JPEG_QUALITY, 90])
-            crops.append({"id": cid, "image": str(out.relative_to(rec)), "frame": p["frame"], "box": p["box"]})
-        proposed = ("A" if c in sides.get("A", []) else "B" if c in sides.get("B", [])
-                    else "keeperOrReferee" if c in sides.get("keeperOrReferee", []) else "other")
-        groups.append({"component": c, "people": len(mine), "perMoment": per_moment[c], "proposed": proposed,
-                       "crops": crops, **kit_sheet(rec, crop_dir, c, crops)})
-    kits_q = {"round": rnd, "status": st["kits"]["status"], "k": st["kits"]["k"], "groups": groups,
-              "splitAllowed": st["kits"]["k"] == TEAMS_K, **ask_kits(st["kits"]["k"] == TEAMS_K)}
-    if st["kits"].get("problem"):
-        kits_q["problem"] = st["kits"]["problem"]
-    (job.dir / f"kits_round{rnd}.json").write_text(json.dumps(kits_q, indent=1))  # what was shown, for share
-    q = {"schemaVersion": VERSION, "recording": str(rec), "pending": pending_questions(st), "pitch": pitch_q,
-         "kits": kits_q}
+    q = {"schemaVersion": VERSION, "recording": str(rec), "pending": pending_questions(st), "pitch": pitch_q}
     if cams_q:
         q["cameras"] = cams_q
     return save_questions(job, q)
@@ -763,8 +605,7 @@ def write_questions(job: Job, st: dict) -> dict:
 # The app draws the questions itself. A script or a model driving the engine
 # has only the files, so each question also says in words what is asked and
 # how to answer it (ask, howToAnswer), and comes with pictures made to be
-# looked at one at a time: a close-up of every pitch keypoint and one contact
-# sheet per kit group.
+# looked at one at a time: a close-up of every pitch keypoint.
 
 SHARE_NOTE = ("Sharing is the user's choice: `answer` records share as false unless --share is given. "
               "Pass --share only when the user has agreed to share this result.")
@@ -799,26 +640,6 @@ def ask_pitch(approve_allowed: bool) -> dict:
                     "halfway line, centre circle? Each point's close-up shows one named keypoint enlarged, with "
                     "the fitted lines in red and a ring where the fit puts the keypoint (closeup.fit). "
                     "A wrong pitch spoils everything after it, so look at both ends and the far side."),
-            "howToAnswer": how}
-
-
-def ask_kits(split_allowed: bool) -> dict:
-    how = [
-        "Every kit has exactly one group (the usual answer): osb-engine answer <job> kits --ok",
-        "Two or more groups are the same kit: --merge 0,7 (repeat --merge for another kit).",
-        ("One group holds two kits: --split 3. The engine regroups and asks again, once." if split_allowed else
-         "Splitting was already used (splitAllowed is false): merge and mark the groups as they are."),
-        "A group that is keepers or the referee: --keeper 5,6. A group that isn't a kit at all (spectators, "
-        "subs in bibs, coaches, shadows): --not-kit 3,4. Without --keeper the engine keeps its own guess.",
-        "People in the wrong group, or not players in kit, by the id under their picture: --tapped c0_03,c2_11. "
-        "This only scores the grouping; it doesn't move anyone.",
-        "The flags combine in one command. Then apply it: osb-engine prepare <job> --answers "
-        "<recording>/engine/answers.json. At least two kit groups must be left.",
-        SHARE_NOTE]
-    return {"ask": ("People seen on the pitch were grouped by what they wear. Each group's sheet shows up to "
-                    f"{CROPS_PER_GROUP} of its people, chosen at random, with an id under each. Is every group one "
-                    "kit, and does every kit have one group? proposed is the engine's guess: A and B are the two "
-                    "sides (in no order; there is no 'your team'), keeperOrReferee, or other."),
             "howToAnswer": how}
 
 
@@ -874,36 +695,6 @@ def point_closeups(job: Job, rnd: int, review: dict) -> dict:
     return out
 
 
-def kit_sheet(rec: Path, crop_dir: Path, c: int, crops: list[dict]) -> dict:
-    """One picture of a kit group's crops in rows, each with its id under it:
-    {"sheet": path} (nothing when the group has no crops)."""
-    import cv2
-    import numpy as np
-
-    label_h = 22
-    cells = []
-    for cr in crops:
-        img = cv2.imread(str(rec / cr["image"]))
-        if img is None:
-            continue
-        if img.shape[1] > SHEET_CELL_W or img.shape[0] != CROP_H:
-            k = min(SHEET_CELL_W / img.shape[1], CROP_H / img.shape[0])
-            img = cv2.resize(img, (max(1, round(img.shape[1] * k)), max(1, round(img.shape[0] * k))),
-                             interpolation=cv2.INTER_AREA)
-        cell = np.full((CROP_H + label_h, SHEET_CELL_W, 3), 255, np.uint8)
-        x0 = (SHEET_CELL_W - img.shape[1]) // 2
-        cell[:img.shape[0], x0:x0 + img.shape[1]] = img
-        cv2.putText(cell, cr["id"], (4, CROP_H + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
-        cells.append(cell)
-    if not cells:
-        return {}
-    cells += [np.full_like(cells[0], 255)] * (-len(cells) % SHEET_COLS)
-    rows = [np.hstack(cells[i:i + SHEET_COLS]) for i in range(0, len(cells), SHEET_COLS)]
-    path = crop_dir / f"sheet_c{c}.jpg"
-    cv2.imwrite(str(path), np.vstack(rows), [cv2.IMWRITE_JPEG_QUALITY, 90])
-    return {"sheet": str(path.relative_to(rec))}
-
-
 def load_questions(job: Job) -> dict:
     try:
         return json.loads((job.dir / "questions.json").read_text())
@@ -953,11 +744,6 @@ def questions_brief(job: Job) -> int:
                                **({"closeup": {**p["closeup"], "image": full(p["closeup"]["image"])}}
                                   if p.get("closeup") else {"closeup": None})}
                            for n, p in d["points"].items()}
-        else:
-            b.update(k=d["k"], splitAllowed=d["splitAllowed"])
-            b["groups"] = [{"group": g["component"], "people": g["people"], "perMoment": g["perMoment"],
-                            "proposed": g["proposed"], "sheet": full(g.get("sheet")),
-                            "crops": [c["id"] for c in g["crops"]]} for g in d["groups"]]
         out["questions"].append(b)
     out["next"] = next_step(job, job.state() if job.state_path.exists() else None)
     print(json.dumps(out, indent=1), flush=True)
@@ -977,14 +763,6 @@ def _pairs(values: list[str], flag: str) -> dict[str, tuple[float, float]]:
             raise Failed("bad_answers", f"{flag} takes 'NAME=A,B', not {v!r}", exit_code=EXIT_BAD_INPUT)
         out[name.strip()] = (a, b)
     return out
-
-
-def _ints(values: list[str] | str | None, flag: str) -> list[int]:
-    vals = [values] if isinstance(values, str) else (values or [])
-    try:
-        return [int(x) for v in vals for x in v.split(",") if x.strip()]
-    except ValueError:
-        raise Failed("bad_answers", f"{flag} takes group numbers separated by commas", exit_code=EXIT_BAD_INPUT)
 
 
 def build_answer(q: dict, question: str, a) -> dict:
@@ -1046,40 +824,6 @@ def build_answer(q: dict, question: str, a) -> dict:
             points[n] = {"skipped": True}
         ans["points"] = points
         return ans
-    groups = {g["component"] for g in d["groups"]}
-    crop_group = {c["id"]: g["component"] for g in d["groups"] for c in g["crops"]}
-    merges = [_ints(m, "--merge") for m in a.merge]
-    keeper, not_kit = _ints(a.keeper, "--keeper"), _ints(a.not_kit, "--not-kit")
-    tapped = [t.strip() for v in a.tapped for t in v.split(",") if t.strip()]
-    used = [*(c for m in merges for c in m), *keeper, *not_kit, *([a.split] if a.split is not None else [])]
-    if a.ok and (used or tapped):
-        raise bad("--ok stands alone: it says the groups are right as they are")
-    if not (a.ok or used or tapped):
-        raise bad("kits needs --ok, or --merge, --split, --keeper, --not-kit, --tapped")
-    unknown = sorted(set(used) - groups)
-    if unknown:
-        raise bad(f"no such group: {', '.join(map(str, unknown))} (the groups are {min(groups)}-{max(groups)})")
-    if a.split is not None and not d["splitAllowed"]:
-        raise bad("a split was already used on this game: merge and mark the groups as they are")
-    if any(len(m) < 2 for m in merges):
-        raise bad("--merge takes two or more groups, e.g. --merge 0,7")
-    no_crop = sorted(set(tapped) - set(crop_group))
-    if no_crop:
-        raise bad(f"no such crop: {', '.join(no_crop)}")
-    if tapped:
-        by: dict[str, list[str]] = {}
-        for t in dict.fromkeys(tapped):
-            by.setdefault(str(crop_group[t]), []).append(t)
-        ans["tapped"] = by
-    if merges:
-        ans["merge"] = merges
-    if a.split is not None:
-        ans["split"] = a.split
-    if a.keeper is not None:
-        ans["keeperOrReferee"] = sorted(set(keeper))
-    if not_kit:
-        ans["notKit"] = sorted(set(not_kit))
-    return ans
 
 
 def answer(job: Job, question: str | None, a) -> int:
@@ -1090,7 +834,7 @@ def answer(job: Job, question: str | None, a) -> int:
     ans = build_answer(q, question or "", a)
     path = job.dir / "answers.json"
     try:
-        answers = json.loads(path.read_text()) if path.exists() else {}
+        answers = current_answers(json.loads(path.read_text())) if path.exists() else {}
     except json.JSONDecodeError:
         answers = {}
     answers[question] = ans
@@ -1116,7 +860,7 @@ def run(job: Job, answers: dict | None) -> int:
         st = job.state()
     pending = pending_questions(st)
     if not (job.dir / "questions.json").exists() or pending:
-        emit("needs_answers", pending=pending or ["pitch", "kits"], questions=str(job.dir / "questions.json"))
+        emit("needs_answers", pending=pending or ["pitch"], questions=str(job.dir / "questions.json"))
         return EXIT_NEEDS_ANSWERS
     out = job.rec / "fullgame"
     done_mark = out / "done.json"
@@ -1636,20 +1380,6 @@ def share(job: Job, kinds: list[str]) -> int:
                       [rec / "pitch" / "background.png", rec / "pitch" / "pitch.json", guess,
                        rec / "pitch" / "taps.json", rec / "pitch" / "goals.json", rec / "pitch" / "paint.json",
                        rec / "pitch" / "review.json", rec / "phase0" / "cameras.json"])
-    if "kits" in kinds:
-        a = last_answer(st, "kits")
-        if st["kits"]["status"] != "answered":
-            emit("share", name="kits", path=None, reason="the kit groups aren't answered yet")
-        elif a is not None and a.get("share") is False:
-            emit("share", name="kits", path=None, reason="the user chose not to share them")
-        else:
-            summary = {"scores": st["kits"].get("scores", []), "k": st["kits"]["k"],
-                       "answers": [x["answer"] for x in st["applied"] if x["question"] == "kits"]}
-            rounds = sorted(job.dir.glob("kits_round*.json"))
-            crops = sorted((job.dir / "crops").glob("kits*/*.jpg"))
-            share_one(job, m, "kits", "kits", summary,
-                      [*rounds, *crops, rec / "teams" / TEAMS_SET / "sides.json",
-                       rec / "teams" / TEAMS_SET / "sides_auto.json"])
     for kind in ("ball", "moments"):
         if kind not in kinds:
             continue
@@ -1760,14 +1490,14 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("command", choices=("prepare", "run", "status", "questions", "answer", "label", "share"))
     ap.add_argument("job", type=Path)
-    ap.add_argument("what", nargs="?", help="label: ball or moments; answer: cameras, pitch or kits")
+    ap.add_argument("what", nargs="?", help="label: ball or moments; answer: cameras or pitch")
     ap.add_argument("--answers", type=Path)
     ap.add_argument("--no-footage", dest="footage", action="store_false",
                     help="prepare --answers: apply the answers without the segment files on disk")
     ap.add_argument("--count", type=int, default=BALL_SET_COUNT, help="label ball: frames in the set")
     ap.add_argument("--at", default="", help="label moments: seconds into game.mp4 where the user pressed Missed play")
     ap.add_argument("--random", type=int, default=3, help="label moments: random moments added")
-    ap.add_argument("--kinds", default="pitch,kits,ball,moments", help="share: which results")
+    ap.add_argument("--kinds", default="pitch,ball,moments", help="share: which results")
     g = ap.add_argument_group("answer (see the question's howToAnswer)")
     g.add_argument("--left", choices=("main", "secondary"), help="cameras: the phone on the left")
     g.add_argument("--approve", action="store_true", help="pitch: the lines sit on the paint")
@@ -1776,13 +1506,7 @@ def main() -> int:
     g.add_argument("--point", action="append", default=[], metavar="NAME=YAW,PITCH", help="pitch: a keypoint, in panorama degrees")
     g.add_argument("--keep", action="append", default=[], metavar="NAME", help="pitch: the fit has this keypoint right")
     g.add_argument("--skip", action="append", default=[], metavar="NAME", help="pitch: this keypoint can't be seen")
-    g.add_argument("--ok", action="store_true", help="kits: every kit has exactly one group")
-    g.add_argument("--merge", action="append", default=[], metavar="A,B", help="kits: groups that are the same kit")
-    g.add_argument("--split", type=int, metavar="GROUP", help="kits: a group that holds two kits")
-    g.add_argument("--keeper", metavar="A,B", help="kits: groups that are keepers or the referee")
-    g.add_argument("--not-kit", dest="not_kit", metavar="A,B", help="kits: groups that aren't a kit")
-    g.add_argument("--tapped", action="append", default=[], metavar="ID,ID", help="kits: people in the wrong group")
-    g.add_argument("--share", action="store_true", help="pitch, kits: the user agreed to share this result")
+    g.add_argument("--share", action="store_true", help="pitch: the user agreed to share this result")
     a = ap.parse_args()
     signal.signal(signal.SIGINT, _on_signal)
     signal.signal(signal.SIGTERM, _on_signal)
@@ -1799,6 +1523,8 @@ def main() -> int:
             except (OSError, json.JSONDecodeError) as e:
                 raise Failed("bad_answers", f"can't read the answers {a.answers}: {e}", exit_code=EXIT_BAD_INPUT)
             # Before any work starts.
+            if a.command != "label":
+                answers = current_answers(answers)
             if a.command == "label":
                 validate(answers, "engine-label-answers.schema.json", "answers")
             else:

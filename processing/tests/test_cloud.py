@@ -49,16 +49,15 @@ FAKE_ENGINE = textwrap.dedent("""
         sys.exit(4)
     if command == "run" and os.environ.get("ENGINE_REFUSES"):
         (rec / "engine" / "questions.json").write_text(json.dumps({
-            "schemaVersion": 1, "recording": str(rec), "pending": ["kits"], "kits": {"round": 2, "problem": "too few"}}))
-        say(event="needs_answers", pending=["kits"])
+            "schemaVersion": 1, "recording": str(rec), "pending": ["pitch"], "pitch": {"round": 2, "problem": "mark the pitch first"}}))
+        say(event="needs_answers", pending=["pitch"])
         sys.exit(3)
     if command == "share":
         answers = json.loads((rec / "engine" / "answers.json").read_text())
         (rec / "engine" / "share").mkdir(exist_ok=True)
-        for kind in ("pitch", "kits"):  # like engine.py: nothing for a check the user didn't share
-            if (answers.get(kind) or {}).get("share") is not False:
-                (rec / "engine" / "share" / f"{kind}.json").write_text(json.dumps(
-                    {"kind": kind, "name": kind, "files": [{"path": "pitch/overlay.jpg", "bytes": 4, "sha256": "x"}]}))
+        if (answers.get("pitch") or {}).get("share") is not False:  # like engine.py: nothing the user didn't share
+            (rec / "engine" / "share" / "pitch.json").write_text(json.dumps(
+                {"kind": "pitch", "name": "pitch", "files": [{"path": "pitch/overlay.jpg", "bytes": 4, "sha256": "x"}]}))
         sys.exit(0)
     if command == "status":
         say(event="status", chunkDetails=[{"chunk": 0, "ball": {"seconds": 310}, "follow": {"seconds": 240}}])
@@ -73,11 +72,11 @@ FAKE_ENGINE = textwrap.dedent("""
         say(event="step", step="sync", status="done", seconds=1)
         rounds = 2 if "--answers" in sys.argv else 1
         (rec / "engine" / "questions.json").write_text(json.dumps({
-            "schemaVersion": 1, "recording": str(rec), "pending": ["pitch", "kits"],
+            "schemaVersion": 1, "recording": str(rec), "pending": ["pitch"],
             "pitch": {"round": rounds, "overlay": "pitch/overlay.jpg", "background": "../../secret.png",
-                      "points": {"left corner flag": {"closeup": {"image": "engine/closeups/1/a.jpg"}}}},
-            "kits": {"groups": [{"sheet": "/etc/passwd", "crops": [{"image": "pitch/overlay.jpg"}]}]}}))
-        say(event="questions", pending=["pitch", "kits"])
+                      "points": {"left corner flag": {"closeup": {"image": "engine/closeups/1/a.jpg"}},
+                                 "right corner flag": {"closeup": {"image": "/etc/passwd"}}}}}))
+        say(event="questions", pending=["pitch"])
     else:
         say(event="progress", stage="game", fraction=0.5, etaS=3600)
         (rec / "fullgame").mkdir(exist_ok=True)
@@ -169,7 +168,7 @@ def test_prepare_fetches_the_footage_and_publishes_the_questions(aws, monkeypatc
         assert (rec / k).stat().st_mtime == int(modified)
 
     q = json.loads(body(s3, OUT + "questions/questions.json"))
-    assert q["recording"] == "." and q["pending"] == ["pitch", "kits"]
+    assert q["recording"] == "." and q["pending"] == ["pitch"]
     # The pictures it names, where it names them; nothing from outside the folder, nothing missing.
     assert [k for k in keys(s3, OUT) if not k.startswith("profile/")] == ["questions/pitch/overlay.jpg", "questions/questions.json"]
     assert s3.head_object(Bucket=BUCKET, Key=OUT + "questions/pitch/overlay.jpg")["ContentType"] == "image/jpeg"
@@ -245,7 +244,7 @@ def test_run_publishes_only_what_the_user_chose_to_share(aws, monkeypatch):
     s3, ddb, rec = aws
     assert go(monkeypatch, "prepare") == 0
     s3.put_object(Bucket=BUCKET, Key=OUT + "answers.json", Body=json.dumps(
-        {"pitch": {"round": 1, "approve": True, "share": True}, "kits": {"round": 1, "share": False}}))
+        {"pitch": {"round": 1, "approve": True, "share": True}}))
     assert go(monkeypatch, "run") == 0
     share = [k for k in keys(s3, OUT) if k.startswith("share/")]
     assert share == ["share/files/pitch/overlay.jpg", "share/pitch.json"]
@@ -305,12 +304,12 @@ def test_a_gpu_job_stops_when_pytorch_cannot_use_the_gpu(aws, monkeypatch):
 def test_run_asks_again_when_the_engine_refuses_an_answer(aws, monkeypatch):
     s3, ddb, rec = aws
     assert go(monkeypatch, "prepare") == 0
-    s3.put_object(Bucket=BUCKET, Key=OUT + "answers.json", Body=json.dumps({"kits": {"round": 1, "notKit": [0, 1]}}))
+    s3.put_object(Bucket=BUCKET, Key=OUT + "answers.json", Body=json.dumps({"pitch": {"round": 1, "approve": True}}))
     monkeypatch.setenv("ENGINE_REFUSES", "1")
     assert go(monkeypatch, "run") == 0
     assert "--answers" in calls(rec)[-1]
     q = json.loads(body(s3, OUT + "questions/questions.json"))
-    assert q["pending"] == ["kits"] and q["kits"]["problem"] == "too few"
+    assert q["pending"] == ["pitch"] and q["pitch"]["problem"] == "mark the pitch first"
     assert "game.mp4" not in keys(s3, OUT) and "error" not in record(ddb)
 
 
@@ -380,6 +379,5 @@ def test_models_must_be_the_ones_the_engine_was_built_for(aws, monkeypatch, tmp_
 def test_pictures_finds_every_picture_a_question_names():
     q = {"pitch": {"overlay": "pitch/overlay.jpg", "background": "pitch/background.png",
                    "points": {"a": {"closeup": {"image": "engine/closeups/1/a.jpg", "fit": [1, 2]}}}},
-         "kits": {"groups": [{"sheet": "engine/crops/kits1/sheet0.jpg", "crops": [{"image": "engine/crops/kits1/c0_00.jpg"}]}]},
          "cameras": {"panoramas": {"mainLeft": "engine/cameras/main_left.jpg", "secondaryLeft": "engine/cameras/secondary_left.jpg"}}}
-    assert len(cloud.pictures(q)) == 7
+    assert len(cloud.pictures(q)) == 5

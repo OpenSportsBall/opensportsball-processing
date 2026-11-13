@@ -86,7 +86,7 @@ SYNC_EVERY_S = 300.0
 # prepare's steps, in order, for a fraction (engine.py prepare).
 PREPARE_STEPS = ["verify-footage", "sync", "pitch", "goals", "kit-sample", "kits", "pitch-review"]
 # Fields of questions.json that name a picture, relative to the recording.
-PICTURE_KEYS = {"image", "overlay", "background", "sheet", "mainLeft", "secondaryLeft"}
+PICTURE_KEYS = {"image", "overlay", "background", "mainLeft", "secondaryLeft"}
 # Never copied to the work prefix: the output itself and what it is joined from at the end.
 WORK_SKIP = {"fullgame/game.mp4", "fullgame/video.mp4", "fullgame/audio.m4a"}
 EXIT_STOPPED = 130
@@ -334,13 +334,13 @@ def publish_shares(cloud: Cloud, rec: Path) -> None:
     list at share/files/<path>. Never a reason for the job to fail."""
     try:
         answers = json.loads((rec / "engine" / "answers.json").read_text()) if (rec / "engine" / "answers.json").exists() else {}
-        if not any((answers.get(k) or {}).get("share") is True for k in ("pitch", "kits")):
+        if (answers.get("pitch") or {}).get("share") is not True:
             return
-        subprocess.run([*engine_cmd(), "share", str(rec.parent / "job.json"), "--kinds", "pitch,kits"],
+        subprocess.run([*engine_cmd(), "share", str(rec.parent / "job.json"), "--kinds", "pitch"],
                        capture_output=True, text=True, timeout=600, cwd=rec.parent)
         for doc in sorted((rec / "engine" / "share").glob("*.json")) if (rec / "engine" / "share").is_dir() else []:
             c = json.loads(doc.read_text())
-            if c.get("kind") not in ("pitch", "kits") or (answers.get(c["kind"]) or {}).get("share") is not True:
+            if c.get("kind") != "pitch":
                 continue
             for f in c.get("files", []):
                 cloud.put(rec / f["path"], f"{cloud.out}share/files/{f['path']}")
@@ -496,7 +496,7 @@ def main() -> int:
             (rec / "engine").mkdir(exist_ok=True)
             (rec / "engine" / "answers.json").write_text(json.dumps(answers))
             # run applies them first too: an answer that needed no refit (the
-            # pitch approved, the kit groups settled) reaches the engine here.
+            # pitch approved) reaches the engine here.
             args += ["--answers", str(rec / "engine" / "answers.json")]
 
         rc, last = None, {}

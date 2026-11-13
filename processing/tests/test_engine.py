@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: 2026 The OpenSportsBall Authors
 # SPDX-License-Identifier: AGPL-3.0-only
-"""engine.py's file contract and the answers it turns into roles.py's
-sides, without footage:
+"""engine.py's file contract, without footage:
 
     uv run --with pytest --with numpy --with opencv-python-headless --with jsonschema pytest processing/tests/test_engine.py
 """
@@ -15,49 +14,15 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "spikes"))
 import engine  # noqa: E402
 
-# rec7's kit groups (teams.py, k=8, 2026-11-05): white is components 0 and 7,
-# yellow 1 and 2; 5 and 6 are keepers / the referee; 3 and 4 are not kits.
-# teams.py's own split put 0 against 2 and left the rest out.
-REC7_AUTO = {"A": [0], "B": [2], "keeperOrReferee": [], "kitComponents": [0, 2],
-             "perMoment": [10.6, 8.13, 5.85, 1.8, 1.67, 1.23, 0.55, 0.47]}
-
-
-def teams_dir(tmp_path, auto=REC7_AUTO):
+def teams_dir(tmp_path):
+    """What teams.py leaves: the kit groups and its own sides, which nobody is asked about."""
     d = tmp_path / "teams" / "engine"
     d.mkdir(parents=True)
-    (d / "sides.json").write_text(json.dumps(auto))
+    (d / "sides.json").write_text(json.dumps({"A": [0], "B": [2], "keeperOrReferee": [], "kitComponents": [0, 2]}))
     people = [{"frame": f"m{i % 5}_main", "component": c, "onPitch": True, "box": [0, 0, 10, 60]}
               for i, c in enumerate([0, 1, 2, 3, 4, 5, 6, 7] * 3)]
     (d / "people.json").write_text(json.dumps(people))
     return d
-
-
-def test_rec7_answer_gives_the_sides_set_by_hand(tmp_path):
-    s = engine.sides_from_answer(teams_dir(tmp_path), {"round": 1, "merge": [[0, 7], [1, 2]],
-                                                       "keeperOrReferee": [5, 6], "notKit": [3, 4]})
-    assert sorted([s["A"], s["B"]]) == [[0, 7], [1, 2]]
-    assert s["keeperOrReferee"] == [5, 6]
-
-
-def test_no_changes_keeps_teams_py_split(tmp_path):
-    s = engine.sides_from_answer(teams_dir(tmp_path), {"round": 1})
-    assert sorted([s["A"], s["B"]]) == [[0], [2]]
-
-
-def test_too_few_kit_groups_is_refused(tmp_path):
-    assert engine.sides_from_answer(teams_dir(tmp_path), {"round": 1, "merge": [[0, 2]]}) is None
-
-
-def test_kit_score(tmp_path):
-    job = type("J", (), {"dir": tmp_path})()
-    groups = [{"component": 0, "people": 300, "crops": [{"id": f"c0_{i}"} for i in range(24)]},
-              {"component": 1, "people": 100, "crops": [{"id": f"c1_{i}"} for i in range(24)]}]
-    (tmp_path / "questions.json").write_text(json.dumps({"kits": {"groups": groups}}))
-    s = engine.kit_score(job, {}, {"round": 1, "tapped": {"0": ["c0_1", "c0_2", "c0_3"], "1": []},
-                                   "merge": [[0, 1]]})
-    assert s["groupPurity"] == {"0": 0.875, "1": 1.0}
-    assert s["purity"] == pytest.approx((0.875 * 300 + 100) / 400, abs=1e-3)
-    assert s["structure"] == "merged"
 
 
 @pytest.mark.parametrize("answers,ok", [
@@ -67,8 +32,7 @@ def test_kit_score(tmp_path):
                                        "left near post base": {"skipped": True}}}}, True),
     ({"pitch": {"round": 1}}, False),                                  # neither approve nor points
     ({"pitch": {"round": 1, "approve": True, "points": {}}}, False),   # both
-    ({"kits": {"round": 1, "merge": [[0, 7], [1, 2]], "keeperOrReferee": [5, 6], "tapped": {"0": ["c0_01"]}}}, True),
-    ({"kits": {"round": 1, "merge": [[3]]}}, False),                   # a merge of one
+    ({"kits": {"round": 1}}, False),                                   # no longer a question
 ])
 def test_answers_schema(answers, ok):
     if ok:
@@ -177,19 +141,16 @@ def test_share_follows_the_users_switches(tmp_path, capsys):
     (job.rec / "pitch" / "background.png").write_bytes(b"png")
     st = job.state()
     st["pitch"].update(status="approved", approvedRound=1)
-    st["kits"]["status"] = "answered"
-    st["applied"] = [{"question": "pitch", "answer": {"round": 1, "approve": True}, "at": "x"},
-                     {"question": "kits", "answer": {"round": 1, "share": False}, "at": "x"}]
+    st["applied"] = [{"question": "pitch", "answer": {"round": 1, "approve": True}, "at": "x"}]
     job.save_state(st)
     sd = make_set(job, "ball-1", "ball", ["a", "b"])
     engine.apply_labels(job, {"set": "ball-1", "ball": {"a": {"status": "none"}}})
     capsys.readouterr()
-    engine.share(job, ["pitch", "kits", "ball", "moments"])
+    engine.share(job, ["pitch", "ball", "moments"])
     events = [json.loads(l) for l in capsys.readouterr().out.splitlines()]
     for e in events:
         engine.validate(e, "engine-event.schema.json", "event")
-    by = {e["name"]: e for e in events}
-    assert by["kits"]["path"] is None                    # the user said no
+    assert "kits" not in {e["name"] for e in events}     # the kit groups are no longer checked, or shared
     pitch = json.loads((job.dir / "share" / "pitch.json").read_text())
     assert pitch["summary"]["approvedFirstGuess"] is True
     assert {f["path"] for f in pitch["files"]} == {"pitch/background.png", "pitch/pitch.json"}
@@ -301,8 +262,7 @@ def test_no_stitch_asks_left_right_then_needs_taps(tmp_path, monkeypatch, capsys
         **({} if engine.pending_questions(st) == ["cameras"] else {"pitch": {"round": st["pitch"]["round"],
             "status": st["pitch"]["status"], "background": "b", "overlay": "o", "fit": {}, "lines": [], "points": {},
             **({"approveAllowed": False} if st["pitch"].get("approveAllowed") is False else {}),
-            **({"problem": st["pitch"]["problem"]} if st["pitch"].get("problem") else {})},
-            "kits": {"round": 1, "status": "pending", "k": 8, "groups": [], "splitAllowed": True}})}))
+            **({"problem": st["pitch"]["problem"]} if st["pitch"].get("problem") else {})}})}))
 
     def questions():
         return json.loads((job.dir / "questions.json").read_text())
@@ -316,7 +276,7 @@ def test_no_stitch_asks_left_right_then_needs_taps(tmp_path, monkeypatch, capsys
 
     engine.prepare(job, {"cameras": {"round": 1, "leftPhone": "secondary"}})
     q = questions()
-    assert q["pending"] == ["pitch", "kits"] and q["pitch"]["approveAllowed"] is False
+    assert q["pending"] == ["pitch"] and q["pitch"]["approveAllowed"] is False
     assert q["cameras"]["status"] == "answered" and q["cameras"]["leftPhone"] == "secondary"
 
     engine.prepare(job, {"pitch": {"round": 1, "approve": True}})
@@ -331,7 +291,7 @@ def test_no_stitch_asks_left_right_then_needs_taps(tmp_path, monkeypatch, capsys
     assert q["pitch"]["round"] == 2 and "approveAllowed" not in q["pitch"] and "problem" not in q["pitch"]
 
     engine.prepare(job, {"pitch": {"round": 2, "approve": True}})
-    assert questions()["pending"] == ["kits"]
+    assert questions()["pending"] == [] and "kits" not in questions()  # the sides are teams.py's own: nothing to ask
     for line in capsys.readouterr().out.splitlines():
         engine.validate(json.loads(line), "engine-event.schema.json", "event")
 
@@ -490,7 +450,6 @@ def test_the_youtube_copy_of_a_finished_game(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
     st = job.state()
     st["pitch"]["status"] = "approved"
-    st["kits"]["status"] = "answered"
     job.save_state(st)
     (job.dir / "questions.json").write_text("{}")
     monkeypatch.setattr(engine, "check_footage", lambda j: {})
@@ -533,7 +492,6 @@ def test_a_finished_game_isnt_rendered_again(tmp_path, monkeypatch, capsys):
     job = footage_job(tmp_path)
     st = job.state()
     st["pitch"]["status"] = "approved"
-    st["kits"]["status"] = "answered"
     job.save_state(st)
     (job.dir / "questions.json").write_text("{}")
     out = job.rec / "fullgame"
@@ -554,7 +512,7 @@ def test_a_finished_game_isnt_rendered_again(tmp_path, monkeypatch, capsys):
 
 def asked_job(tmp_path):
     """A prepared recording, small: a 20 x 8 degree panorama with one line and
-    two keypoints (one off the picture), and two kit groups of three people."""
+    two keypoints (one off the picture)."""
     import cv2
     import numpy as np
 
@@ -569,15 +527,6 @@ def asked_job(tmp_path):
         "lines": [[[-9.0, 4.0], [9.0, 4.0]]], "goals": [], "panorama": pano,
         "points": {"left corner flag": {"yaw": -9.5, "pitch": 4.0}, "halfway far end": {"yaw": 0.0, "pitch": 2.0},
                    "right corner flag": {"yaw": 14.0, "pitch": 4.0}}}))
-    frames = rec / "labels_engine"
-    frames.mkdir()
-    cv2.imwrite(str(frames / "f0.jpg"), np.full((400, 600, 3), 120, np.uint8))
-    (frames / "items.json").write_text(json.dumps([{"frames": [{"id": "m0_main", "image": "f0.jpg"}]}]))
-    d = rec / "teams" / "engine"
-    d.mkdir(parents=True)
-    (d / "people.json").write_text(json.dumps([
-        {"frame": "m0_main", "component": c, "onPitch": True, "box": [20 + 60 * i, 100, 50 + 60 * i, 180]}
-        for i, c in enumerate([0, 0, 0, 1, 1, 1])]))
     st = job.state()
     q = engine.write_questions(job, st)
     job.save_state(st)
@@ -587,15 +536,14 @@ def asked_job(tmp_path):
 def flags(**kw):
     import argparse
 
-    base = dict(left=None, approve=False, closeup=[], pano=[], point=[], keep=[], skip=[], ok=False, merge=[],
-                split=None, keeper=None, not_kit=None, tapped=[], share=False)
+    base = dict(left=None, approve=False, closeup=[], pano=[], point=[], keep=[], skip=[], share=False)
     return argparse.Namespace(**{**base, **kw})
 
 
 def test_questions_say_what_is_asked_and_come_with_pictures(tmp_path):
     job, q = asked_job(tmp_path)
-    for name in ("pitch", "kits"):
-        assert q[name]["ask"] and any("osb-engine answer" in h for h in q[name]["howToAnswer"])
+    assert q["pending"] == ["pitch"] and "kits" not in q
+    assert q["pitch"]["ask"] and any("osb-engine answer" in h for h in q["pitch"]["howToAnswer"])
     pts = q["pitch"]["points"]
     assert "closeup" not in pts["right corner flag"]  # the fit puts it off the panorama
     for name in ("left corner flag", "halfway far end"):  # one against the picture's edge, one in the middle
@@ -604,8 +552,6 @@ def test_questions_say_what_is_asked_and_come_with_pictures(tmp_path):
         assert c["yaw0"] + c["fit"][0] * c["degPerPx"] == pytest.approx(pts[name]["yaw"], abs=c["degPerPx"])
         assert c["pitch0"] + c["fit"][1] * c["degPerPx"] == pytest.approx(pts[name]["pitch"], abs=c["degPerPx"])
         assert 0 <= c["fit"][0] < c["width"] and 0 <= c["fit"][1] < c["height"]
-    for g in q["kits"]["groups"]:
-        assert (job.rec / g["sheet"]).exists() and len(g["crops"]) == 3
 
 
 def test_the_brief_is_one_document_with_whole_paths(tmp_path, capsys):
@@ -613,12 +559,11 @@ def test_the_brief_is_one_document_with_whole_paths(tmp_path, capsys):
     capsys.readouterr()
     assert engine.questions_brief(job) == 0
     b = json.loads(capsys.readouterr().out)
-    assert b["pending"] == ["pitch", "kits"] and [x["question"] for x in b["questions"]] == ["pitch", "kits"]
-    pitch, kits = b["questions"]
+    assert b["pending"] == ["pitch"] and [x["question"] for x in b["questions"]] == ["pitch"]
+    pitch, = b["questions"]
     assert Path(pitch["overlay"]).is_absolute() and "lines" not in pitch
     assert Path(pitch["points"]["halfway far end"]["closeup"]["image"]).exists()
     assert pitch["points"]["right corner flag"]["closeup"] is None
-    assert Path(kits["groups"][0]["sheet"]).exists() and kits["groups"][0]["crops"] == ["c0_00", "c0_01", "c0_02"]
     assert "answer" in b["next"]
 
 
@@ -628,14 +573,12 @@ def test_an_answer_from_flags_is_what_the_app_would_send(tmp_path, capsys):
     x, y = c["fit"][0] + 30, c["fit"][1] - 15  # 30 px right and 15 px up of the fit, in the close-up
     assert engine.answer(job, "pitch", flags(closeup=[f"halfway far end={x},{y}"], pano=["left corner flag=20,133"],
                                              skip=["right corner flag"])) == 0
-    assert engine.answer(job, "kits", flags(merge=["0,1"], tapped=["c0_01,c1_02"], share=True)) == 0
-    a = json.loads((job.dir / "answers.json").read_text())  # both answers, in the one file
+    a = json.loads((job.dir / "answers.json").read_text())
     engine.validate(a, "engine-answers.schema.json", "answers")
-    assert a["pitch"]["share"] is False and a["kits"]["share"] is True  # sharing only when asked for
+    assert a["pitch"]["share"] is False  # sharing only when asked for
     assert a["pitch"]["points"]["halfway far end"] == {"yaw": pytest.approx(0.3, abs=0.011), "pitch": pytest.approx(1.85, abs=0.011)}
     assert a["pitch"]["points"]["left corner flag"] == {"yaw": pytest.approx(-9.4), "pitch": pytest.approx(3.99)}
     assert a["pitch"]["points"]["right corner flag"] == {"skipped": True}
-    assert a["kits"] == {"round": 1, "share": True, "merge": [[0, 1]], "tapped": {"0": ["c0_01"], "1": ["c1_02"]}}
     assert "prepare" in json.loads(capsys.readouterr().out.split("\n}\n")[-2] + "\n}")["next"]
 
 
@@ -646,11 +589,7 @@ def test_an_answer_from_flags_is_what_the_app_would_send(tmp_path, capsys):
     ("pitch", {"closeup": ["right corner flag=1,2"]}, "no close-up"),
     ("pitch", {"closeup": ["halfway far end=5000,2"]}, "outside its close-up"),
     ("pitch", {"keep": ["halfway far end"], "skip": ["halfway far end"]}, "more than once"),
-    ("kits", {}, "needs --ok"),
-    ("kits", {"ok": True, "merge": ["0,1"]}, "stands alone"),
-    ("kits", {"merge": ["0,9"]}, "no such group"),
-    ("kits", {"merge": ["0"]}, "two or more"),
-    ("kits", {"tapped": ["c9_00"]}, "no such crop"),
+    ("kits", {}, "takes one of"),
     ("cameras", {"left": "main"}, "isn't waiting"),
     ("goals", {}, "takes one of"),
 ])
@@ -716,7 +655,6 @@ def ready_to_run(tmp_path):
     job = footage_job(tmp_path)
     st = job.state()
     st["pitch"]["status"] = "approved"
-    st["kits"]["status"] = "answered"
     job.save_state(st)
     (job.dir / "questions.json").write_text("{}")
     return job
@@ -827,3 +765,18 @@ def test_a_ball_set_can_be_made_while_the_game_runs(tmp_path, monkeypatch, capsy
     assert engine.label(job, "ball", 4, [], 0) == engine.EXIT_OK
     assert set(used) == {"ball_0_0_600.win.json", "ball_0_600_600.win.json"}
     assert json.loads((job.dir / "labels" / "ball-2" / "request.json").read_text())["chunks"] == [0, 1]
+
+
+def test_a_kits_answer_from_before_is_left_out(tmp_path):
+    """An answers file written when the kit groups were still checked goes on working."""
+    old = {"pitch": {"round": 1, "approve": True}, "kits": {"round": 1, "merge": [[0, 7]], "share": True}}
+    now = engine.current_answers(old)
+    assert now == {"pitch": {"round": 1, "approve": True}}
+    engine.validate(now, "engine-answers.schema.json", "answers")
+
+
+def test_a_job_prepared_before_runs_without_the_kits_answered(tmp_path):
+    """state.json from an earlier engine still lists the kit check as pending: it is no longer waited for."""
+    st = {"schemaVersion": 1, "pitch": {"round": 2, "status": "approved"},
+          "kits": {"round": 1, "status": "pending", "k": 8}, "applied": []}
+    assert engine.pending_questions(st) == []

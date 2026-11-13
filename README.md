@@ -21,7 +21,7 @@ with it, only data:
 - **Output:** a 1080p MP4, a detections file, and optionally a low-resolution
   full-field panorama.
 - **Engine:** `processing/spikes/engine.py` runs one game through files
-  (`prepare`, then `run` once the pitch and kit questions are answered;
+  (`prepare`, then `run` once the pitch question is answered;
   JSON progress on stdout). The Mac app drives it this way; see
   [docs/TESTING-PROCESSING.md](docs/TESTING-PROCESSING.md), section 7.
   A script or a model can drive it the same way: the questions say in

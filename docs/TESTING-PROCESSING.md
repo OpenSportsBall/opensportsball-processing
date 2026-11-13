@@ -535,11 +535,11 @@ the file formats are `schemas/engine-*.schema.json`.
 |---|---|
 | Unit tests (answers to sides, kit score, the schemas, the no-stitch path with stand-in steps, footage hashes, the disk check and cleanup, the questions' words and pictures, answers from flags; no footage) | `uv run --with pytest --with numpy --with opencv-python-headless --with jsonschema pytest processing/tests/test_engine.py` |
 | Sync, pitch fit, kit groups, then the questions | `uv run processing/spikes/engine.py prepare job.json` |
-| Apply answers (asks again after a pitch correction or a split) | `uv run processing/spikes/engine.py prepare job.json --answers answers.json` |
+| Apply answers (asks again after a pitch correction) | `uv run processing/spikes/engine.py prepare job.json --answers answers.json` |
 | The whole game | `uv run processing/spikes/engine.py run job.json --answers answers.json` |
 | What's done and pending, and the command to run next | `uv run processing/spikes/engine.py status job.json` |
-| The pending questions as one document to read: what is asked, how to answer, the pictures (a close-up per pitch keypoint, a sheet per kit group) | `uv run processing/spikes/engine.py questions job.json` |
-| Write one answer into `<recording>/engine/answers.json` from flags, checked against the question ([ENGINE-AGENTS.md](ENGINE-AGENTS.md)) | `uv run processing/spikes/engine.py answer job.json pitch --approve` (or `--closeup 'NAME=X,Y'`, `kits --ok`, `cameras --left main`) |
+| The pending questions as one document to read: what is asked, how to answer, the pictures (a close-up per pitch keypoint) | `uv run processing/spikes/engine.py questions job.json` |
+| Write one answer into `<recording>/engine/answers.json` from flags, checked against the question ([ENGINE-AGENTS.md](ENGINE-AGENTS.md)) | `uv run processing/spikes/engine.py answer job.json pitch --approve` (or `--closeup 'NAME=X,Y'`, `cameras --left main`) |
 | A ball label set (50 frames of Main, half detected, half bridged); also while `run` is going, from the chunks through the ball stage | `uv run processing/spikes/engine.py label job.json ball [--count 50]` |
 | A must-see set: panoramas where the user pressed Missed play, plus random moments | `uv run processing/spikes/engine.py label job.json moments --at <s,s,...> [--random 3]` |
 | Store labels (also as `labels.json` / `boxes.json` for the benches) | `uv run processing/spikes/engine.py label job.json --answers labels.json` |
@@ -551,7 +551,7 @@ A job is `{"schemaVersion": 1, "recording": "<folder>", "output": {"height": 144
 +~25 GB in the disk check; on a finished game `run` makes just the copy);
 `"options": {"maxChunks": 1}` renders only the first chunk, for a quick
 check. The questions are in `<recording>/engine/questions.json` with the
-crops and overlay images beside them; answers carry the question's
+overlay and close-up images beside them; answers carry the question's
 `round`, and an answer to an earlier round is ignored.
 
 When the phones can't be stitched (rec5), prepare asks only `cameras`
@@ -562,7 +562,7 @@ the pitch in one piece (`{"cameras": {"round": 1, "leftPhone":
 views cross, so on rec5 Main's inner edge looked like it joined
 Secondary's when it doesn't; the wrong panorama shows two broken halves. It then builds
 rough cameras (`jointfit.py rough`: gravity sensors, lens table, 80 deg
-apart) and asks the pitch and kits as usual, except that the pitch has
+apart) and asks the pitch as usual, except that the pitch has
 `approveAllowed: false`: approving is refused (with a `problem`) until
 tapped points have fitted the cameras and pitch together
 (`jointfit.py taps`, `search` over starting angles 74-89 deg and three
@@ -578,7 +578,7 @@ the existing tools read too: a ball set is a labelset.py set
 set is a playeval.py set (`items.json`, `pano/`, `pano.json`). `share`
 writes one `engine/share/<name>.json` per result: the files to upload,
 with sizes and SHA-256, and the result in numbers (pitch: approved first
-time or after how many corrections; kits: purity per round; label sets:
+time or after how many corrections; label sets:
 answers by kind). It sends nothing.
 
 To test it end to end without disturbing a recording's earlier results,
