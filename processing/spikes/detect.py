@@ -57,7 +57,8 @@ class CoreMLDetector:
     list of crops: 3xHxW tensors in [0, 1] (ballwin.py) or HxWx3 uint8 RGB
     arrays (teams.py). `folder` holds `*b8*/*.mlpackage` and optionally
     `*b1*/*.mlpackage` (rfdetr's `export(format="coreml", batch_size=...,
-    coreml_precision="float32")`; fp16 changes the detections). Class ids
+    coreml_precision="float32")`; fp16 changes the detections, and from
+    one call to the next: see coreml_detector). Class ids
     come out as predict()'s: 0-based for a fine-tuned checkpoint, COCO ids
     for the stock one. Needs coremltools (in ballwin.py's and roles.py's
     dependencies on macOS); `coreml_detector` picks or makes the exports.
@@ -109,15 +110,19 @@ class CoreMLDetector:
         return out
 
 
-def coreml_detector(rf, env: str, make, ckpt: Path | None = None, batches=(1, 8)):
+def coreml_detector(rf, env: str, make, ckpt: Path | None = None, batches=(1, 8), precision: str = "float32"):
     """`rf` run by Core ML (CoreMLDetector) where that is the default, else
     `rf` itself. The environment variable `env` decides: "0" keeps PyTorch,
     a folder uses the exports there, unset (the default) uses Core ML on a
-    Mac with fp32 exports cached in ~/Library/Caches/opensportsball/coreml,
+    Mac with exports cached in ~/Library/Caches/opensportsball/coreml,
     made on first use from `make()` (a fresh model of `ckpt`, None for stock;
-    ~10 s a batch size) and keyed by the checkpoint and rfdetr's version.
-    Anything failing falls back to PyTorch with a message: same detections
-    either way (BACKLOG.md, 2026-11-08), Core ML ~30% faster per stage."""
+    ~10 s a batch size) and keyed by the checkpoint, rfdetr's version and
+    `precision`. Anything failing falls back to PyTorch with a message.
+    `precision` is the exports' "float32" or "float16": fp32 gives PyTorch's
+    detections (BACKLOG.md, 2026-11-08) ~30% faster per stage and is what
+    every detector uses; fp16 is ~11% faster again, but on the GPU its
+    outputs differ from call to call on the same input, so it is only for
+    trying (roles.py's OSB_PEOPLE_PRECISION; FINDINGS.md, 2026-11-14)."""
     v = os.environ.get(env, "")
     if v == "0" or (not v and not accel.coreml()):
         return rf
@@ -128,7 +133,7 @@ def coreml_detector(rf, env: str, make, ckpt: Path | None = None, batches=(1, 8)
             from importlib.metadata import version
             ck = Path(ckpt) if ckpt else None  # None: the stock COCO model
             key = (f"{ck.stem}-{ck.stat().st_size}-{int(ck.stat().st_mtime)}" if ck else "stock-medium") \
-                + f"-rfdetr{version('rfdetr')}-fp32"
+                + f"-rfdetr{version('rfdetr')}-{'fp16' if precision == 'float16' else 'fp32'}"
             folder = Path.home() / "Library/Caches/opensportsball/coreml" / key
             for b in batches:
                 if not list(folder.glob(f"b{b}/*.mlpackage")):
@@ -138,7 +143,7 @@ def coreml_detector(rf, env: str, make, ckpt: Path | None = None, batches=(1, 8)
                     m, t = make(), time.time()
                     r = m.model.resolution
                     m.export(output_dir=str(tmp), format="coreml", batch_size=b, shape=(r, r),
-                             coreml_precision="float32", verbose=False)
+                             coreml_precision=precision, verbose=False)
                     shutil.rmtree(folder / f"b{b}", ignore_errors=True)
                     tmp.rename(folder / f"b{b}")
                     print(f"Core ML export, batch {b}: {time.time() - t:.0f} s -> {folder / f'b{b}'}", flush=True)

@@ -61,6 +61,10 @@ class OnGpu:
     def __getitem__(self, idx) -> np.ndarray:
         return self.t[idx].cpu().numpy()
 # OSB_PEOPLE_COREML: Core ML for the people detector on a Mac unless "0" (detect.coreml_detector)
+# OSB_PEOPLE_PRECISION=float16: a half-precision Core ML export for the people detector. Off unless asked
+# for: ~11% less detector time on a Mac, but the export's outputs change from call to call on the same
+# input, so two runs disagree on ~9% of people (FINDINGS.md, 2026-11-14). fp32 is the same every time.
+PRECISION = os.environ.get("OSB_PEOPLE_PRECISION", "float32")
 
 
 def main(rec: Path, seg: int, start: float, seconds: float, tset: str, fps: float) -> None:
@@ -91,7 +95,7 @@ def main(rec: Path, seg: int, start: float, seconds: float, tset: str, fps: floa
         return int(np.argmax(ll))
 
     model = rfdetr.RFDETRMedium()
-    model = detect.coreml_detector(model, "OSB_PEOPLE_COREML", rfdetr.RFDETRMedium, batches=(8,))
+    model = detect.coreml_detector(model, "OSB_PEOPLE_COREML", rfdetr.RFDETRMedium, batches=(8,), precision=PRECISION)
     model = detect.half_precision(model, "people")
     net = detect.NetworkClock(model)
     dev = gpu.device()
@@ -208,7 +212,7 @@ def main(rec: Path, seg: int, start: float, seconds: float, tset: str, fps: floa
     path.parent.mkdir(exist_ok=True)
     path.write_text(json.dumps({"segment": seg, "fps": fps, "teams": tset, "frames": frames_out}))
     print(f"{len(frames_out)} frames in {(time.time() - t0) / 60:.1f} min; roles {dict(tally)} -> {path.name}; "
-          f"detector {t_det / 60:.1f} min ({'Core ML' if isinstance(model, detect.CoreMLDetector) else 'PyTorch'})", flush=True)
+          f"detector {t_det / 60:.1f} min ({f'Core ML {PRECISION}' if isinstance(model, detect.CoreMLDetector) else 'PyTorch'})", flush=True)
     print("time by stage (frames: waiting for the decoder; on a GPU, prepare is only queued there and finishes within detector):\n"
           + sw.report({}) + ("\n  " + net.report(t_det) if net.seconds is not None else ""), flush=True)
     os._exit(0)  # the output is written; teardown has hung (decoder threads)
