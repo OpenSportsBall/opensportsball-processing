@@ -9,8 +9,8 @@
     {
       "source": "footage/models/ball_judge.pt",
       "path": "footage/models/ball_judge.pt",
-      "key": "1a94722b8bbb/ball_judge.pt",
-      "sha256": "1a94722b8bbb71121034bfc810dee225b9bf5cb3f3c86667c4330e1ed40ed1b6"
+      "key": "bd32076cbbe4/ball_judge.pt",
+      "sha256": "bd32076cbbe45f3e053564668d411717570faa7713b345c2911956c6a9a8855e"
     },
     {
       "source": "~/.roboflow/models/rf-detr-medium.pth",

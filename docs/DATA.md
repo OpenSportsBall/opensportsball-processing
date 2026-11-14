@@ -52,7 +52,7 @@ The backup only uploads; it never deletes from S3.
 | rec4 | 2026-10-21 | `c92f9740` | night game, white ball; `rec4cal` (corrected camera model, bench), `rec4bench`, `rec4cal_cmp` are its variants | `labels_seg9` (not labelled) |
 | rec5 | 2026-10-28 | `38a1d10f` | orange ball; `rec5-game` (working copy), `rec5-cal` are its variants | `rec5-game/labels` (ball mode, 98 frames; trained, nothing held out) |
 | rec6 | 2026-10-30 | `1f3a915a` | first daylight game | `labels` (random, both phones, 196 frames; trained, nothing held out) |
-| rec7 | 2026-11-04 | `3ba4b9f2` | night game, Pixel 11 + iPhone 14 Pro, ~6.2 m mount, yellow ball; `balljudge/judge_v4.pt`; play boxes `playeval/seg0-1484` (5) | `labels_seg6` (clip, seg 6 100-220 s, both phones, 119 frames; trained, nothing held out) |
+| rec7 | 2026-11-04 | `3ba4b9f2` | night game, Pixel 11 + iPhone 14 Pro, ~6.2 m mount, yellow ball; `balljudge/judge_v4.pt`; play boxes `playeval/seg0-1484` (5) | `labels_seg6` (clip, seg 6 100-220 s, both phones, 119 frames; seconds 180-220 held out since 2026-11-13, but `judge_v4` trained on all of it before) |
 
 Add a row for every new recording. For every ball label set, say whether it
 is trained on or held out for testing; every new labelling holds part back
