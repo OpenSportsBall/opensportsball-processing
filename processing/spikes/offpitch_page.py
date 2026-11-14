@@ -184,8 +184,9 @@ def serve(rec: Path, port: int, lab: str = "labels") -> None:
             if path == "/data":
                 return self.send(200, json.dumps({"rec": rec.name + ("" if lab == "labels" else " " + lab), "items": merged(rec, lab)}).encode(), "application/json")
             if path.startswith("/crops/"):
-                f = (crops / path[len("/crops/"):]).resolve()
-                if f.is_file() and f.is_relative_to(crops):
+                # Only a file listed in the crops folder is served: the name in the request is looked up, never opened.
+                f = {p.name: p for p in crops.iterdir() if p.is_file()}.get(path[len("/crops/"):])
+                if f is not None:
                     return self.send(200, f.read_bytes(), "image/jpeg")
             self.send(404, b"not found", "text/plain")
 
