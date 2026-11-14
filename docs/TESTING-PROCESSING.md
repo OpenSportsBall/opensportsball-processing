@@ -290,8 +290,10 @@ and `ball_judge.pt` (provenance and bench scores in `footage/models/README.md`):
 `balljudge.load_judge` reads the judge unless a model name picks
 `<recording>/balljudge/<name>.pt`. Since 2026-11-01 these are the rec3 + rec5
 + rec6 models (white, orange and daylight; detector balltrain_v3, judge
-judge_v3); from 2026-10-30 the rec3 + rec5 pair; before, rec3's. A run can pick
-another judge with `OSB_JUDGE` (rec7's yellow-ball `judge_v4`, not the standard). The benches pass a detector
+judge_v3); from 2026-10-30 the rec3 + rec5 pair; before, rec3's. Since
+2026-11-13 the judge is `judge_v5` (the same recordings plus rec7's yellow
+ball, with the reviewed off-pitch verdicts); the detector is unchanged. A run can pick
+another judge with `OSB_JUDGE` (rec7's own `judge_v4`, not the standard). The benches pass a detector
 explicitly; their candidate files keep the judge scores they were made with.
 
 `ballpath.py` links the same filtered candidates as one minimum-cost path
@@ -415,7 +417,18 @@ split; both print how many they left out. Points above the horizon stay
 negatives, and so does everything inside the lines: a picture with a second
 ball on the pitch is still to be labelled "unsure". The tracker drops
 candidates more than 10 m outside the lines anyway (`ball.usable`).
-`OSB_OFF_PITCH_NEG=1` builds the data the old way, to compare. On the
+`OSB_OFF_PITCH_NEG=1` builds the data the old way, to compare. A
+left-out suggestion can be settled instead: `offpitch.py list <rec>` cuts
+a crop of each, `offpitch_page.py <rec>` shows them (grouped by spot, since
+the phones don't move) to mark "ball", "not" or "unsure", and a reviewed
+"ball" is then a positive and a reviewed "not" a negative again
+(`<rec>/labels/offpitch.json`; drafts and "unsure" stay left out). The
+phones don't move, so one object gives a verdict in every frame it shows
+in: verdicts of one phone within 8 px are one spot, at most 10 frames of a
+spot count, a ball spot stays on one side of train / valid, and a ball not
+used is hidden (not background). A clip set works the same
+(`offpitch.py list <rec> labels_seg6`, `balldata.py <rec> <out> labels
+labels_seg6`). On the
 random sets this leaves out 55% of rec3's unmarked suggestions (865 of
 1,583: mostly lights, cars and kit beyond the fence, some balls on the next
 pitch), 41% of rec5-game's (38 of 93) and 87% of rec6's (693 of 801: many

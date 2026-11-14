@@ -174,7 +174,9 @@ def clip_frames(rec: Path, name: str, split: str, held=None):
             phone = 0 if f["phone"] == "main" else 1
             dets = [{"x": (d["box"][0] + d["box"][2]) / 2, "y": (d["box"][1] + d["box"][3]) / 2, "expect": 0}
                     for d in cands["frames"][k]["detections"] if d["phone"] == phone] if 0 <= k < len(cands["frames"]) else []
-            out.append((split, dict(f, candidates=[]), v.get("balls", []), dets, lab))
+            # A clip set's stored suggestions are used (as a random set's are) once it is triaged.
+            keep = f["candidates"] if (lab / "offpitch.json").exists() else []
+            out.append((split, dict(f, candidates=keep), v.get("balls", []), dets, lab))
     return out
 
 
@@ -197,14 +199,23 @@ def data(rec: Path, train_sets=(), test_sets=()) -> None:
     # An unmarked candidate outside the pitch lines may be another game's
     # ball: not a negative (balldata.py; the tracker drops those anyway).
     off = balldata.off_pitch_at(rec)
+    # Triaged suggestions (offpitch.py), each spot capped: per label set, over its train and valid frames.
+    plans = {}
+    for d in {lab_dir for *_, lab_dir in frames}:
+        plans[d] = balldata.plan_verdicts(balldata.load_verdicts(d), [(f["id"], f["phone"], sp) for sp, f, _, _, ld in frames
+                                                                    if ld == d and sp != "test"])
     left_out = 0
     rng = np.random.default_rng(3)
     X, y, split, meta = [], [], [], []
     for k, (sp, f, balls, cands, lab_dir) in enumerate(frames):
         img = cv2.imread(str(lab_dir / f["image"]))
         had = bool(f["candidates"] or cands)
-        skip = balldata.left_out(list(cands) + f["candidates"], balls, lambda x, yy: off(f["phone"], x, yy), HIT_PX)
+        # A triaged "ball" is a positive, a "not" a negative again; beyond a spot's cap neither is used.
+        balls, cleared, unused, _ = balldata.with_verdicts(f["candidates"], balls, plans[lab_dir].get(f["id"]))
+        skip = balldata.left_out(list(cands) + f["candidates"], balls, lambda x, yy: off(f["phone"], x, yy), HIT_PX,
+                                 cleared)
         left_out += len(skip)
+        skip = skip + unused
         cands = [c for c in cands if not any(c is k for k in skip)]
         f = dict(f, candidates=[c for c in f["candidates"] if not any(c is k for k in skip)])
         for b in balls:

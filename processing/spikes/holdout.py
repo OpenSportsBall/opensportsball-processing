@@ -6,6 +6,7 @@
     python3 processing/spikes/holdout.py footage/rec3                          # what is held out, and what it excludes
     python3 processing/spikes/holdout.py footage/rec3 mark labels_seg9         # a whole set
     python3 processing/spikes/holdout.py footage/rec3 mark labels segments 9,15  # whole segments of a set
+    python3 processing/spikes/holdout.py footage/rec7 mark labels_seg6 seconds 6 180 220  # seconds 180-220 of segment 6
 
 Every time balls are labelled, part of the labels is held back for testing
 (docs/TESTING-PROCESSING.md, "Held-out ball labels"). A set says so with a
@@ -135,8 +136,12 @@ def mark(rec: Path, name: str, how: dict) -> None:
         sys.exit(f"no label set {d}")
     if (d / MARK).exists():
         old = json.loads((d / MARK).read_text())
-        how = {"all": True} if old.get("all") or how.get("all") else \
-              {"segments": sorted(set(old.get("segments", [])) | set(how.get("segments", [])))}
+        if old.get("all") or how.get("all"):
+            how = {"all": True}
+        else:  # marks are only added: whole segments and stretches of the game both accumulate
+            how = {k: v for k, v in {
+                "segments": sorted(set(old.get("segments", [])) | set(how.get("segments", []))),
+                "gameS": sorted(old.get("gameS", []) + how.get("gameS", []))}.items() if v}
     before = Holdout(rec)
     (d / MARK).write_text(json.dumps({**how, "at": time.strftime("%Y-%m-%dT%H:%M:%S")}, indent=1) + "\n")
     report(rec, before)
@@ -168,5 +173,8 @@ if __name__ == "__main__":
         mark(Path(a[1]), a[3], {"all": True})
     elif len(a) == 6 and a[2] == "mark" and a[4] == "segments":
         mark(Path(a[1]), a[3], {"segments": [int(x) for x in a[5].split(",")]})
+    elif len(a) == 8 and a[2] == "mark" and a[4] == "seconds":  # a stretch of one segment, e.g. the end of a clip
+        start = _starts(Path(a[1]))[int(a[5])]
+        mark(Path(a[1]), a[3], {"gameS": [[round(start + float(a[6]), 3), round(start + float(a[7]), 3)]]})
     else:
         sys.exit(__doc__)

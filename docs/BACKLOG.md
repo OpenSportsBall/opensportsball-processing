@@ -1699,7 +1699,89 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
       one ball per picture ("Can't tell / Multiple balls" for those), and
       marking several would need the app, the answers schema and
       `engine.py label` to change.
-- [ ] The standard judge doesn't know rec7's yellow ball: run from a
+      Benched 2026-11-13 (`footage/ab_offpitch/`): a detector and judge
+      trained on data built this way (rec3 + rec5 x3 + rec6 x2, as the
+      standard pair) against the standard pair, both scanned with today's
+      ballwin.py. Not adopted. rec3 held-out seg9 found 24 -> 18/37,
+      wrong 2 -> 7, a ball placed at 0 -> 3 of 12 "none" moments; seg3
+      44 -> 43/53, wrong 2 -> 3; must-see boxes rec3 23 -> 19/26, rec4cal
+      11 -> 13/15 (34 -> 32/41); ball path rec6 55 -> 62% of frames, rec5
+      43 -> 47% (unchecked: no held-out labels there). The new detector
+      has a candidate on the real ball as often (28 against 27 of 37
+      moments) but makes 20-85% more candidates per frame, and all 7
+      wrong answers are on the pitch, 13-77 m from the ball: 4 are
+      moments neither detector saw the ball, where the standard pair
+      says nothing. Confident candidates 0-10 m outside the lines: rec3
+      2-6 -> 18-30 per 100 frames, rec4cal 5 -> 8-11, rec6 5 -> 13, rec5
+      7 -> 25. Judges swapped on seg9: standard detector with the
+      new-way judge 24/37 wrong 2; new detector with the standard judge
+      22/37 wrong 3, with a judge retrained the old way 18/37 wrong 9.
+      No detector was retrained the old way, so run-to-run noise is not
+      ruled out. Likely cause: the left-out suggestions were also most of
+      what taught "small and bright but not a ball" (rec3 hard-negative
+      tiles 479 -> 309, rec6 259 -> 53).
+- [ ] Triage the unmarked off-pitch suggestions (`offpitch.py`,
+      2026-11-13): 1,596 on the random sets (rec3 865, rec5 38, rec6
+      693) in about 370 spots, as the phones don't move. Each gets a
+      verdict: "ball" (a positive), "not" (a negative again) or "unsure"
+      (left out as now). Drafts by Claude from contact sheets: rec3 233 /
+      391 / 240, rec5 17 / 19 / 1, rec6 74 / 332 / 287; they gave the same
+      object different verdicts from frame to frame (one rec6 spot: 54
+      ball, 17 not, 17 unsure), so only verdicts reviewed on the page
+      (`offpitch_page.py`) are used in training. Then rebuild, retrain
+      and bench as above. Motion candidates off the pitch (the judge's
+      data: 22,578 on rec3) are still left out. Many of rec3's are spare
+      balls by the bags on the near touchline, which the standard models
+      learnt as "not a ball".
+      Reviewed 2026-11-13, all four sets: rec3 412 ball / 433 not / 20
+      unsure, rec5 20 / 18 / 0, rec6 125 / 415 / 153, rec7 `labels_seg6`
+      59 / 385 / 2. Repeats of one spot are capped (`balldata.py`
+      `plan_verdicts`: verdicts of one phone within 8 px are one spot; at
+      most 10 frames of a spot count; a ball spot stays on one side of
+      train / valid; a ball not used is hidden, and one marked 5+ times
+      is hidden in the frames without a verdict too). rec7's last 40 s
+      are now held out (`holdout.py mark ... seconds`; 20 of 60 moments,
+      17 with the match ball) and the rest trained (detector x3, judge
+      x4). One detector run (early stop at epoch 14, best epoch 6) and
+      judge run "a" of two, against the standard pair, ballwin scans:
+      | | standard | capped triage |
+      |---|---|---|
+      | rec3 seg9 (held out) found / wrong of 37 | 24 / 2 | 23 / 6 |
+      | rec3 seg9 ball placed at 12 "none" moments | 0 | 4 |
+      | rec3 seg3 found / wrong of 53 | 44 / 2 | 41 / 4 |
+      | rec7 held-out moments found / wrong of 17 | 0 / 0 (7 / 0 judge off) | 8 / 6 |
+      | rec7 trained moments found / wrong of 35 | 0 / 0 (18 / 2 judge off) | 30 / 1 |
+      | must-see boxes rec3 (26) | 23 | 18 |
+      | must-see boxes rec4cal (15) | 11 | 15 |
+      | ball path, share of frames, rec6 / rec5 | 55% / 43% | 55% / 49% |
+      | candidates per 100 frames, rec3 seg9 | 121 | 399 |
+      Not adopted: no gain on anything held out, more wrong answers, 2-3x
+      the candidates (so slower window scans). The judge now accepts
+      rec7's ball, but only the moments it trained on improved. Without
+      its judge the capped detector places a ball at all 12 "none"
+      moments of seg9 (standard 5). Not ruled out: run-to-run noise (one
+      detector per arm), and an early stop that may have come too soon.
+      The capped judge on the standard detector's candidates
+      (`balljudge.py clip`, no rescan) is the better pair: rec3 seg9 24
+      found / 3 wrong (4 of 12 "none" moments placed), seg3 43 / 2, rec7
+      24 of 52 found with 0 wrong (held-out 7 / 0 of 17, trained 17 / 0
+      of 35), where the standard judge finds 0. Ball path, share of
+      frames: rec6 55 -> 59%, rec5 43 -> 42%; usable candidates 0-10 m
+      outside the lines per 100 frames rec6 8 -> 13, rec5 13 -> 15. Not
+      run on the must-see bench. (`balljudge.py clip` writes a file even
+      when the clip's video is not on disk: check the "candidates
+      judged" lines.)
+      Adopted 2026-11-13 as the standard judge (`judge_v5`,
+      `footage/models/README.md`, pinned in `packaging/cloud/models.json`);
+      the detector stays. Still to do: the cloud image and the Mac app
+      carry the old judge until they are built again.
+      The video of rec3, rec4, rec5 and rec6 was gone from disk on the
+      evening of 2026-11-13 (folders emptied 11:12, cause unknown);
+      fetched again for the scans.
+- [ ] The standard judge doesn't know rec7's yellow ball (until
+      `judge_v5`, standard since 2026-11-13, which finds it in 24 of 52
+      labelled moments with the standard detector; the full game is not
+      rerun): run from a
       fresh copy with the standard models, the camera aimed at the ball
       31% of chunk 0 and 0-2% of every other chunk (`ballAimShare`
       0.035); rec7's own judge_v4 gave 28-64%. The detector still finds
