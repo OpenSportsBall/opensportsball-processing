@@ -32,10 +32,12 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import detect  # noqa: E402
 import follow  # noqa: E402
+import gpu  # noqa: E402
 import phase0  # noqa: E402
 import pitch as P  # noqa: E402
 import teams  # noqa: E402
@@ -45,6 +47,19 @@ KEEPER_X_M = 22.0
 KEEPER_Z_M = 25.0
 FAR_MIN_PX = 12            # near a goal, people this tall still get a colour (keepers are far and small) ...
 FAR_SAT = 30.0             # ... and a saturated torso there (not a kit colour) is the keeper
+BATCH = int(os.environ.get("OSB_ROLES_BATCH", "4"))  # moments (a frame from each phone) per detector call on an NVIDIA GPU
+
+
+class OnGpu:
+    """A picture held on the GPU that reads like the array (H x W x 3
+    uint8): indexing brings just that part to the CPU, so teams.features
+    takes its torso and turf patches without the whole 4K frame coming down."""
+
+    def __init__(self, t: torch.Tensor):
+        self.t, self.shape = t, tuple(t.shape)
+
+    def __getitem__(self, idx) -> np.ndarray:
+        return self.t[idx].cpu().numpy()
 # OSB_PEOPLE_COREML: Core ML for the people detector on a Mac unless "0" (detect.coreml_detector)
 
 
@@ -77,33 +92,54 @@ def main(rec: Path, seg: int, start: float, seconds: float, tset: str, fps: floa
 
     model = rfdetr.RFDETRMedium()
     model = detect.coreml_detector(model, "OSB_PEOPLE_COREML", rfdetr.RFDETRMedium, batches=(8,))
+    model = detect.half_precision(model, "people")
+    net = detect.NetworkClock(model)
+    dev = gpu.device()
     W, H = follow.SRC_W, follow.SRC_H
     streams = [follow.prefetch(follow.game_stream(rec, devs, report, ph, seg, start, seconds, W, fps=fps))
                for ph in (0, 1)]
-    frames_out, t0, t_det = [], time.time(), 0.0
+    frames_out, t0, t_det, sw = [], time.time(), 0.0, follow.Stopwatch()
     # Where Secondary has no footage (it stopped early) its frames are blank: Main's people alone.
     missing = phase0.secondary_missing(manifest, report, phase0.game_start(manifest, seg) + start,
                                        int(round(seconds * fps)) + 1, fps)
     from collections import Counter
     tally = Counter()
-    for i, (fa, fb) in enumerate(zip(*streams)):
-        people = []
-        for phone, (buf, fl) in enumerate(((fa, flip[0]), (fb, flip[1]))):
-            if phone == 1 and missing[min(i, len(missing) - 1)]:
-                continue
+
+    on_gpu = dev.type == "cuda"
+    batch_of = BATCH if on_gpu else 1
+
+    def prepare(buf, fl: bool):
+        """A phone's NV12 frame -> its BGR picture and the half-size RGB
+        picture the detector sees. On an NVIDIA GPU both are made and kept
+        there, with OpenCV's own arithmetic (detect.nv12_to_bgr_cv2: the
+        kit model's colours were fitted on OpenCV's), so the frame never
+        comes to the CPU. Elsewhere OpenCV makes them, which is quicker
+        than going through the GPU when the detector wants arrays (Core ML)."""
+        if not on_gpu:
             bgr = cv2.cvtColor(np.asarray(buf).reshape(H * 3 // 2, W), cv2.COLOR_YUV2BGR_NV12)
             if fl:
                 bgr = cv2.rotate(bgr, cv2.ROTATE_180)
             small = cv2.resize(bgr, (HALF, HALF * 9 // 16), interpolation=cv2.INTER_AREA)
-            rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
-            td = time.time()
-            boxes = teams.person_boxes(model, rgb, band_top=detect.BAND_TOP // 2)
-            t_det += time.time() - td
+            return bgr, cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+        if isinstance(buf, gpu.GpuNV12):
+            y, uv = buf.y.to(dev), buf.uv.to(dev)
+        else:
+            flat = torch.from_numpy(np.asarray(buf)).to(dev)
+            y, uv = flat[:W * H].view(H, W), flat[W * H:].view(H // 2, W // 2, 2)
+        bgr = detect.nv12_to_bgr_cv2(y, uv)
+        if fl:
+            bgr = bgr.flip(0, 1)
+        return bgr, detect.halve_area(bgr).flip(-1).permute(2, 0, 1).float() / 255
+
+    def people_of(i: int, pictures: dict, boxes_of: dict) -> list:
+        people = []
+        for phone, bgr_gpu in pictures.items():
+            bgr = OnGpu(bgr_gpu) if torch.is_tensor(bgr_gpu) else bgr_gpu
             band = bgr[760::16, ::16].reshape(-1, 3)
             hsv = cv2.cvtColor(band.reshape(-1, 1, 3), cv2.COLOR_BGR2HSV).reshape(-1, 3)
             g = band[(hsv[:, 0] > 30) & (hsv[:, 0] < 95) & (hsv[:, 1] > 40)]
             turf = g.mean(0) if len(g) else np.array([60, 120, 60], float)
-            for b in boxes:
+            for b in boxes_of[phone]:
                 box = b[:4] * 2  # back to full resolution
                 d = cams[phone].unproject(np.array([[(box[0] + box[2]) / 2, box[3]]], float))[0]
                 x, zz = pose.to_pitch(np.degrees(np.arctan2(d[0], d[2])), np.degrees(np.arctan2(d[1], np.hypot(d[0], d[2]))))
@@ -128,19 +164,53 @@ def main(rec: Path, seg: int, start: float, seconds: float, tset: str, fps: floa
                 people.append({"xz": [round(float(x), 2), round(float(zz), 2)], "role": role, "phone": phone,
                                "conf": round(float(b[4]), 3), "h": int(box[3] - box[1])})
                 tally[role] += 1
-        # The same person seen by both phones: keep one (nearest pair within 1.5 m, prefer the taller box).
-        merged = []
-        for p in sorted(people, key=lambda p: -p["h"]):
-            if not any(q["phone"] != p["phone"] and np.hypot(*(np.subtract(q["xz"], p["xz"]))) < 1.5 for q in merged):
-                merged.append(p)
-        frames_out.append({"t": round(start + i / fps, 3), "people": merged})
-        if (i + 1) % 100 == 0:
-            print(f"{i + 1}/{int(seconds * fps)} frames, {(time.time() - t0) / 60:.1f} min, roles so far {dict(tally)}", flush=True)
+        return people
+
+    def flush(batch: list) -> None:
+        """The detector once for every picture of `batch` ([(frame number, {phone: (bgr, rgb)})]), then each frame's people."""
+        nonlocal t_det
+        keys = [(i, phone) for i, pics in batch for phone in pics]
+        td = time.time()
+        found = teams.person_boxes_many(model, [pics[phone][1] for i, pics in batch for phone in pics],
+                                        band_top=detect.BAND_TOP // 2)
+        t_det += time.time() - td
+        sw.lap("detector")
+        boxes = dict(zip(keys, found))
+        for i, pics in batch:
+            people = people_of(i, {ph: bgr for ph, (bgr, _) in pics.items()}, {ph: boxes[(i, ph)] for ph in pics})
+            # The same person seen by both phones: keep one (nearest pair within 1.5 m, prefer the taller box).
+            merged = []
+            for p in sorted(people, key=lambda p: -p["h"]):
+                if not any(q["phone"] != p["phone"] and np.hypot(*(np.subtract(q["xz"], p["xz"]))) < 1.5 for q in merged):
+                    merged.append(p)
+            frames_out.append({"t": round(start + i / fps, 3), "people": merged})
+            if (i + 1) % 100 == 0:
+                print(f"{i + 1}/{int(seconds * fps)} frames, {(time.time() - t0) / 60:.1f} min, roles so far {dict(tally)}", flush=True)
+        sw.lap("roles")
+
+    batch = []
+    waited = [detect.Waited(st) for st in streams]
+    for i, (fa, fb) in enumerate(zip(*waited)):
+        sw.lap("frames")
+        pics = {}
+        for phone, (buf, fl) in enumerate(((fa, flip[0]), (fb, flip[1]))):
+            if phone == 1 and missing[min(i, len(missing) - 1)]:
+                continue
+            pics[phone] = prepare(buf, fl)
+        batch.append((i, pics))
+        sw.lap("prepare")
+        if len(batch) >= batch_of:
+            flush(batch)
+            batch = []
+    if batch:
+        flush(batch)
     path = rec / "detect" / f"roles_{seg}_{start:g}_{seconds:g}.json"
     path.parent.mkdir(exist_ok=True)
     path.write_text(json.dumps({"segment": seg, "fps": fps, "teams": tset, "frames": frames_out}))
     print(f"{len(frames_out)} frames in {(time.time() - t0) / 60:.1f} min; roles {dict(tally)} -> {path.name}; "
           f"detector {t_det / 60:.1f} min ({'Core ML' if isinstance(model, detect.CoreMLDetector) else 'PyTorch'})", flush=True)
+    print("time by stage (frames: waiting for the decoder; on a GPU, prepare is only queued there and finishes within detector):\n"
+          + sw.report({}) + ("\n  " + net.report(t_det) if net.seconds is not None else ""), flush=True)
     os._exit(0)  # the output is written; teardown has hung (decoder threads)
 
 

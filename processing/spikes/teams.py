@@ -69,6 +69,27 @@ def person_boxes(model, rgb: np.ndarray, band_top: int = detect.BAND_TOP) -> np.
     return detect.nms(np.array(rows))
 
 
+def person_boxes_many(model, images: list, band_top: int = detect.BAND_TOP) -> list[np.ndarray]:
+    """person_boxes for several frames in one detector call, all the same
+    size: each an H x W x 3 uint8 RGB array as person_boxes takes, or a
+    3 x H x W RGB tensor in [0, 1] (on the GPU)."""
+    if not images:
+        return []
+    chw = not isinstance(images[0], np.ndarray)
+    h, w = images[0].shape[1:] if chw else images[0].shape[:2]
+    ys = list(range(band_top, h - detect.TILE, 530)) + [h - detect.TILE]
+    xs = list(range(0, w - detect.TILE, detect.STRIDE)) + [w - detect.TILE]
+    tl = [(x, y) for y in ys for x in xs]
+    res = detect.predict(model, [im[:, y:y + detect.TILE, x:x + detect.TILE] if chw else im[y:y + detect.TILE, x:x + detect.TILE]
+                                 for im in images for x, y in tl], PERSON_THRESH)
+    out = []
+    for k in range(len(images)):
+        rows = [np.r_[box + [x, y, x, y], sc] for (x, y), det in zip(tl, res[k * len(tl):(k + 1) * len(tl)])
+                for box, c, sc in zip(det.xyxy, det.class_id, det.confidence) if c == detect.PERSON]
+        out.append(detect.nms(np.array(rows)) if rows else np.zeros((0, 5)))
+    return out
+
+
 def turf_reference(bgr: np.ndarray, box) -> np.ndarray | None:
     """Mean colour of the turf just below and beside the player."""
     x1, y1, x2, y2 = [int(v) for v in box[:4]]
