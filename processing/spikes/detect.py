@@ -57,9 +57,8 @@ class CoreMLDetector:
     list of crops: 3xHxW tensors in [0, 1] (ballwin.py) or HxWx3 uint8 RGB
     arrays (teams.py). `folder` holds `*b8*/*.mlpackage` and optionally
     `*b1*/*.mlpackage` (rfdetr's `export(format="coreml", batch_size=...,
-    coreml_precision="float32")`; fp16 changes the detections, which the
-    ball detector can't afford and the people detector can: see
-    coreml_detector). Class ids
+    coreml_precision="float32")`; fp16 changes the detections, and from
+    one call to the next: see coreml_detector). Class ids
     come out as predict()'s: 0-based for a fine-tuned checkpoint, COCO ids
     for the stock one. Needs coremltools (in ballwin.py's and roles.py's
     dependencies on macOS); `coreml_detector` picks or makes the exports.
@@ -121,8 +120,9 @@ def coreml_detector(rf, env: str, make, ckpt: Path | None = None, batches=(1, 8)
     `precision`. Anything failing falls back to PyTorch with a message.
     `precision` is the exports' "float32" or "float16": fp32 gives PyTorch's
     detections (BACKLOG.md, 2026-11-08) ~30% faster per stage and is what
-    the ball detector uses; fp16 is faster again but its detections drift,
-    so only the people detector asks for it (roles.py)."""
+    every detector uses; fp16 is ~11% faster again, but on the GPU its
+    outputs differ from call to call on the same input, so it is only for
+    trying (roles.py's OSB_PEOPLE_PRECISION; FINDINGS.md, 2026-11-14)."""
     v = os.environ.get(env, "")
     if v == "0" or (not v and not accel.coreml()):
         return rf

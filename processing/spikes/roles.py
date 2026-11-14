@@ -61,9 +61,10 @@ class OnGpu:
     def __getitem__(self, idx) -> np.ndarray:
         return self.t[idx].cpu().numpy()
 # OSB_PEOPLE_COREML: Core ML for the people detector on a Mac unless "0" (detect.coreml_detector)
-# The people detector's Core ML export: half precision unless OSB_PEOPLE_PRECISION=float32. People are
-# big and many, so fp16's drift costs little here; the ball detector (ballwin.py) stays in fp32.
-PRECISION = os.environ.get("OSB_PEOPLE_PRECISION", "float16")
+# OSB_PEOPLE_PRECISION=float16: a half-precision Core ML export for the people detector. Off unless asked
+# for: ~11% less detector time on a Mac, but the export's outputs change from call to call on the same
+# input, so two runs disagree on ~9% of people (FINDINGS.md, 2026-11-14). fp32 is the same every time.
+PRECISION = os.environ.get("OSB_PEOPLE_PRECISION", "float32")
 
 
 def main(rec: Path, seg: int, start: float, seconds: float, tset: str, fps: float) -> None:
