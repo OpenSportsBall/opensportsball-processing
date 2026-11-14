@@ -1558,6 +1558,34 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         in the pipeline: crops would leave PyTorch as CPU arrays (8 x 576
         x 576 x 3 floats is 32 MB a batch; unified memory, but a copy and
         a sync per call), so check it in ballwin.py before adopting.
+      - Half precision and a compiled ball detector on an NVIDIA GPU
+        (2026-11-14, g5.xlarge A10G, rfdetr 1.12, torch 2.15; three
+        10-minute chunks of the 2026-11-11 game, each run against the
+        full-precision uncompiled one at the same roles batch). Minutes in
+        the network per chunk:
+
+        | | ball | people (64 crops a call) |
+        |---|---|---|
+        | fp32, eager | 3.9 / 7.1 / 8.1 | 4.0 / 5.2 / 4.7 |
+        | fp16, eager (`OSB_DETECTOR_HALF=1`) | 3.5 / 5.7 / 7.1 | 1.6 / 2.0 / 2.4 |
+        | fp32, CUDA graph at batches 1, 2, 4, 8 (`OSB_DETECTOR_COMPILED=ball=1,2,4,8`) | 2.8 / 5.0 / 5.6 | - |
+
+        The ball pass sends 1.4-1.6 crops a call, so it is bound by the
+        cost of a call, which compiling cuts and half precision doesn't;
+        the people detector is bound by arithmetic. Compiling costs
+        26-61 s per chunk, and padding to the next batch size runs about
+        20% more crops. The game step: 4,261 s both off, 3,581 s both in
+        fp16, 3,667 s with the ball compiled and people in fp16 (one run
+        each, so the last two are not told apart).
+        What changed: fp16 on the ball detector left 6-14% of detections
+        per chunk without a match and changed 9-18% of frames (the Mac's
+        149/150 did not carry over; the pass compounds a difference by
+        looking where it last found something). The compiled fp32
+        detector left 0.1-2.5% unmatched, 0.3-2.6% of frames. fp16 on the
+        people detector: 0.8% of people appear, disappear or change role.
+        The share of time aimed at the ball stayed 19 / 43-44 / 41%. None
+        of these has been through the must-see bench, and all are off by
+        default.
         Checked in ballwin.py (2026-11-08): `OSB_DETECTOR_COREML=<folder
         of the b1 and b8 fp32 exports>` (run with `--with coremltools`)
         swaps the detector for Core ML, batch 8 for calls over 6 crops,

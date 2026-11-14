@@ -211,6 +211,8 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
     model = detect.coreml_detector(model, "OSB_DETECTOR_COREML",
                                    lambda: rfdetr.RFDETRMedium(pretrain_weights=str(ckpt)), ckpt=Path(ckpt))
     t_det = 0.0
+    model = detect.half_precision(detect.compiled(model, "ball"), "ball")
+    net = detect.NetworkClock(model)
     W, H = follow.SRC_W, follow.SRC_H
     wasb = Wasb(dev, Path(WASB_CKPT) if WASB_CKPT else None) if WASB else None
     bgs: dict = {}
@@ -277,7 +279,7 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
             crops.append(c)
         nonlocal t_det
         t = time.perf_counter()
-        res = model.predict(crops, threshold=FLOOR) if crops else []
+        res = detect.predict(model, crops, FLOOR) if crops else []
         t_det += time.perf_counter() - t  # both backends return CPU results, so this includes the GPU's wait
         rows = []
         for (x, y), det in zip(boxes_xy, res):
@@ -375,7 +377,8 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
         print(f"Secondary has no footage for {missing.mean():.0%} of this clip: Main alone there", flush=True)
     ball_xz, ball_v, last_seen, last_full = None, np.zeros(2), -10 ** 9, -10 ** 9
     tiles_total, n_full = 0, 0
-    for i, (fa, fb) in enumerate(zip(*streams)):
+    waited = [detect.Waited(st) for st in streams]
+    for i, (fa, fb) in enumerate(zip(*waited)):
         t = i / fps
         lost = (i - last_seen) / fps
         since_full = (i - last_full) / fps
@@ -515,6 +518,11 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
           + (f"; WASB {wasb.tiles / n:.1f} tiles per frame pair, {t_wasb / 60:.1f} min" if wasb else "")
           + f"; detector {t_det / 60:.1f} min ({'Core ML' if isinstance(model, detect.CoreMLDetector) else 'PyTorch'})"
           + f" -> {path.name}", flush=True)
+    t_all = time.time() - t0
+    t_frames = sum(w.seconds for w in waited)
+    print(f"time: waiting for frames {t_frames / 60:.1f} min, WASB {t_wasb / 60:.1f} min, detector {t_det / 60:.1f} min, "
+          f"the rest (crops, judge, tracking) {(t_all - t_frames - t_wasb - t_det) / 60:.1f} min"
+          + (f"\n  {net.report(t_det)}" if net.seconds is not None else ""), flush=True)
     if judge_same:
         print(f"judge check: {sum(judge_same)} of {len(judge_same)} crops identical to cutting them from the whole frame",
               flush=True)
