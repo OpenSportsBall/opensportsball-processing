@@ -59,6 +59,7 @@ detections overlay. Stays inside one segment for now.
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import queue
@@ -78,7 +79,9 @@ from scipy.optimize import least_squares
 sys.path.insert(0, str(Path(__file__).parent))
 import accel  # noqa: E402
 import gpu  # noqa: E402
+import nvdec  # noqa: E402
 import phase0  # noqa: E402
+from seam import Seams, seam_dp  # noqa: E402, F401
 
 FPS = 30
 CAL_W = 960            # width the cameras are estimated at (phase0.PREVIEW_W)
@@ -427,29 +430,6 @@ def view_directions(yaw, pitch, hfov, w, h):
     return u[..., None] * x + v[..., None] * y + z
 
 
-def seam_dp(cost: np.ndarray, prev: np.ndarray | None, lam: float) -> np.ndarray:
-    """Lowest-cost top-to-bottom path, one column per row, moving at most
-    two columns per row; `lam` per column per row pulls it towards the
-    previous frame's path so the seam doesn't jump."""
-    H, W = cost.shape
-    if prev is not None:
-        cost = cost + lam * np.abs(np.arange(W)[None, :] - prev[:, None])
-    acc = cost[0].copy()
-    back = np.zeros((H, W), np.int8)
-    big = np.full(2, np.inf)
-    for r in range(1, H):
-        padded = np.concatenate([big, acc, big])
-        cand = np.stack([padded[2 + k:2 + k + W] for k in (-2, -1, 0, 1, 2)])
-        k = np.argmin(cand, 0)
-        back[r] = k - 2
-        acc = cost[r] + cand[k, np.arange(W)]
-    path = np.empty(H, np.int32)
-    path[-1] = int(np.argmin(acc))
-    for r in range(H - 1, 0, -1):
-        path[r - 1] = path[r] + back[r, path[r]]
-    return path
-
-
 class Stopwatch:
     """Accumulates wall time per stage: each lap charges the time since the
     previous lap to `name`."""
@@ -477,6 +457,9 @@ class Stopwatch:
 PREROLL_S = 1.0  # decode this much before a seek point and drop it (see frame_stream)
 
 
+_gpu_scale_ok = True  # until ffmpeg's GPU resizer has failed once in this process
+
+
 def frame_stream(path: Path, start: float, seconds: float, width: int, fps: float = FPS):
     """Yields raw NV12 frames (flat uint8) at constant `fps`, decoded in
     hardware, as the phone recorded them (no rotation applied).
@@ -484,28 +467,61 @@ def frame_stream(path: Path, start: float, seconds: float, width: int, fps: floa
     Decoding starts PREROLL_S early and drops those frames: right after a
     seek the decoder's first ~0.25-0.5 s is missing and the fps filter
     fills it by repeating one frame (a freeze at the start of every clip,
-    and at every segment switch)."""
+    and at every segment switch).
+
+    On an NVIDIA GPU a full-size frame is decoded straight into GPU memory
+    and stays there (nvdec.py; a gpu.GpuNV12 rather than a flat array:
+    gpu.upload_nv12 takes either, np.asarray() copies one down).
+
+    A small picture (pass A's) is resized there by ffmpeg instead
+    (accel.gpu_scale_args), so only the small frame crosses to the CPU. If
+    that gives nothing, this process goes back to resizing on the CPU."""
+    global _gpu_scale_ok
     height = round(width * 9 / 16)
     pre = min(PREROLL_S, start)
     skip = int(round(pre * fps))
-    proc = subprocess.Popen(
-        [accel.ffmpeg(), "-v", "error", "-noautorotate", *accel.decode_args(), "-ss", f"{start - pre:.4f}",
-         "-i", str(path), "-t", f"{seconds + pre:.3f}", "-vf", f"fps={fps},scale={width}:{height}",
-         "-f", "rawvideo", "-pix_fmt", "nv12", "-"],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     size = width * height * 3 // 2
-    try:
-        n = 0
-        while True:
-            buf = bytearray(size)  # writable, so torch can share it without a copy
-            if proc.stdout.readinto(buf) < size:
-                break
-            n += 1
-            if n > skip:
-                yield np.frombuffer(buf, np.uint8)
-    finally:  # also when the caller stops early
-        proc.kill()
-        proc.wait()
+    direct = nvdec.frames(path, start - pre, seconds + pre, fps, width, height)
+    if direct is not None:  # decoded into GPU memory and left there
+        sent = 0
+        try:
+            for frame in itertools.islice(direct, skip, None):
+                yield frame
+                sent += 1
+            return
+        except Exception as e:  # the decoder gave up part-way: the pipe carries on from the next frame
+            nvdec.give_up(f"decoding {Path(path).name} failed after {sent} frames ({type(e).__name__}: {e})")
+        yield from frame_stream(path, start + sent / fps, seconds - sent / fps, width, fps)
+        return
+    on_gpu = accel.gpu_scale_args(width, height, SRC_W) if _gpu_scale_ok else None
+    for decode, scale in ([on_gpu] if on_gpu else []) + [(accel.decode_args(), f"scale={width}:{height}")]:
+        proc = subprocess.Popen(
+            [accel.ffmpeg(), "-v", "error", "-noautorotate", *decode, "-ss", f"{start - pre:.4f}",
+             "-i", str(path), "-t", f"{seconds + pre:.3f}", "-vf", f"fps={fps},{scale}",
+             "-f", "rawvideo", "-pix_fmt", "nv12", "-"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        try:
+            n = 0
+            while True:
+                buf = bytearray(size)  # writable, so torch can share it without a copy
+                if proc.stdout.readinto(buf) < size:
+                    break
+                n += 1
+                if n > skip:
+                    yield np.frombuffer(buf, np.uint8)
+            try:
+                failed = proc.wait(timeout=30) != 0
+            except subprocess.TimeoutExpired:
+                failed = True
+        finally:  # also when the caller stops early
+            proc.kill()
+            proc.wait()
+        # Nothing at all and an error is the resizer failing; nothing and no
+        # error is a clip that starts past the file's end.
+        if n or not failed or (decode, scale) != on_gpu:
+            return
+        _gpu_scale_ok = False
+        print(f"ffmpeg's GPU resizer gave no frames for {path.name}: resizing on the CPU from here on", flush=True)
 
 
 HOLD_MAX_S = phase0.HOLD_MAX_S  # a phone with no frame for a moment repeats its nearest one for at most this long
@@ -1916,7 +1932,15 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
     # Pass A: detect moving blobs on the turf.
     warm = min(WARMUP_S, start)
     a_start = start - warm
-    mog = cv2.createBackgroundSubtractorMOG2(history=300, varThreshold=24, detectShadows=True)
+    # On an NVIDIA GPU the whole frame stays on it: the background model
+    # (gpu.MOG2, OpenCV's), the masks' clean-up and the seam's cost, with the
+    # seam searched in a process of its own. The CPU's share of a frame was
+    # 54 ms there against the GPU's 9, on four CPUs shared with the ball
+    # pass. Elsewhere (a Mac's GPU shares the CPU's memory and its CPUs are
+    # many and fast) the panorama comes back for OpenCV, as it always did.
+    # OSB_PASS_A=gpu|cpu picks one, to compare them.
+    on_gpu = os.environ.get("OSB_PASS_A", "gpu" if dev.type == "cuda" else "cpu") == "gpu"
+    print(f"pass A background and seam cost on the {'GPU' if on_gpu else 'CPU'}")
     streams = streams_at(a_start, warm + seconds, CAL_W)
     missing = phase0.secondary_missing(manifest, report, phase0.game_start(manifest, seg) + a_start,
                                        int(round((warm + seconds) * FPS)) + 1, FPS)
@@ -1926,14 +1950,21 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
     n_warm = int(warm * FPS)
     kernel = np.ones((3, 3), np.uint8)
     sample = None
-    seams, seam_h = [], None
+    alones: list[bool] = []
+    seamer = Seams(2 * SEAM_LAMBDA, worker=on_gpu)
+    if on_gpu:
+        mog = gpu.MOG2(PH, PW, dev, history=300, var_threshold=24)
+        main_hidden = torch.tensor(~main_sees, device=dev)
+        no_overlap = torch.tensor(~both[:, c0:c1], device=dev)
+    else:
+        mog = cv2.createBackgroundSubtractorMOG2(history=300, varThreshold=24, detectShadows=True)
     nA = 0
     for i, (fa, fb) in enumerate(zip(*streams)):
         nA += 1
         sw.lap("A: decode")
         alone = bool(missing[min(i, len(missing) - 1)])
-        pano, cost = warper.warp([gpu.upload_nv12(f, CAL_W, lo_h, dev) for f in (fa, fb)], main_only=alone)
-        sw.lap("A: warp+blend")
+        alones.append(alone)
+        frames = [gpu.upload_nv12(f, CAL_W, lo_h, dev) for f in (fa, fb)]
         # After the warm-up, learn the background slowly (~a minute), so a
         # player standing still (a keeper waiting to take a goal kick) stays
         # foreground instead of fading in after ~10 s. When Secondary's
@@ -1941,23 +1972,36 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
         # that quickly, or it is all foreground for the minute.
         if i and alone != bool(missing[min(i - 1, len(missing) - 1)]):
             relearn_until = i + int(RELEARN_S * FPS)
-        fg = mog.apply(pano, learningRate=-1 if i < n_warm else RELEARN_RATE if i < relearn_until else 1 / (60 * FPS))
-        if alone:
-            fg[~main_sees] = 0
-        sw.lap("A: background")
+        rate = -1 if i < n_warm else RELEARN_RATE if i < relearn_until else 1 / (60 * FPS)
         # Seam: avoid players and places where the two phones disagree.
         # Searched on row pairs; it moves slowly, so half the rows is plenty.
-        players = cv2.dilate((fg[:, c0:c1] == 255).astype(np.uint8), np.ones((7, 7), np.uint8))
-        cost += PLAYER_COST * players
-        cost[~both[:, c0:c1]] = 50.0
-        if not alone or seam_h is None:
+        if on_gpu:
+            pano, cost = warper.warp_gpu(frames, main_only=alone)
+            fg = mog.apply(pano, rate)
+            if alone:
+                fg[main_hidden] = 0
+            fg = (fg == 255).float()
+            cost = cost + PLAYER_COST * gpu.dilate(fg[:, c0:c1], 7)
+            cost[no_overlap] = 50.0
+            half = cost[: PH // 2 * 2].reshape(PH // 2, 2, -1).mean(1).cpu().numpy()
+            # The blobs' mask, opened and grown as below, ready for OpenCV to label.
+            fg = gpu.dilate(gpu.dilate(gpu.erode(fg, 3), 3), 3, iterations=2).to(torch.uint8).cpu().numpy()
+            sw.lap("A: warp+background")
+        else:
+            pano, cost = warper.warp(frames, main_only=alone)
+            sw.lap("A: warp+blend")
+            fg = mog.apply(pano, learningRate=rate)
+            if alone:
+                fg[~main_sees] = 0
+            sw.lap("A: background")
+            players = cv2.dilate((fg[:, c0:c1] == 255).astype(np.uint8), np.ones((7, 7), np.uint8))
+            cost += PLAYER_COST * players
+            cost[~both[:, c0:c1]] = 50.0
             half = cost[: PH // 2 * 2].reshape(PH // 2, 2, -1).mean(1)
-            seam_h = seam_dp(half, seam_h, 2 * SEAM_LAMBDA)
-        seam = np.repeat(seam_h, 2)
-        seam = np.r_[seam, seam[-1:]][:PH]
+        seamer.submit(half, alone)
         sw.lap("A: seam")
         if i == n_warm:
-            bg = mog.getBackgroundImage()
+            bg = mog.background_image() if on_gpu else mog.getBackgroundImage()
             cv2.imwrite(str(out / "background.jpg"), bg)
             hsv = cv2.cvtColor(bg, cv2.COLOR_BGR2HSV)
             turf = ((hsv[..., 0] > 30) & (hsv[..., 0] < 95) & (hsv[..., 1] > 40)).astype(np.uint8) * 255
@@ -1966,8 +2010,9 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
             field = (lab == 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])).astype(np.uint8)
         if i < n_warm:
             continue
-        fg = cv2.morphologyEx((fg == 255).astype(np.uint8), cv2.MORPH_OPEN, kernel)
-        fg = cv2.dilate(fg, kernel, iterations=2)
+        if not on_gpu:
+            fg = cv2.morphologyEx((fg == 255).astype(np.uint8), cv2.MORPH_OPEN, kernel)
+            fg = cv2.dilate(fg, kernel, iterations=2)
         n, lab, stats, cent = cv2.connectedComponentsWithStats(fg)
         frame_dets = []
         for k in range(1, n):
@@ -1979,14 +2024,19 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
                                float(PP[feet_y, 0])))
         dets.append(frame_dets)
         sw.lap("A: blobs")
-        seams.append(np.full(PH, seam_alone) if alone else y0 + (c0 + seam) * step)
         if len(dets) == int(seconds * FPS / 2):
-            sample = pano.copy()
-            for yw, pt, *_ in frame_dets:
-                cv2.circle(sample, (int((yw - y0) / step), int((pt - p0) / step)), 6, (0, 0, 255), 2)
-            cv2.polylines(sample, [np.c_[c0 + seam, np.arange(PH)].astype(np.int32)], False, (255, 255, 0), 1)
+            sample = (pano.cpu().numpy() if on_gpu else pano.copy(), frame_dets, i)
+    # Every frame's seam, on all the panorama's rows; the warm-up's are dropped.
+    seam_cols = [np.r_[np.repeat(h, 2), h[-1:]][:PH] for h in seamer.results()]
+    seams = [np.full(PH, seam_alone) if alone else y0 + (c0 + seam) * step
+             for seam, alone in list(zip(seam_cols, alones))[n_warm:n_warm + len(dets)]]
+    sw.lap("A: seam")
     if sample is not None:
-        cv2.imwrite(str(out / "detections.jpg"), sample)
+        pano, frame_dets, i = sample
+        for yw, pt, *_ in frame_dets:
+            cv2.circle(pano, (int((yw - y0) / step), int((pt - p0) / step)), 6, (0, 0, 255), 2)
+        cv2.polylines(pano, [np.c_[c0 + seam_cols[i], np.arange(PH)].astype(np.int32)], False, (255, 255, 0), 1)
+        cv2.imwrite(str(out / "detections.jpg"), pano)
     sy = np.degrees(np.array(seams))
     print(f"seam yaw at the horizon row: {np.percentile(sy[:, PH // 2], [5, 50, 95]).round(1)} deg")
     counts = [len(d) for d in dets]

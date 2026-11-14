@@ -38,6 +38,52 @@ uploads the models (below) and pushes.
 Then deploy that stack with `-c engineImageTag=<tag> -c engineCompute=gpu`
 (its `infra/README.md`, "Cloud processing").
 
+### Build on AWS
+
+    packaging/cloud/build_image_cloud.sh <tag> <repository uri> <footage bucket>
+
+The same image, built and pushed by AWS CodeBuild instead of Docker on
+this machine. It needs the aws CLI signed in to the stack's account, `zip`
+and `uv`, and no Docker. A Mac builds this linux/amd64 image under
+emulation; CodeBuild builds it natively and pushes within the region.
+
+What the script does, in order:
+
+1. Stops if the repository already has the tag. A tag is never pushed
+   twice: a job definition that names it would quietly get another engine.
+2. Checks the models and uploads any the bucket lacks, as
+   `build_image.sh` does.
+3. Zips what the Dockerfile copies (`LICENSE`, `schemas/`, the three files
+   it names in `packaging/cloud/`, `processing/spikes/*.py` and
+   `lenses.json`) with a `buildspec.yml`, and puts the zip at
+   `build/engine-<tag>.zip` in the footage bucket. The build sees only
+   that zip, so a new file the Dockerfile copies has to be added to the
+   script's list too.
+4. Starts a build of the CodeBuild project `osb-engine-build` and waits.
+   The build signs Docker in to the repository, runs `docker build` with
+   the commit as `build_image.sh` gives it (`-dirty` included), and
+   pushes. The base image is pulled from Amazon's mirror
+   (`public.ecr.aws/docker/library/ubuntu`), because Docker Hub limits
+   pulls from CodeBuild's shared addresses.
+5. Deletes the zip. If the build failed, prints the end of its log
+   (CloudWatch log group `/aws/codebuild/osb-engine-build`).
+
+The first use makes two things in the account, outside the main repo's
+stack:
+
+| Resource | Name | Notes |
+|---|---|---|
+| CodeBuild project | `osb-engine-build` | Linux, 4 vCPU and 7 GB (`BUILD_GENERAL1_MEDIUM`), privileged so it can run Docker, 45 minute limit |
+| IAM role | `osb-engine-build` | Reads `build/*` in the footage bucket, pushes and pulls in the engine repository, writes its own log. Nothing else |
+
+Neither costs anything while idle. A build is billed by the minute
+(about a cent a minute at this size) and starts from an empty machine, so
+every build downloads the Python packages again. To remove them:
+
+    aws codebuild delete-project --name osb-engine-build
+    aws iam delete-role-policy --role-name osb-engine-build --policy-name build
+    aws iam delete-role --role-name osb-engine-build
+
 ## Models
 
 `models.json` pins each model by its SHA-256: where it is on the build

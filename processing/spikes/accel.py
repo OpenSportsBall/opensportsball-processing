@@ -68,6 +68,24 @@ def decode_args() -> list[str]:
     return {"mac": ["-hwaccel", "videotoolbox"], "nvidia": ["-hwaccel", "cuda"]}.get(platform(), [])
 
 
+def gpu_scale_args(width: int, height: int, src_w: int) -> tuple[list[str], str] | None:
+    """Decoder arguments and the resize filter that keep a frame on an
+    NVIDIA GPU until it is the size asked for: without them every 4K frame
+    is copied to the CPU and resized there, which with four streams at once
+    is much of a cloud instance's four CPUs. None where there is no such
+    GPU, where OSB_GPU_SCALE=0, or where the picture isn't at most half the
+    source's width (a full-size frame needs no resizing).
+
+    Two halvings rather than one step: scale_cuda's bilinear reads about
+    2 x 2 source pixels for each output pixel, so a single 4x step would
+    skip pixels and alias, and pass A's background model would see the
+    flicker as movement."""
+    if platform() != "nvidia" or os.environ.get("OSB_GPU_SCALE") == "0" or width * 2 > src_w:
+        return None
+    return (["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"],
+            f"scale_cuda={2 * width}:{2 * height}:format=nv12,scale_cuda={width}:{height},hwdownload,format=nv12")
+
+
 def h264_args(bitrate: str, maxrate: str | None = None) -> list[str]:
     """ffmpeg output options for H.264 at about `bitrate`, in hardware where
     there is an encoder for it. With `maxrate`, the rate is capped too (the

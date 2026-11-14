@@ -82,6 +82,10 @@ import accel  # noqa: E402
 from cloudprofile import Profile  # noqa: E402
 
 PROGRESS_EVERY_S = 30.0
+# Footage files downloaded at once, one stream each (fetch_hashed), and how
+# often a dropped stream is tried.
+FETCH_STREAMS = 24  # 8 gave 173 MB/s with the CPUs at 11%: each stream is about 22 MB/s
+FETCH_ATTEMPTS = 3
 SYNC_EVERY_S = 300.0
 # prepare's steps, in order, for a fraction (engine.py prepare).
 PREPARE_STEPS = ["verify-footage", "sync", "pitch", "goals", "kit-sample", "kits", "pitch-review"]
@@ -155,12 +159,38 @@ class Cloud:
 
     # -- the recording folder
 
+    def fetch_hashed(self, key: str, dest: Path, mtime_ns: int) -> str:
+        """One object as a single stream, hashed as it arrives; returns its
+        SHA-256. (download_file fetches a file's parts out of order, so the
+        file would have to be read back from the disk to hash it: 7 minutes
+        for a game on the scratch volume.)"""
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(dest.name + ".part")
+        for attempt in range(FETCH_ATTEMPTS):
+            try:
+                h = hashlib.sha256()
+                body = self.s3.get_object(Bucket=self.bucket, Key=key)["Body"]
+                with tmp.open("wb") as f:
+                    for chunk in body.iter_chunks(8 << 20):
+                        h.update(chunk)
+                        f.write(chunk)
+                break
+            except Exception as e:  # a dropped stream: the whole file again
+                if attempt == FETCH_ATTEMPTS - 1:
+                    raise
+                log(f"fetching {key} failed ({e}); trying again")
+        os.utime(tmp, ns=(mtime_ns, mtime_ns))
+        tmp.replace(dest)
+        return h.hexdigest()
+
     def fetch_footage(self, rec: Path) -> tuple[int, float]:
         """manifest.json and every segment, as engine.py expects them. A
         file already here at the manifest's size is kept. Each file gets the
-        time S3 has for it, so the engine's record of files it has hashed
-        (engine/verified.json, kept in the work prefix) still holds on
-        another machine. Returns the bytes fetched and the seconds it took."""
+        time S3 has for it, and is checked against the manifest's SHA-256 as
+        it downloads: the ones that match go into the engine's record of
+        files it has hashed (engine/verified.json, kept in the work prefix),
+        so the engine doesn't read them all again, here or on the next
+        machine. Returns the bytes fetched and the seconds it took."""
         objs = {o["Key"][len(self.footage):]: o for o in self.list(self.footage)}
         if "manifest.json" not in objs:
             raise Failed("footage_missing", "the recording's footage is no longer there")
@@ -174,16 +204,34 @@ class Cloud:
                     raise Failed("footage_missing", f"segment {s['objectKey']} is not in the bucket")
                 f = rec / s["objectKey"]
                 if not (f.exists() and f.stat().st_size == o["Size"]):
-                    todo.append((s["objectKey"], f, int(o["LastModified"].timestamp()) * 1_000_000_000))
+                    todo.append((s["objectKey"], f, int(o["LastModified"].timestamp()) * 1_000_000_000, s.get("sha256")))
         if not todo:
             return 0, 0.0
-        size = sum(objs[k]["Size"] for k, _, _ in todo)
+        size = sum(objs[k]["Size"] for k, *_ in todo)
         log(f"fetching {len(todo)} segment files, {size / 1e9:.1f} GB")
         t0 = time.time()
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-            list(pool.map(lambda t: self.fetch(self.footage + t[0], t[1], t[2]), todo))
-        log(f"footage fetched in {time.time() - t0:.0f} s")
-        return size, time.time() - t0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=FETCH_STREAMS) as pool:
+            digests = list(pool.map(lambda t: self.fetch_hashed(self.footage + t[0], t[1], t[2]), todo))
+        seconds = time.time() - t0
+        log(f"footage fetched and hashed in {seconds:.0f} s")
+        bad = [k for (k, _, _, want), got in zip(todo, digests) if want and got != want]
+        for (k, f, _, want), got in zip(todo, digests):
+            if want and got != want:
+                f.unlink(missing_ok=True)
+        if bad:
+            raise Failed("footage_corrupt", f"{len(bad)} segment file(s) don't match the manifest's SHA-256, e.g. {bad[0]}")
+        path = rec / "engine" / "verified.json"
+        try:
+            seen = json.loads(path.read_text()) if path.exists() else {}
+        except json.JSONDecodeError:
+            seen = {}
+        for (k, f, _, want), got in zip(todo, digests):
+            if want:
+                st = f.stat()
+                seen[k] = {"bytes": st.st_size, "mtimeNs": st.st_mtime_ns, "sha256": want}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(seen, indent=1))
+        return size, seconds
 
     def restore_work(self, rec: Path) -> None:
         """Everything under the work prefix, with the times it had."""

@@ -227,20 +227,34 @@ def main() -> None:
     alst.write_text("".join(f"file '{(rec / s['objectKey']).resolve()}'\n" for s in devs["main"]["segments"]))
     run([accel.ffmpeg(), "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(alst), "-vn", "-c:a", "copy",
          str(out / "audio.m4a")], log)
-    if a.height == PIECE_H:
-        video = ["-c", "copy"]
-    else:
-        br = UPLOAD_BITRATE[a.height]
-        video = ["-map", "0:v", "-map", "1:a", "-vf", f"scale={a.height * 16 // 9}:{a.height}:flags=lanczos",
-                 *accel.h264_args(br, br), "-profile:v", "high", "-pix_fmt", "yuv420p",
-                 "-c:a", "copy", "-movflags", "+faststart"]
     # The sound is cut to the video's length here: with --max-chunks the video
     # is only part of the game, and -shortest alone has left all of the sound
     # in (ffmpeg 6.1, copied audio: a 30 min video came out 100 min long).
     video_s = sum(seconds for _, seconds in chunks)
-    rc = run([accel.ffmpeg(), "-v", "error", "-y", "-i", str(out / "video.mp4"),
-              "-ss", f"{a.start:g}", "-t", f"{video_s:g}", "-i", str(out / "audio.m4a"),
-              *video, "-shortest", str(out / "game.mp4")], log)
+    sound = ["-ss", f"{a.start:g}", "-t", f"{video_s:g}", "-i", str(out / "audio.m4a")]
+
+    def mux(decode: list[str], video: list[str]) -> int:
+        return run([accel.ffmpeg(), "-v", "error", "-y", *decode, "-i", str(out / "video.mp4"), *sound,
+                    *video, "-shortest", str(out / "game.mp4")], log)
+
+    if a.height == PIECE_H:
+        rc = mux([], ["-c", "copy"])
+    else:
+        br = UPLOAD_BITRATE[a.height]
+        size = f"{a.height * 16 // 9}:{a.height}"
+        tail = ["-profile:v", "high", "-c:a", "copy", "-movflags", "+faststart"]
+        rc = 1
+        if accel.platform() == "nvidia" and os.environ.get("OSB_GPU_SCALE") != "0":
+            # Decoded, scaled up and encoded on the GPU: scaling on the CPU
+            # made this 14 minutes for 30 minutes of video on a cloud instance.
+            rc = mux(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"],
+                     ["-map", "0:v", "-map", "1:a", "-vf", f"scale_cuda={size}:interp_algo=lanczos",
+                      *accel.h264_args(br, br), *tail])
+            if rc:
+                print("the join on the GPU failed; scaling on the CPU instead", flush=True)
+        if rc:
+            rc = mux([], ["-map", "0:v", "-map", "1:a", "-vf", f"scale={size}:flags=lanczos",
+                          *accel.h264_args(br, br), "-pix_fmt", "yuv420p", *tail])
     print(f"{'done' if rc == 0 else 'mux FAILED'}: {out / 'game.mp4'} ({a.height}p) in {(time.time() - t0) / 3600:.1f} h",
           flush=True)
     event(event="done" if rc == 0 else "failed", output=str(out / "game.mp4"), seconds=round(time.time() - t0, 1),

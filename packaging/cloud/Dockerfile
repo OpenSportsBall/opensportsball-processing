@@ -24,7 +24,8 @@ COPY packaging/cloud/requirements.txt /tmp/requirements.txt
 RUN python3 -m venv /opt/venv \
  && /opt/venv/bin/pip install --no-cache-dir --no-deps -r /tmp/requirements.txt \
  && rm /tmp/requirements.txt \
- && /opt/venv/bin/python -c "import torch, rfdetr, cv2, scipy, sklearn, jsonschema, yaml, boto3; print('torch', torch.__version__)"
+ && /opt/venv/bin/python -c "import torch, rfdetr, cv2, scipy, sklearn, jsonschema, yaml, boto3; print('torch', torch.__version__)" \
+ && /opt/venv/bin/python -c "import torchcodec.decoders; print('torchcodec', torchcodec.__version__)"
 
 # The repository's layout, so the scripts find each other, the schemas and
 # the models (fetched at job start: packaging/cloud/models.json) as in a checkout.

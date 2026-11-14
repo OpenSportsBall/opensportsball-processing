@@ -185,6 +185,28 @@ def test_prepare_fetches_the_footage_and_publishes_the_questions(aws, monkeypatc
     assert "error" not in item
 
 
+def test_footage_is_checked_as_it_downloads(aws, monkeypatch):
+    s3, ddb, rec = aws
+    assert go(monkeypatch, "prepare") == 0
+    # What engine.py's own check (verify_footage) looks for: nothing left for it to read again.
+    seen = json.loads((rec / "engine" / "verified.json").read_text())
+    for k, v in SEGMENTS.items():
+        st = (rec / k).stat()
+        assert seen[k] == {"bytes": len(v), "mtimeNs": st.st_mtime_ns, "sha256": hashlib.sha256(v).hexdigest()}
+    # The record goes to the work prefix, so the next machine doesn't hash them either.
+    assert "engine/verified.json" in keys(s3, WORK)
+
+
+def test_footage_that_is_not_what_the_phone_sent_stops_the_job(aws, monkeypatch):
+    s3, ddb, rec = aws
+    k = sorted(SEGMENTS)[0]
+    s3.put_object(Bucket=BUCKET, Key=FOOTAGE + k, Body=b"x" * len(SEGMENTS[k]))
+    assert go(monkeypatch, "prepare") != 0
+    assert record(ddb)["error"]["M"]["code"]["S"] == "footage_corrupt"
+    assert not (rec / k).exists()
+    assert not (rec / "engine" / "calls.jsonl").exists()  # the engine never started
+
+
 def test_job_options_reach_the_engine(aws, monkeypatch):
     s3, ddb, rec = aws
     monkeypatch.setenv("OSB_JOB_OPTIONS", json.dumps({"options": {"maxChunks": 1}, "output": {"height": 1080}, "recording": "/etc"}))
