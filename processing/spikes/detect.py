@@ -154,6 +154,164 @@ def coreml_detector(rf, env: str, make, ckpt: Path | None = None, batches=(1, 8)
         return rf
 
 
+class NetworkClock:
+    """Wall seconds inside a detector's network, apart from what predict()
+    does around it (resizing and normalising the crops, decoding the
+    boxes, bringing them to the CPU). For rfdetr's PyTorch model, eager
+    or compiled: the GPU's queue is emptied before and after the network,
+    so work queued earlier isn't charged to it. `images` counts what the
+    network ran, padding included. `seconds` stays None for Core ML."""
+
+    def __init__(self, rf):
+        self.seconds, self.calls, self.images = None, 0, 0
+        for part in (rf.parts.values() if isinstance(rf, CompiledDetector) else [rf]):
+            part = getattr(part, "_native_model", part)  # a predictor holds its own copy of the model
+            ctx = getattr(part, "model", None)
+            for name in ("inference_model", "model"):
+                net = getattr(ctx, name, None)
+                if isinstance(net, torch.nn.Module):  # eager: rfdetr still treats it as a module
+                    net.register_forward_pre_hook(lambda _m, _a: self._begin())
+                    net.register_forward_hook(lambda _m, a, _o: self._end(a[0] if a else None))
+                elif callable(net):  # a compiled graph
+                    setattr(ctx, name, self._timed(net))
+                else:
+                    continue
+                self.seconds = 0.0
+                break
+
+    def _begin(self):
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        self.t = time.perf_counter()
+
+    def _end(self, x):
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        self.seconds += time.perf_counter() - self.t
+        self.calls += 1
+        x = getattr(x, "tensors", x)  # a NestedTensor's batch
+        self.images += int(x.shape[0]) if hasattr(x, "shape") else 0
+
+    def _timed(self, net):
+        def run(x, *args, **kw):
+            self._begin()
+            out = net(x, *args, **kw)
+            self._end(x)
+            return out
+        return run
+
+    def report(self, t_det: float) -> str:
+        if self.seconds is None:
+            return ""
+        per = f", {self.images / self.calls:.1f} crops a call" if self.calls else ""
+        return (f"of the detector's {t_det / 60:.1f} min: {self.seconds / 60:.1f} min in the network "
+                f"({self.calls} calls{per}), {(t_det - self.seconds) / 60:.1f} min preparing crops and reading boxes")
+
+
+def predict(model, crops, threshold: float):
+    """model.predict(crops, threshold). For rfdetr's PyTorch model, without
+    each crop's pixels kept with its result: by default it copies every
+    crop back to the CPU for that, which nothing here reads."""
+    if isinstance(model, CoreMLDetector):
+        return model.predict(crops, threshold=threshold)
+    return model.predict(crops, threshold=threshold, include_source_image=False)
+
+
+def half_precision(model, what: str):
+    """OSB_DETECTOR_HALF: rfdetr's PyTorch model as a half-precision
+    predictor (any batch size, same predict()). "1" for every detector, or
+    the names of those to change ("people", "ball,people"). Off unless
+    asked for: on an A10G it changed 6-14% of ball detections and 0.8% of
+    people (BACKLOG.md, 2026-11-14), and it has not been through the must-see bench.
+    Core ML is left as it is."""
+    asked = os.environ.get("OSB_DETECTOR_HALF", "")
+    if not (asked == "1" or what in asked.split(",")) or isinstance(model, (CoreMLDetector, CompiledDetector)):
+        return model
+    print(f"{what} detector in half precision (OSB_DETECTOR_HALF={asked})", flush=True)
+    return model.inference(compile=False, dtype=torch.float16)
+
+
+class CompiledDetector:
+    """rfdetr's PyTorch model compiled for a CUDA GPU, where a compiled
+    model runs one batch size only: one predictor per size in `sizes`,
+    and predict() sends each call's crops to the smallest that holds
+    them, repeating the last crop to fill it (the largest size takes the
+    rest in turn). Full precision."""
+
+    def __init__(self, rf, sizes):
+        self.parts = {b: rf.inference(compile=True, batch_size=b) for b in sorted(set(sizes))}
+
+    def predict(self, crops, threshold, **kw):
+        sizes, out, i = list(self.parts), [], 0
+        while i < len(crops):
+            b = next((s for s in sizes if s >= len(crops) - i), sizes[-1])
+            part = list(crops[i:i + b])
+            k = len(part)
+            res = self.parts[b].predict(part + [part[-1]] * (b - k), threshold=threshold, **kw)
+            out.extend((res if isinstance(res, list) else [res])[:k])
+            i += k
+        return out
+
+
+def compiled(model, what: str):
+    """OSB_DETECTOR_COMPILED: "ball=1,2,4,8" compiles the ball detector at
+    those batch sizes (CompiledDetector); several detectors are separated
+    by ";". Off unless asked for, and only on a CUDA GPU with rfdetr's
+    PyTorch model: on an A10G it changed 0.1-2.5% of ball detections
+    (BACKLOG.md, 2026-11-14) and has not been through the must-see bench."""
+    asked = dict(p.split("=", 1) for p in os.environ.get("OSB_DETECTOR_COMPILED", "").split(";") if "=" in p)
+    if what not in asked or isinstance(model, CoreMLDetector) or not torch.cuda.is_available():
+        return model
+    sizes = [int(b) for b in asked[what].split(",")]
+    t = time.perf_counter()
+    model = CompiledDetector(model, sizes)
+    print(f"{what} detector compiled for batches of {sorted(set(sizes))} in {time.perf_counter() - t:.0f} s "
+          f"(OSB_DETECTOR_COMPILED)", flush=True)
+    return model
+
+
+class Waited:
+    """An iterator that adds up the time spent waiting for its next item (frames from the decoder)."""
+
+    def __init__(self, it):
+        self.it, self.seconds = iter(it), 0.0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        t = time.perf_counter()
+        try:
+            return next(self.it)
+        finally:
+            self.seconds += time.perf_counter() - t
+
+
+def nv12_to_bgr_cv2(y: torch.Tensor, uv: torch.Tensor) -> torch.Tensor:
+    """cv2.cvtColor(nv12, cv2.COLOR_YUV2BGR_NV12) on the GPU, to the bit:
+    y (H x W uint8), uv (H/2 x W/2 x 2 uint8) -> BGR uint8 (H x W x 3).
+    OpenCV's own fixed-point BT.601 arithmetic, each chroma sample used
+    for its 2x2 block. For code whose numbers were fitted on OpenCV's
+    colours (teams.py's kit model); nv12_to_rgb is the BT.709 one."""
+    yy = (y.to(torch.int32) - 16).clamp_min(0) * 1220542
+    c = uv.to(torch.int32) - 128
+    c = c.repeat_interleave(2, 0).repeat_interleave(2, 1)
+    u, v = c[..., 0], c[..., 1]
+    half = 1 << 19
+    b = (yy + half + 2116026 * u) >> 20
+    g = (yy + half - 409993 * u - 852492 * v) >> 20
+    r = (yy + half + 1673527 * v) >> 20
+    return torch.stack([b, g, r], -1).clamp(0, 255).to(torch.uint8)
+
+
+def halve_area(img: torch.Tensor) -> torch.Tensor:
+    """cv2.resize(img, half the size, interpolation=cv2.INTER_AREA) on the
+    GPU, to the bit: H x W x C uint8 -> H/2 x W/2 x C, each pixel the
+    rounded mean of its 2x2 block."""
+    x = img.to(torch.int32)
+    return ((x[0::2, 0::2] + x[0::2, 1::2] + x[1::2, 0::2] + x[1::2, 1::2] + 2) >> 2).to(torch.uint8)
+
+
 def nv12_to_rgb(y: torch.Tensor, uv: torch.Tensor) -> torch.Tensor:
     """NV12 planes (1x1xHxW, 1x2xH/2xW/2) -> RGB 3xHxW in [0, 1]."""
     h, w = y.shape[-2:]
