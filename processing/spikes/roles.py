@@ -46,6 +46,9 @@ KEEPER_Z_M = 25.0
 FAR_MIN_PX = 12            # near a goal, people this tall still get a colour (keepers are far and small) ...
 FAR_SAT = 30.0             # ... and a saturated torso there (not a kit colour) is the keeper
 # OSB_PEOPLE_COREML: Core ML for the people detector on a Mac unless "0" (detect.coreml_detector)
+# The people detector's Core ML export: half precision unless OSB_PEOPLE_PRECISION=float32. People are
+# big and many, so fp16's drift costs little here; the ball detector (ballwin.py) stays in fp32.
+PRECISION = os.environ.get("OSB_PEOPLE_PRECISION", "float16")
 
 
 def main(rec: Path, seg: int, start: float, seconds: float, tset: str, fps: float) -> None:
@@ -76,7 +79,7 @@ def main(rec: Path, seg: int, start: float, seconds: float, tset: str, fps: floa
         return int(np.argmax(ll))
 
     model = rfdetr.RFDETRMedium()
-    model = detect.coreml_detector(model, "OSB_PEOPLE_COREML", rfdetr.RFDETRMedium, batches=(8,))
+    model = detect.coreml_detector(model, "OSB_PEOPLE_COREML", rfdetr.RFDETRMedium, batches=(8,), precision=PRECISION)
     W, H = follow.SRC_W, follow.SRC_H
     streams = [follow.prefetch(follow.game_stream(rec, devs, report, ph, seg, start, seconds, W, fps=fps))
                for ph in (0, 1)]
@@ -140,7 +143,7 @@ def main(rec: Path, seg: int, start: float, seconds: float, tset: str, fps: floa
     path.parent.mkdir(exist_ok=True)
     path.write_text(json.dumps({"segment": seg, "fps": fps, "teams": tset, "frames": frames_out}))
     print(f"{len(frames_out)} frames in {(time.time() - t0) / 60:.1f} min; roles {dict(tally)} -> {path.name}; "
-          f"detector {t_det / 60:.1f} min ({'Core ML' if isinstance(model, detect.CoreMLDetector) else 'PyTorch'})", flush=True)
+          f"detector {t_det / 60:.1f} min ({f'Core ML {PRECISION}' if isinstance(model, detect.CoreMLDetector) else 'PyTorch'})", flush=True)
     os._exit(0)  # the output is written; teardown has hung (decoder threads)
 
 
