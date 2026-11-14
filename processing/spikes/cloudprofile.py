@@ -19,8 +19,13 @@ One profile per command, written to the job's output folder:
       "chunks": [...],   # run: engine.py status's chunkDetails (each chunk's stages and times)
       "usage": {"gpuUtil": {"mean", "p50", "p95", "max"}, "gpuMemoryMiB": {...}, "gpuDecoder": {...},
                 "gpuEncoder": {...}, "cpuUtil": {...}, "memoryUsedMiB": {...}, "containerMemoryMiB": {...}},
+      "cpuSeconds": {"follow.py": 812.4, "ffmpeg < follow.py": 655.0, "ballwin.py": ...},
       "samples": 1234, "sampleEveryS": 5
     }
+
+`cpuSeconds` is the CPU time each kind of process used (a script by its
+name, ffmpeg by the script that started it), from /proc at each sample: which
+part of the pipeline the CPUs went to. Each step in `steps` has its own.
 
 `t` is seconds since cloud.py started. `bootToStartS` is how long the
 machine had been up when it did (/proc/uptime): instance boot, the ECS
@@ -90,6 +95,36 @@ def _container_memory_mib() -> float | None:
     return None
 
 
+def _process_cpu() -> dict[int, tuple[str, float]]:
+    """Every process in sight (the container's): what it is and the CPU
+    seconds it has used so far. A Python process is its script's name;
+    anything else its program's, with the script that started it."""
+    tick = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
+    found: dict[int, tuple[str, float, int]] = {}
+    try:
+        pids = [int(p) for p in os.listdir("/proc") if p.isdigit()]
+    except OSError:
+        return {}
+    for pid in pids:
+        stat, cmd = _read(f"/proc/{pid}/stat"), _read(f"/proc/{pid}/cmdline")
+        if not stat or not cmd:
+            continue
+        try:
+            rest = stat[stat.rindex(")") + 2:].split()  # after "(comm) ": state, ppid, ..., utime, stime
+            ppid, cpu = int(rest[1]), (int(rest[11]) + int(rest[12])) / tick
+        except (ValueError, IndexError):
+            continue
+        argv = cmd.split("\0")
+        script = next((Path(a).name for a in argv[1:4] if a.endswith(".py")), None)
+        found[pid] = (script or Path(argv[0]).name, cpu, ppid)
+    out = {}
+    for pid, (name, cpu, ppid) in found.items():
+        if not name.endswith(".py") and ppid in found and found[ppid][0].endswith(".py"):
+            name = f"{name} < {found[ppid][0]}"
+        out[pid] = (name, cpu)
+    return out
+
+
 def _stats(values: list[float]) -> dict | None:
     if not values:
         return None
@@ -119,6 +154,8 @@ class Profile:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._cpu = _cpu_times()
+        self._procs: dict[int, tuple[str, float]] = {}  # each process seen: its kind, CPU seconds when last seen
+        self._step_cpu0: dict[str, float] = {}
         self.machine = self._machine()
         self.mark("start")
 
@@ -145,6 +182,17 @@ class Profile:
                 m["availabilityZone"] = json.loads(meta).get("AvailabilityZone")
             except json.JSONDecodeError:
                 pass
+        # Which disk the job's files are on: the instance's own NVMe drive or the root volume.
+        scratch = os.environ.get("OSB_SCRATCH", "/scratch")
+        for line in (_read("/proc/mounts") or "").splitlines():
+            dev, where, fs = (line.split() + ["", "", ""])[:3]
+            if where == scratch:
+                m["scratch"] = {"device": dev, "filesystem": fs}
+                try:
+                    st = os.statvfs(scratch)
+                    m["scratch"]["gb"] = round(st.f_blocks * st.f_frsize / 1e9)
+                except OSError:
+                    pass
         if os.environ.get("OSB_INSTANCE_TYPE"):
             m["instanceType"] = os.environ["OSB_INSTANCE_TYPE"]
         return m
@@ -166,12 +214,28 @@ class Profile:
         if e.get("status") == "started":
             self.step = e.get("step")
             self.mark(f"step:{self.step}")
+            self._step_cpu0 = self.cpu_seconds(fresh=True)
         elif e.get("status") == "done":
             mine = [s for s in self.samples if s.get("step") == e.get("step")]
-            self.steps.append({"step": e.get("step"), "seconds": e.get("seconds"), **summarize(mine)})
+            now = self.cpu_seconds(fresh=True)
+            used = {k: round(v - self._step_cpu0.get(k, 0.0), 1) for k, v in now.items()}
+            self.steps.append({"step": e.get("step"), "seconds": e.get("seconds"), **summarize(mine),
+                               "cpuSeconds": {k: v for k, v in used.items() if v >= 0.1}})
             self.step = None
 
     # -- sampling
+
+    def cpu_seconds(self, fresh: bool = False) -> dict[str, float]:
+        """CPU seconds so far by kind of process, counting the ones that have ended at their last sample."""
+        if fresh:
+            try:
+                self._procs.update(_process_cpu())
+            except Exception:
+                pass
+        total: dict[str, float] = {}
+        for name, cpu in list(self._procs.values()):
+            total[name] = total.get(name, 0.0) + cpu
+        return {k: round(v, 1) for k, v in sorted(total.items(), key=lambda kv: -kv[1])}
 
     def _gpu(self) -> dict:
         try:
@@ -201,6 +265,7 @@ class Profile:
         c = _container_memory_mib()
         if c is not None:
             s["containerMemoryMiB"] = round(c)
+        self._procs.update(_process_cpu())
         self.samples.append(s)
         return s
 
@@ -226,7 +291,8 @@ class Profile:
         return {"command": self.command, "engineVersion": self.engine_version, "exit": exit_code,
                 "machine": self.machine, "seconds": self.t(), "timeline": self.timeline, "transfers": self.transfers,
                 "steps": self.steps, **({"chunks": self.chunks} if self.chunks is not None else {}),
-                "usage": summarize(self.samples), "samples": len(self.samples),
+                "usage": summarize(self.samples),
+                "cpuSeconds": {k: v for k, v in self.cpu_seconds().items() if v >= 0.1}, "samples": len(self.samples),
                 "sampleEveryS": float(os.environ.get("OSB_PROFILE_EVERY_S", SAMPLE_S))}
 
     def samples_jsonl(self) -> str:

@@ -75,8 +75,28 @@ class TorchCamera:
         return torch.nan_to_num(g, nan=2.0, posinf=2.0, neginf=-2.0).clamp(-2, 2)[None].to(DT)
 
 
-def upload_nv12(buf: np.ndarray, w: int, h: int, dev: torch.device):
-    """One NV12 frame (flat uint8) -> (Y 1x1xHxW, UV 1x2xH/2xW/2) on the GPU."""
+class GpuNV12:
+    """One NV12 frame that never left the GPU (nvdec.py decodes into these):
+    luma `y` (H x W) and chroma `uv` (H/2 x W/2 x 2), uint8 on the GPU.
+    Stands in for the flat uint8 array the ffmpeg pipe gives: upload_nv12
+    takes either, and np.asarray(frame) copies it to the CPU for code that
+    still works there."""
+
+    __slots__ = ("y", "uv")
+
+    def __init__(self, y: torch.Tensor, uv: torch.Tensor):
+        self.y, self.uv = y, uv
+
+    def __array__(self, dtype=None, copy=None):
+        a = torch.cat([self.y.reshape(-1), self.uv.reshape(-1)]).cpu().numpy()
+        return a if dtype is None else a.astype(dtype, copy=False)
+
+
+def upload_nv12(buf, w: int, h: int, dev: torch.device):
+    """One NV12 frame (flat uint8, or a GpuNV12 already there) ->
+    (Y 1x1xHxW, UV 1x2xH/2xW/2) on the GPU."""
+    if isinstance(buf, GpuNV12):
+        return buf.y.view(1, 1, h, w).to(DT), buf.uv.permute(2, 0, 1)[None].to(DT)
     t = torch.from_numpy(buf).to(dev, non_blocking=True)
     y = t[: w * h].view(1, 1, h, w).to(DT)
     uv = t[w * h:].view(h // 2, w // 2, 2).permute(2, 0, 1)[None].to(DT)
@@ -205,12 +225,18 @@ class PanoWarper:
         seam cost over the overlap columns (float32, CPU). `main_only`:
         Secondary has no footage for this frame, so the panorama is what
         Main sees and black elsewhere, and there is no seam to cost."""
+        bgr, diff = self.warp_gpu(frames, main_only)
+        return bgr.cpu().numpy(), diff.cpu().numpy()
+
+    def warp_gpu(self, frames, main_only: bool = False):
+        """`warp`, with both results left on the GPU (BGR uint8 H x W x 3,
+        cost float32)."""
         if main_only:
             yy, uv = apply_gain(*sample(frames[0], self.grids[0]), self.gains[0])
             seen = self.w[0] > 0
             bgr = nv_to_bgr(torch.where(seen, yy[0], torch.full_like(yy[0], 16)).float(),
                             torch.where(seen, uv, torch.full_like(uv, 128)).float())
-            return bgr.cpu().numpy(), np.zeros((seen.shape[0], self.c1 - self.c0), np.float32)
+            return bgr, torch.zeros((seen.shape[0], self.c1 - self.c0), dtype=torch.float32, device=self.dev)
         s = [apply_gain(*sample(p, g), gn) for p, g, gn in zip(frames, self.grids, self.gains)]
         y = (s[0][0] * self.w[0] + s[1][0] * self.w[1]) / self.wsum
         uv = (s[0][1] * self.w[0] + s[1][1] * self.w[1]) / self.wsum
@@ -219,7 +245,7 @@ class PanoWarper:
         diff = ((s[0][0][:, :, c0:c1] - s[1][0][:, :, c0:c1]).abs().sum(0)
                 + (s[0][1][:, :, c0:c1] - s[1][1][:, :, c0:c1]).abs().sum(0)) / (3 * 255)
         diff = F.avg_pool2d(diff[None, None].float(), 3, stride=1, padding=1)[0, 0]
-        return bgr.cpu().numpy(), diff.cpu().numpy()
+        return bgr, diff
 
 
 def nv_to_bgr(y: torch.Tensor, uv: torch.Tensor) -> torch.Tensor:
@@ -231,3 +257,162 @@ def nv_to_bgr(y: torch.Tensor, uv: torch.Tensor) -> torch.Tensor:
     g = yy - 0.1873 * cb - 0.4681 * cr
     b = yy + 1.8556 * cb
     return torch.stack([b, g, r], -1).round().clamp(0, 255).to(torch.uint8)
+
+
+def dilate(x: torch.Tensor, k: int, iterations: int = 1) -> torch.Tensor:
+    """cv2.dilate with a k x k square on a 0/1 mask (H x W, float)."""
+    for _ in range(iterations):
+        x = F.max_pool2d(x[None, None], k, stride=1, padding=k // 2)[0, 0]
+    return x
+
+
+def erode(x: torch.Tensor, k: int) -> torch.Tensor:
+    """cv2.erode with a k x k square on a 0/1 mask: outside the picture
+    counts as set, as OpenCV's default border does."""
+    return -F.max_pool2d(-x[None, None], k, stride=1, padding=k // 2)[0, 0]
+
+
+class MOG2:
+    """OpenCV's BackgroundSubtractorMOG2 (Zivkovic's adaptive mixture of
+    Gaussians; bgfg_gaussmix2.cpp) on the GPU, so pass A's panorama need
+    not come back to the CPU for it: 29 ms of every frame on a cloud
+    instance's four CPUs, the GPU idle meanwhile. The same model, update and
+    shadow rule, with OpenCV's defaults; `apply` returns the same mask (0
+    background, 127 shadow, 255 foreground), as a tensor.
+
+    Each pixel keeps up to K modes (weight, mean colour, one variance),
+    heaviest first. OpenCV walks each pixel's modes in a loop. Here the
+    heaviest mode is done for every pixel at once, which settles nearly all
+    of them (the pitch is the pitch), and the rest of the work (later
+    modes, new modes, reordering, shadows) only for the pixels that need
+    it: doing all of it everywhere is half a second a frame."""
+
+    K = 5
+    BACKGROUND_RATIO = 0.9   # TB: the heaviest modes up to this weight are the background
+    VAR_THRESHOLD_GEN = 9.0  # Tg: a pixel within this of a mode belongs to it
+    VAR_INIT, VAR_MIN, VAR_MAX = 15.0, 4.0, 75.0
+    CT = 0.05                # complexity reduction: a mode must keep earning its weight
+    TAU = 0.5                # a shadow is no darker than this times the background
+
+    def __init__(self, h: int, w: int, dev: torch.device, history: int = 300, var_threshold: float = 24.0):
+        self.h, self.w, self.history, self.tb = h, w, history, var_threshold
+        self.frames = 0
+        # Pixels flattened, so a subset of them is one index.
+        self.weight = torch.zeros((self.K, h * w), dtype=torch.float32, device=dev)
+        self.var = torch.zeros((self.K, h * w), dtype=torch.float32, device=dev)
+        self.mean = torch.zeros((self.K, 3, h * w), dtype=torch.float32, device=dev)
+
+    @torch.no_grad()
+    def apply(self, bgr: torch.Tensor, learning_rate: float = -1) -> torch.Tensor:
+        """`bgr`: H x W x 3 uint8. Returns the mask, H x W uint8."""
+        K, TB, TG = self.K, self.BACKGROUND_RATIO, self.VAR_THRESHOLD_GEN
+        x = bgr.reshape(-1, 3).t().float()  # 3 x P
+        self.frames += 1
+        alpha = learning_rate if learning_rate >= 0 and self.frames > 1 else 1.0 / min(2 * self.frames, self.history)
+        alpha1, prune = 1.0 - alpha, -alpha * self.CT
+        W, V, M = self.weight, self.var, self.mean
+        # Every mode's weight decays; one that has decayed away is dropped
+        # (and an unused one, weight 0, stays so). The mode a pixel matches
+        # gains alpha instead, below.
+        raw = alpha1 * W + prune
+        after = torch.where(raw >= -prune, raw, torch.zeros_like(raw))
+
+        # The heaviest mode, everywhere.
+        used1 = W[1] > 0
+        d = M[0] - x
+        dist2 = (d * d).sum(0)
+        can = W[0] > 0
+        background = can & (dist2 < self.tb * V[0])
+        fits = can & (dist2 < TG * V[0])
+        w = raw[0] + alpha
+        k = torch.where(fits, alpha / w, torch.zeros_like(w))
+        M[0] -= k * d
+        V[0] = torch.where(fits, (V[0] + k * (dist2 - V[0])).clamp(self.VAR_MIN, self.VAR_MAX), V[0])
+        after[0] = torch.where(fits, w, after[0])
+
+        # The other modes, where the first didn't match and there are others.
+        later = (~fits & used1).nonzero()[:, 0]
+        if later.numel():
+            xs = x[:, later]
+            fit_s = torch.zeros_like(later, dtype=torch.bool)
+            bg_s = background[later]
+            total = after[0, later]
+            for m in range(1, K):
+                can = (W[m, later] > 0) & ~fit_s
+                mean, var = M[m][:, later], V[m, later]
+                d = mean - xs
+                dist2 = (d * d).sum(0)
+                bg_s |= can & (total < TB) & (dist2 < self.tb * var)
+                match = can & (dist2 < TG * var)
+                w = raw[m, later] + alpha
+                k = torch.where(match, alpha / w, torch.zeros_like(w))
+                M[m][:, later] = mean - k * d
+                V[m, later] = torch.where(match, (var + k * (dist2 - var)).clamp(self.VAR_MIN, self.VAR_MAX), var)
+                wm = torch.where(match, w, after[m, later])
+                after[m, later] = wm
+                fit_s |= match
+                total = total + wm
+            fits[later] = fit_s
+            background[later] = bg_s
+        W.copy_(after / after.sum(0).clamp_min(1e-12))
+
+        # A pixel no mode explains starts a new one, in the first free place
+        # or over the lightest.
+        changed = torch.zeros_like(fits)
+        changed[later] = True
+        if alpha > 0:
+            new = (~fits).nonzero()[:, 0]
+            if new.numel():
+                wn = W[:, new]
+                n = (wn > 0).sum(0)
+                slot = n.clamp_max(K - 1)[None]
+                wn = (wn * alpha1).scatter_(0, slot, torch.where(n == 0, 1.0, alpha)[None].to(wn.dtype))
+                W[:, new] = wn
+                V[:, new] = V[:, new].scatter_(0, slot, torch.full_like(slot, self.VAR_INIT, dtype=V.dtype))
+                M[:, :, new] = M[:, :, new].scatter_(0, slot[:, None].expand(1, 3, -1), x[None, :, new])
+                changed[new] = True
+        # Heaviest first again, as OpenCV keeps them (it moves a mode up as
+        # its weight grows): only where a later mode matched or a new one came.
+        moved = changed.nonzero()[:, 0]
+        if moved.numel():
+            ws = W[:, moved]
+            order = torch.sort(ws, dim=0, descending=True, stable=True).indices
+            W[:, moved] = torch.gather(ws, 0, order)
+            V[:, moved] = torch.gather(V[:, moved], 0, order)
+            M[:, :, moved] = torch.gather(M[:, :, moved], 0, order[:, None].expand(-1, 3, -1))
+
+        # What isn't background is foreground, or a shadow: darker than a
+        # background mode, and the same colour.
+        mask = torch.zeros(self.h * self.w, dtype=torch.uint8, device=x.device)
+        fg = (~background).nonzero()[:, 0]
+        if fg.numel():
+            xs = x[:, fg]
+            shadow = torch.zeros_like(fg, dtype=torch.bool)
+            alive = torch.ones_like(shadow)
+            seen = torch.zeros_like(fg, dtype=torch.float32)
+            for m in range(K):
+                mean, wm = M[m][:, fg], W[m, fg]
+                num = (xs * mean).sum(0)
+                den = (mean * mean).sum(0)
+                alive &= (wm > 0) & (den > 0)
+                a = num / den.clamp_min(1e-12)
+                e = a * mean - xs
+                hit = alive & (num <= den) & (num >= self.TAU * den) & ((e * e).sum(0) < self.tb * V[m, fg] * a * a)
+                shadow |= hit
+                seen += wm
+                alive &= ~hit & (seen <= TB)
+            mask[fg] = torch.where(shadow, 127, 255).to(torch.uint8)
+        return mask.view(self.h, self.w)
+
+    def background_image(self) -> np.ndarray:
+        """cv2's getBackgroundImage: each pixel's background modes, averaged by weight (BGR uint8)."""
+        acc = torch.zeros_like(self.mean[0])
+        total = torch.zeros_like(self.weight[0])
+        going = torch.ones_like(total, dtype=torch.bool)
+        for m in range(self.K):
+            w = torch.where(going, self.weight[m], torch.zeros_like(total))
+            acc += w * self.mean[m]
+            total += w
+            going &= total <= self.BACKGROUND_RATIO
+        img = acc / total.clamp_min(1e-12)
+        return img.t().reshape(self.h, self.w, 3).round().clamp(0, 255).to(torch.uint8).cpu().numpy()
