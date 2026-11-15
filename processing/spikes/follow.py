@@ -805,6 +805,30 @@ FAST_SPEED = 4.0        # "fastboost": above this (a firm run) ...
 FAST_GAIN = 2.0         # ... each further m/s adds this much extra weight (3x the slope)
 
 
+FIELD_MARGIN_M = 3.0  # pass A keeps blobs whose feet are this far outside the lines (a throw-in taker's run-up)
+
+
+def pitch_field(rec: Path, YY: np.ndarray, PP: np.ndarray) -> np.ndarray | None:
+    """Where the pitch is in pass A's panorama, from the fitted pitch
+    (pitch.json): the pixels whose rays meet the ground within
+    FIELD_MARGIN_M of the lines. None without a fitted pitch.
+
+    Pass A used to take the pitch to be the largest green area of the
+    learnt background. Under floodlights most of the turf is too dark or
+    too pale to pass as green: in a night game that left a patch by the
+    camera, and a median of one player a frame where twenty were playing."""
+    import pitch as P
+
+    try:
+        pose = P.load_pose(rec)
+    except (FileNotFoundError, KeyError):
+        return None
+    at = pose.to_pitch(np.degrees(YY), np.degrees(PP))
+    with np.errstate(invalid="ignore"):
+        return ((np.abs(at[..., 0]) <= pose.L / 2 + FIELD_MARGIN_M)
+                & (np.abs(at[..., 1]) <= pose.W / 2 + FIELD_MARGIN_M)).astype(np.uint8)
+
+
 def hot_weights(speed, features=()):
     """Speed weights for the hotspot: linear in speed, 0.5..8 m/s, so
     several moving players outweigh one sprinter. "nowalk" zeroes players
@@ -1860,7 +1884,10 @@ def plan_path(rec: Path, out: Path, seg: int, start: float, dets, extent, aim: s
 
 def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", features: tuple = ()) -> None:
     sw = Stopwatch()
-    profile = os.environ.get("OSB_FOLLOW_PROFILE") == "1"
+    # OSB_FOLLOW_PROFILE=1 times the parts of each stage; =path also
+    # profiles path planning by function (which slows it by a fifth).
+    profile = os.environ.get("OSB_FOLLOW_PROFILE") in ("1", "path")
+    by_function = os.environ.get("OSB_FOLLOW_PROFILE") == "path"
 
     def part(name: str) -> None:
         """OSB_FOLLOW_PROFILE=1: a lap for one part of a stage, taken once
@@ -2070,11 +2097,19 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
         if i == n_warm:
             bg = mog.background_image() if on_gpu else mog.getBackgroundImage()
             cv2.imwrite(str(out / "background.jpg"), bg)
-            hsv = cv2.cvtColor(bg, cv2.COLOR_BGR2HSV)
-            turf = ((hsv[..., 0] > 30) & (hsv[..., 0] < 95) & (hsv[..., 1] > 40)).astype(np.uint8) * 255
-            turf = cv2.morphologyEx(turf, cv2.MORPH_CLOSE, np.ones((25, 25), np.uint8))
-            n, lab, stats, _ = cv2.connectedComponentsWithStats(turf)
-            field = (lab == 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])).astype(np.uint8)
+            # Blobs count where the pitch is: from the fitted pitch, or
+            # (OSB_FIELD=colour, or no fitted pitch) the largest green area
+            # of the background, as it was before.
+            field = None if os.environ.get("OSB_FIELD") == "colour" else pitch_field(rec, YY, PP)
+            how = "the fitted pitch"
+            if field is None:
+                hsv = cv2.cvtColor(bg, cv2.COLOR_BGR2HSV)
+                turf = ((hsv[..., 0] > 30) & (hsv[..., 0] < 95) & (hsv[..., 1] > 40)).astype(np.uint8) * 255
+                turf = cv2.morphologyEx(turf, cv2.MORPH_CLOSE, np.ones((25, 25), np.uint8))
+                n, lab, stats, _ = cv2.connectedComponentsWithStats(turf)
+                field = (lab == 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])).astype(np.uint8)
+                how = "the background's largest green area"
+            print(f"pass A: blobs kept on {how}, {100 * field.mean():.0f}% of the panorama", flush=True)
         if i < n_warm:
             continue
         if not on_gpu:
@@ -2111,7 +2146,7 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
     if os.environ.get("OSB_NO_RENDER") or profile:  # pass A's result, to plan the path again without the video
         passa_cache(out, seg, start, seconds).write_text(json.dumps({
             "dets": dets, "extent": [y0, y1, p0, p1], "alone": alone_frames.tolist(), "mainYaw": main_yaw}))
-    if profile:
+    if by_function:
         import cProfile
         import pstats
 
@@ -2119,7 +2154,7 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
         prof.enable()
     yaw, pitch, hfov = plan_path(rec, out, seg, start, dets, (y0, y1, p0, p1), aim, features, alone_frames, main_yaw,
                                  cm)
-    if profile:
+    if by_function:
         prof.disable()
         print("path planning, by function:", flush=True)
         pstats.Stats(prof, stream=sys.stdout).strip_dirs().sort_stats("cumulative").print_stats(40)
