@@ -141,6 +141,8 @@ holds the same boxes in the first camera model and is kept only to score the fir
 rec7 has one set, `footage/rec7/playeval/seg0-1484` (5 moments on the full-game run's piece 2; a
 `clip.json`, but not part of the standard bench), scored against that run's path files.
 
+rec8 (the 2026-11-11 night game, run by the Mac app) has three sets on the full-game run's pieces 1, 5 and 6: `footage/rec8/playeval/seg0-600` (13:11, 13:28, 14:51, 15:02, 17:33, 17:39), `seg0-3000` (54:37; 55:03, 56:39 and 56:54 have panoramas but no box) and `seg0-3600` (1:02:04, 1:03:02, 1:04:27; 1:05:16 without a box). All 10 are plays the follow cam missed while watching the game, not random moments, so a score here is a count of misses fixed and says nothing about plays it already caught. From 54:37 on Secondary has no footage: those panoramas, and the camera, have Main's half of the pitch only. Each set has a `clip.json` (not part of the standard bench) and `paths/fullgame_2026-11-14.json`, the Mac app's run (`goalkick,goalframe,unsure,ball,goalin,ballhold,roles,kickoff`): 0/10 captured, in `lull` at six of them (the held aim, far from the ball; `fullgame/camlog.txt`). The sets were drawn from an engine label set (`engine.py label job.json moments --at ...`) and split by piece.
+
 Bench of both recordings on 2026-10-23 (after the loiter-band, ball-jump, restart and surge changes):
 `goalkick,goalframe,unsure,ball,goalin,ballhold,roles,kickoff,peoplesurge` captures 29/41 (rec3 20/26,
 rec4 9/15: 10:00-20:00 4/6, 20:00-30:00 5/9); without `peoplesurge` 28/41 (20/26, 8/15). Sets are
