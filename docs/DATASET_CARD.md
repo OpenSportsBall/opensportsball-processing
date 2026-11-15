@@ -55,6 +55,7 @@ The repository mirrors the `footage/` directory of
 | `bench/fixtures/pitch/` | Pitch-mapping regression fixtures and the marked-field benchmark |
 | `models/` | The standard ball detector and judge, with a README of what each was trained on |
 | `rec5-game/`, `rec6/`, `rec7/` | Pitch maps (`pitch/`) and ball label sets (`labels*/`, with their frames) from three more games: an orange ball, the first daylight game, and a night game with a yellow ball, with the cameras the pitch maps were made with (`phase0/cameras.json`). rec5-game and rec7 also have team sides (`teams/`), and rec7 a play-box set (`playeval/`). Their full videos are not included |
+| `rec8/` | A fourth game outside the bench (night, 2026-11-11): its pitch map, cameras and team sides, and three play-box sets (`playeval/seg0-600`, `seg0-3000`, `seg0-3600`) of 10 plays the follow cam missed. From 54:37 on only Main has footage, so those panoramas show its half of the pitch. Its full video is not included |
 
 A pitch map (`pitch/`) holds the fitted pitch (`pitch.json`), the median
 background panorama it was fitted on (`background.png`, 0.03 deg per pixel)

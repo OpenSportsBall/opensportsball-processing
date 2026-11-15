@@ -56,11 +56,14 @@ def segment_time(devs: dict, seg: int, t: float) -> tuple[int, float]:
     return seg, t
 
 
-def grab(rec: Path, devs: dict, report: dict, phone: int, seg: int, t: float, flip: bool) -> np.ndarray:
-    """One full-resolution BGR frame of a phone at Main's time `t` in `seg`."""
+def grab(rec: Path, devs: dict, report: dict, phone: int, seg: int, t: float, flip: bool) -> np.ndarray | None:
+    """One full-resolution BGR frame of a phone at Main's time `t` in `seg`.
+    None where Secondary has no footage (it stopped early)."""
     role = ("main", "secondary")[phone]
     at = follow.phone_at(devs, report, role, seg, t)
     if at is None:
+        if phone == 1:
+            return None
         raise SystemExit(f"no {role} frame at segment {seg}, {t:.2f} s")
     key, local, _ = at
     path = rec / key
@@ -99,14 +102,18 @@ def make(rec: Path, name: str, seg0: int, start: float, times: list[float], out:
         seg, t = segment_time(devs, seg0, start + clip_t)
         iid = f"s{seg0}_{start:g}_t{clip_t:g}"
         frames = [grab(rec, devs, report, ph, seg, t, flip[ph]) for ph in (0, 1)]
-        warped = [cv2.remap(f, mx, my, cv2.INTER_LINEAR) for f, (mx, my) in zip(frames, maps)]
-        pano = np.where(use_main[..., None], warped[0], warped[1])
-        pano[~seen] = 0
+        warped = [cv2.remap(f, mx, my, cv2.INTER_LINEAR) for f, (mx, my) in zip(frames, maps) if f is not None]
+        if frames[1] is None:  # Main alone: its whole view, the rest black
+            pano = warped[0]
+            pano[edge[0] < 0] = 0
+        else:
+            pano = np.where(use_main[..., None], warped[0], warped[1])
+            pano[~seen] = 0
         cv2.imwrite(str(out / "pano" / f"{iid}.jpg"), pano, [cv2.IMWRITE_JPEG_QUALITY, 92])
         items[iid] = {"id": iid, "clipSegment": seg0, "clipStartS": start, "clipT": clip_t,
                       "frame": int(round(clip_t * follow.FPS)), "segment": seg, "segmentT": round(t, 3),
                       "image": f"pano/{iid}.jpg"}
-        print(f"{iid}: segment {seg} at {t:.2f} s")
+        print(f"{iid}: segment {seg} at {t:.2f} s" + ("" if frames[1] is not None else " (Main alone: no Secondary footage)"))
     meta = {"panoDeg": PANO_DEG, "yawDeg": PANO_YAW, "pitchDeg": PANO_PITCH, "width": W, "height": H}
     items_path.write_text(json.dumps(sorted(items.values(), key=lambda i: i["clipT"]), indent=1))
     (out / "pano.json").write_text(json.dumps(meta))

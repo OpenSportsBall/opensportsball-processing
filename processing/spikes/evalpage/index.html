@@ -129,6 +129,8 @@ function resize() {
   const r = cv.getBoundingClientRect();
   cv.width = r.width * devicePixelRatio; cv.height = r.height * devicePixelRatio;
   ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  // The picture loaded while the page had no size (opened in the background): fit it now.
+  if (img && img.complete && meta && !(view.s > 0) && r.width > 0) { fitBox() || fitAll(); return; }
   draw();
 }
 

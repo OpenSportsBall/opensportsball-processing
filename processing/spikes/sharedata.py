@@ -57,6 +57,7 @@ ANNOTATED = {
     "rec5-game": ["pitch", "labels", "labels_kits", "teams"],
     "rec6": ["pitch", "labels"],
     "rec7": ["pitch", "labels_seg6", "playeval", "teams"],
+    "rec8": ["pitch", "playeval", "teams"],
 }
 
 # The app's upload state: the account id, S3 multipart upload ids and part ETags.

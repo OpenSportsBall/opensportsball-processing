@@ -1673,6 +1673,31 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         smaller cloud GPU needs them: smaller detector batches, fp16, the
         NV12 crop above, running the stages one after another. The render
         keeps per-frame data, so check its peak on a full 10-minute chunk.
+      - Run-to-run variation (2026-11-15, rec8, the whole game twice by
+        the Mac app 0.1.8, engine `ed0d4d4`, same footage, pitch answers
+        and features `goalkick,goalframe,unsure,ball,goalin,ballhold,
+        roles,kickoff`; the second run after deleting `fullgame/`,
+        `detect/` and `follow/`; first run 2026-11-14 12:38-17:33, second
+        23:57-04:57). The roles files are byte-identical in all 10
+        chunks. The ball candidates are not: 33,439 of 59,713 frames
+        (56%) hold different detections (35-69% by chunk); in 7,821 of
+        those the boxes are the same and only scores differ (the first
+        frame's judge score is 1.0 in one run, 0.996 in the other). The
+        camera follower turns that into different games: rec8's 10
+        missed-play boxes score 0/10 on the first run and 4/10 on the
+        second (15:02, 17:39, 1:02:04, 1:03:02 at 100%; 13:11 0 -> 57%).
+        Of the six still missed, the camera is in `lull` at 13:11, 14:51
+        and 17:33, has no tracked ball at 13:28 (`ballhold`) and 1:04:27
+        (`hotspot`), and at 54:37 follows a tracked ball outside the
+        box (labelled since, `labels_seg11-136`: the user's reading is
+        that the tracker was on a wrong detection; the real ball
+        crosses Main's frame right to left and leaves it by 54:41). Not found: where the ball stage's difference starts (the
+        Core ML detector, the judge, or the decode). Until it is, a
+        must-see score from one full-game run can move by this much
+        with no change at all. First run's candidates, camlog and paths:
+        `footage/rec8/{detect,fullgame}`; second run's: the app's game
+        folder, paths also in
+        `footage/rec8/playeval/*/paths/fullgame_2026-11-15.json`.
 - [ ] Follow cam speed, further ideas (a full game is ~2.5 h locally
       today, half in each pass):
       - Profile (2026-11-08, rec7 0 2084.88 600, follow.py alone on the
