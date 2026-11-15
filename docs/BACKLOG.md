@@ -1609,6 +1609,24 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         The pass is now 450 s: pass A 171 (waiting on the decoder), path
         45, render 157, encode 49. Next: the final video step re-encodes
         the whole game with only the encoder busy (246 s for one chunk).
+      - Pass A's pitch from the fitted pitch, not the background's colour
+        (2026-11-14). In the 2026-11-11 night game pass A found a median
+        of 1 and 4 players a frame in the second and third ten minutes,
+        where roles.py's people detector found about 22: blobs are kept
+        only where "the pitch" is, and that was the largest green,
+        saturated area of the learnt background, which under floodlights
+        was a patch by the camera (23% of the panorama). The first ten
+        minutes looked fine by accident: with no warm-up the background
+        is the first frame, the phones still pointing at the grass.
+        `follow.pitch_field` takes the pitch from pitch.json (feet within
+        FIELD_MARGIN_M of the lines); colour remains for a recording with
+        no fitted pitch (`OSB_FIELD=colour` to compare). On 60 s of that
+        game: median 0 -> 26 blobs a frame, 62 -> 40,493 detections inside
+        the lines. On 40 s of rec7 (daylight) the detections inside the
+        lines are the same 28,030. A player's long shadow under the
+        lights gives several blobs; not yet looked at. The same game has
+        no team A or B in roles.py's output at all (everyone "other"):
+        open.
         Checked in ballwin.py (2026-11-08): `OSB_DETECTOR_COREML=<folder
         of the b1 and b8 fp32 exports>` (run with `--with coremltools`)
         swaps the detector for Core ML, batch 8 for calls over 6 crops,
