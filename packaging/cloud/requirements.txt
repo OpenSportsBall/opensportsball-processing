@@ -31,9 +31,13 @@ contourpy==1.4.0
 cuda-bindings==13.5.0
     # via torch
 cuda-pathfinder==1.8.6
-    # via cuda-bindings
+    # via
+    #   cuda-bindings
+    #   cupy-cuda13x
 cuda-toolkit==13.2.2
     # via torch
+cupy-cuda13x==14.2.0
+    # via -r packaging/cloud/requirements.in
 cycler==0.12.1
     # via matplotlib
 defusedxml==0.7.1
@@ -97,6 +101,7 @@ numpy==2.5.4
     # via
     #   -r packaging/cloud/requirements.in
     #   contourpy
+    #   cupy-cuda13x
     #   matplotlib
     #   opencv-python-headless
     #   rfdetr

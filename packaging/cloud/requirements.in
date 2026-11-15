@@ -13,3 +13,4 @@ scikit-learn>=1.4
 pyyaml>=6
 jsonschema>=4.20
 boto3>=1.35
+cupy-cuda13x>=14  # mog2_kernel.py: compiles and starts one CUDA kernel; matches torch's CUDA 13 wheels

@@ -1586,6 +1586,29 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         The share of time aimed at the ball stayed 19 / 43-44 / 41%. None
         of these has been through the must-see bench, and all are off by
         default.
+      - The follow pass profiled on its own (2026-11-14, g5.xlarge, one
+        10-minute chunk with 16 players a frame, `OSB_FOLLOW_PROFILE=1`,
+        which waits for the GPU between parts): 790 s, of which the
+        background model 241, render 131, labelling blobs 103, path
+        planning 103, warp 54, encode 49. GPU 45% busy, CPU 65%: one
+        thread stepping through the frames. Then, with the camera path
+        byte-identical throughout:
+        - The background model as one CUDA kernel (`mog2_kernel.py`,
+          through CuPy): 241 -> 51 s. Built for the CPU the same C gives
+          OpenCV's mask and the PyTorch version's model to the bit; on
+          the GPU 1,063 pixels in 18,000 frames differ from the PyTorch
+          version (not traced; `OSB_MOG2=check` counts them).
+        - The seam search as a CUDA kernel (`seam.GpuSeams`): the Python
+          search, 15 ms a frame in its own process, had become what pass
+          A waited for. 0 of 18,000 seams differ (`OSB_SEAM=check`).
+        - Blobs labelled on two threads: 103 -> 1 s.
+        - Path planning, 104 -> 45 s: its time follows the players in
+          view (10 s on a chunk with 1-4 a frame). Detections projected
+          to the pitch a frame at a time, not one by one (794,000 calls),
+          and a frame's six hotspot climbs stepped together.
+        The pass is now 450 s: pass A 171 (waiting on the decoder), path
+        45, render 157, encode 49. Next: the final video step re-encodes
+        the whole game with only the encoder busy (246 s for one chunk).
         Checked in ballwin.py (2026-11-08): `OSB_DETECTOR_COREML=<folder
         of the b1 and b8 fp32 exports>` (run with `--with coremltools`)
         swaps the detector for Core ML, batch 8 for calls over 6 crops,

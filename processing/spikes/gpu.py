@@ -14,6 +14,8 @@ coordinates mirrored in both axes), so its frames are never flipped.
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -154,9 +156,10 @@ class ViewRenderer:
         y = torch.linalg.cross(z, x)
         return (self.u / f)[..., None] * x + (self.v / f)[..., None] * y + z
 
-    def render(self, frames, yaw, pitch, hfov, seam: torch.Tensor) -> np.ndarray:
+    def render(self, frames, yaw, pitch, hfov, seam: torch.Tensor, on_gpu: bool = False):
         """`frames`: NV12 planes per phone; `seam`: seam yaw per panorama
-        row. Returns one NV12 output frame (flat uint8)."""
+        row. Returns one NV12 output frame (flat uint8), still on the GPU
+        if `on_gpu`."""
         d = self.directions(yaw, pitch, hfov)
         vy = torch.atan2(d[..., 0], d[..., 2])
         vp = torch.atan2(d[..., 1], torch.hypot(d[..., 0], d[..., 2]))
@@ -200,7 +203,7 @@ class ViewRenderer:
         y = out[0][0]
         uv = F.avg_pool2d(out[1][None], 2)[0].permute(1, 2, 0)  # H/2 x W/2 x 2, interleaved
         frame = torch.cat([y.reshape(-1), uv.reshape(-1)]).round().clamp(0, 255).to(torch.uint8)
-        return frame.cpu().numpy()
+        return frame if on_gpu else frame.cpu().numpy()
 
 
 class PanoWarper:
@@ -294,13 +297,21 @@ class MOG2:
     CT = 0.05                # complexity reduction: a mode must keep earning its weight
     TAU = 0.5                # a shadow is no darker than this times the background
 
-    def __init__(self, h: int, w: int, dev: torch.device, history: int = 300, var_threshold: float = 24.0):
+    def __init__(self, h: int, w: int, dev: torch.device, history: int = 300, var_threshold: float = 24.0,
+                 kernel: str | None = None):
         self.h, self.w, self.history, self.tb = h, w, history, var_threshold
         self.frames = 0
         # Pixels flattened, so a subset of them is one index.
         self.weight = torch.zeros((self.K, h * w), dtype=torch.float32, device=dev)
         self.var = torch.zeros((self.K, h * w), dtype=torch.float32, device=dev)
         self.mean = torch.zeros((self.K, 3, h * w), dtype=torch.float32, device=dev)
+        # On an NVIDIA GPU the update is one kernel (mog2_kernel.py), the
+        # same arithmetic. OSB_MOG2=torch keeps the operations below;
+        # =check runs both and counts where they differ (`checked`).
+        how = os.environ.get("OSB_MOG2", "kernel") if kernel is None else kernel
+        self.kernel = dev.type == "cuda" and how in ("kernel", "check")
+        self.twin = MOG2(h, w, dev, history, var_threshold, kernel="torch") if self.kernel and how == "check" else None
+        self.checked = [0, 0, 0]  # frames, frames whose masks differ, pixels that differ
 
     @torch.no_grad()
     def apply(self, bgr: torch.Tensor, learning_rate: float = -1) -> torch.Tensor:
@@ -309,6 +320,27 @@ class MOG2:
         x = bgr.reshape(-1, 3).t().float()  # 3 x P
         self.frames += 1
         alpha = learning_rate if learning_rate >= 0 and self.frames > 1 else 1.0 / min(2 * self.frames, self.history)
+        if self.kernel:
+            import mog2_kernel
+
+            mask = torch.empty(self.h * self.w, dtype=torch.uint8, device=bgr.device)
+            try:
+                mog2_kernel.launch(bgr.reshape(-1, 3).contiguous(), self.weight, self.var, self.mean, mask,
+                                   self.h * self.w, alpha, self.tb, self.CT)
+            except Exception as e:
+                # Before the first frame only (the kernel is compiled then): nothing has been changed yet.
+                if self.frames > 1:
+                    raise
+                print(f"background model: the GPU kernel is not available ({type(e).__name__}: {e}); "
+                      "using the PyTorch operations", flush=True)
+                self.kernel, self.twin = False, None
+                self.frames -= 1
+                return self.apply(bgr, learning_rate)
+            mask = mask.view(self.h, self.w)
+            if self.twin is not None:
+                wrong = int((self.twin.apply(bgr, learning_rate) != mask).sum())
+                self.checked = [self.checked[0] + 1, self.checked[1] + (wrong > 0), self.checked[2] + wrong]
+            return mask
         alpha1, prune = 1.0 - alpha, -alpha * self.CT
         W, V, M = self.weight, self.var, self.mean
         # Every mode's weight decays; one that has decayed away is dropped
@@ -403,6 +435,16 @@ class MOG2:
                 alive &= ~hit & (seen <= TB)
             mask[fg] = torch.where(shadow, 127, 255).to(torch.uint8)
         return mask.view(self.h, self.w)
+
+    def check_report(self) -> str:
+        """OSB_MOG2=check: how the kernel's masks and model compare with the PyTorch operations'."""
+        if self.twin is None:
+            return ""
+        f, bad, px = self.checked
+        state = max(float((a - b).abs().max()) for a, b in
+                    ((self.weight, self.twin.weight), (self.var, self.twin.var), (self.mean, self.twin.mean)))
+        return (f"background model check: {bad} of {f} frames' masks differ ({px} pixels of {f * self.h * self.w}); "
+                f"the models differ by at most {state:g}")
 
     def background_image(self) -> np.ndarray:
         """cv2's getBackgroundImage: each pixel's background modes, averaged by weight (BGR uint8)."""

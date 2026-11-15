@@ -49,6 +49,43 @@ def test_mog2_gives_opencvs_mask_and_background():
     assert np.abs(ref.getBackgroundImage().astype(int) - mine.background_image().astype(int)).max() <= 1
 
 
+def test_the_kernels_c_gives_opencvs_mask_and_the_same_model(tmp_path):
+    """mog2_kernel.PIXEL, built for the CPU: the GPU runs the same C, a thread per pixel."""
+    import ctypes
+    import shutil
+    import subprocess
+
+    import mog2_kernel
+
+    cc = shutil.which("cc")
+    if not cc:
+        pytest.skip("no C compiler")
+    (tmp_path / "m.c").write_text(mog2_kernel.CPU)
+    lib = tmp_path / "m.so"
+    subprocess.run([cc, "-O2", "-ffp-contract=off", "-shared", "-fPIC", "-o", str(lib), str(tmp_path / "m.c")],
+                   check=True)
+    fn = ctypes.CDLL(str(lib)).mog2_frame
+    p = ctypes.c_void_p
+    fn.argtypes = [p, p, p, p, p, ctypes.c_longlong, *[ctypes.c_float] * 4, ctypes.c_int]
+    h, w = 90, 160
+    n = h * w
+    ref = cv2.createBackgroundSubtractorMOG2(history=300, varThreshold=24, detectShadows=True)
+    twin = gpu.MOG2(h, w, torch.device("cpu"))
+    W, V = np.zeros((5, n), np.float32), np.zeros((5, n), np.float32)
+    M, mask = np.zeros((5, 3, n), np.float32), np.zeros(n, np.uint8)
+    for i, f in enumerate(frames(240)):
+        rate = -1 if i < 100 else 0.02 if 150 <= i < 170 else 1 / 1800
+        alpha = rate if rate >= 0 and i > 0 else 1.0 / min(2 * (i + 1), 300)
+        f = np.ascontiguousarray(f)
+        fn(f.ctypes.data, W.ctypes.data, V.ctypes.data, M.ctypes.data, mask.ctypes.data, n,
+           alpha, 1.0 - alpha, -alpha * gpu.MOG2.CT, 24.0, int(alpha > 0))
+        want = ref.apply(f, learningRate=rate)
+        assert (want.reshape(-1) == mask).all(), f"frame {i}: {(want.reshape(-1) != mask).sum()} pixels differ"
+        twin.apply(torch.from_numpy(f), rate)
+    for mine, theirs in ((W, twin.weight), (V, twin.var), (M, twin.mean)):
+        assert np.array_equal(mine, theirs.numpy())  # to the bit
+
+
 def test_morphology_matches_opencv():
     rng = np.random.default_rng(1)
     m = (rng.random((40, 60)) > 0.7).astype(np.uint8)
