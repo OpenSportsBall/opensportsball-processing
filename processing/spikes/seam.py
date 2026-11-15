@@ -49,6 +49,139 @@ def seam_dp(cost: np.ndarray, prev: np.ndarray | None, lam: float) -> np.ndarray
     return path
 
 
+# The same search for an NVIDIA GPU: one block, a thread per column, the
+# rows in turn. CELL is the arithmetic for one cell, in double precision as
+# seam_dp's is, shared with a CPU build that tests/test_seam.py holds to
+# seam_dp.
+CELL = r"""
+/* The cost of (r, c): the frame's, plus the pull towards the last seam. */
+SEAM_FN double seam_cost(const float *cost, const int *prev, int r, int c, int W, double lam, int pulled)
+{
+    double v = (double)cost[r * W + c];
+    if (pulled) {
+        int d = c - prev[r];
+        v = v + lam * (double)(d < 0 ? -d : d);
+    }
+    return v;
+}
+
+/* The cheapest of the five cells above (r, c) (two columns either way; the
+   first of equals, as argmin gives): its cost, and which in *k (-2..2). */
+SEAM_FN double seam_best(const double *acc, int c, int W, signed char *k)
+{
+    double best = 0.0;
+    int have = 0, j;
+    *k = -2;
+    for (j = -2; j <= 2; j++) {
+        int cc = c + j;
+        if (cc < 0 || cc >= W) continue;
+        if (!have || acc[cc] < best) { best = acc[cc]; *k = (signed char)j; have = 1; }
+    }
+    return best;
+}
+"""
+
+CPU = "#define SEAM_FN static\n" + CELL + r"""
+void seam_frame(const float *cost, const int *prev, int *path, signed char *back,
+                int H, int W, double lam, int pulled)
+{
+    double acc[2][4096];
+    int r, c, cur = 0;
+    for (c = 0; c < W; c++) acc[0][c] = seam_cost(cost, prev, 0, c, W, lam, pulled);
+    for (r = 1; r < H; r++) {
+        for (c = 0; c < W; c++) {
+            signed char k;
+            double v = seam_best(acc[cur], c, W, &k);
+            back[r * W + c] = k;
+            acc[1 - cur][c] = seam_cost(cost, prev, r, c, W, lam, pulled) + v;
+        }
+        cur = 1 - cur;
+    }
+    int at = 0;
+    for (c = 1; c < W; c++) if (acc[cur][c] < acc[cur][at]) at = c;
+    path[H - 1] = at;
+    for (r = H - 1; r > 0; r--) { at = at + back[r * W + at]; path[r - 1] = at; }
+}
+"""
+
+MAX_COLS = 1024  # a block's threads
+
+CUDA = "#define SEAM_FN __device__ __forceinline__\n" + CELL + r"""
+extern "C" __global__
+void seam_frame(const float *cost, const int *prev, int *path, signed char *back,
+                int H, int W, double lam, int pulled)
+{
+    __shared__ double acc[2][1024];
+    int c = threadIdx.x, cur = 0, r;
+    if (c < W) acc[0][c] = seam_cost(cost, prev, 0, c, W, lam, pulled);
+    __syncthreads();
+    for (r = 1; r < H; r++) {
+        if (c < W) {
+            signed char k;
+            double v = seam_best(acc[cur], c, W, &k);
+            back[r * W + c] = k;
+            acc[1 - cur][c] = seam_cost(cost, prev, r, c, W, lam, pulled) + v;
+        }
+        __syncthreads();
+        cur = 1 - cur;
+    }
+    if (c == 0) {
+        int at = 0, i;
+        for (i = 1; i < W; i++) if (acc[cur][i] < acc[cur][at]) at = i;
+        path[H - 1] = at;
+        for (r = H - 1; r > 0; r--) { at = at + back[r * W + at]; path[r - 1] = at; }
+    }
+}
+"""
+
+
+class GpuSeams:
+    """`Seams` for costs that are on an NVIDIA GPU: each frame's search is
+    one kernel there, so no cost comes back to the CPU and nothing waits
+    for a search in Python (15 ms a frame, the slowest thing in pass A once
+    the background model was a kernel). `check`: also search the old way
+    and say in `results` how many frames' seams differ."""
+
+    def __init__(self, lam: float, check: bool = False):
+        import cupy as cp
+
+        self.cp = cp
+        self.kernel = cp.RawKernel(CUDA, "seam_frame", options=("--fmad=false",))
+        self.lam, self.prev, self.out, self.back = lam, None, [], None
+        self.twin = Seams(lam, worker=True) if check else None
+
+    def submit(self, cost, alone: bool) -> None:
+        import torch
+
+        if self.twin is not None:
+            self.twin.submit(cost.cpu().numpy(), alone)
+        if not alone or self.prev is None:
+            H, W = cost.shape
+            if W > MAX_COLS:
+                raise ValueError(f"the overlap is {W} columns; the GPU search takes {MAX_COLS}")
+            cost = cost.contiguous().float()
+            if self.back is None:
+                self.back = torch.empty(H * W, dtype=torch.int8, device=cost.device)
+            path = torch.empty(H, dtype=torch.int32, device=cost.device)
+            cp = self.cp
+            self.kernel((1,), (MAX_COLS,),
+                        (cp.asarray(cost), cp.asarray(self.prev if self.prev is not None else path),
+                         cp.asarray(path), cp.asarray(self.back), np.int32(H), np.int32(W),
+                         np.float64(self.lam), np.int32(self.prev is not None)))
+            self.prev = path
+        self.out.append(self.prev)
+
+    def results(self) -> list[np.ndarray]:
+        import torch
+
+        out = list(torch.stack(self.out).cpu().numpy()) if self.out else []
+        if self.twin is not None:
+            want = self.twin.results()
+            bad = sum(not np.array_equal(a, b) for a, b in zip(out, want))
+            print(f"seam check: {bad} of {len(out)} frames' seams differ from the search in Python", flush=True)
+        return out
+
+
 class Seams:
     """Each frame's seam, searched as the frames come. `submit` a frame's
     cost (`alone`: Secondary has no footage for it, so the last seam is

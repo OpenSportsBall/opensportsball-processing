@@ -68,6 +68,7 @@ import sys
 import threading
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import cv2
@@ -81,7 +82,7 @@ import accel  # noqa: E402
 import gpu  # noqa: E402
 import nvdec  # noqa: E402
 import phase0  # noqa: E402
-from seam import Seams, seam_dp  # noqa: E402, F401
+from seam import GpuSeams, Seams, seam_dp  # noqa: E402, F401
 
 FPS = 30
 CAL_W = 960            # width the cameras are estimated at (phase0.PREVIEW_W)
@@ -846,25 +847,38 @@ def hotspots(pos, vel, fps, features=()):
         def density(p):
             return float((w * np.exp(-((x - p) ** 2).sum(1) / h2)).sum())
 
-        def climb(p):
+        x0, x1 = np.ascontiguousarray(x[:, 0]), np.ascontiguousarray(x[:, 1])
+
+        def climb(starts):
+            """Mean shift from each start (rows) to its peak. All the
+            starts take each step together: a climb is some thirty small
+            array operations, and six climbs a frame over a busy ten
+            minutes was most of a minute of calling them one by one."""
+            p = np.array(starts, float)
+            going = np.arange(len(p))
             for _ in range(20):
-                g = w * np.exp(-((x - p) ** 2).sum(1) / h2)
-                if g.sum() < 1e-9:  # nothing weighted within reach: stay
-                    return p
-                q = (g[:, None] * x).sum(0) / g.sum()
-                if np.hypot(*(q - p)) < 0.05:
-                    return q
-                p = q
+                if not len(going):
+                    break
+                at = p[going]
+                dx, dz = x0[None] - at[:, :1], x1[None] - at[:, 1:]
+                g = w * np.exp(-(dx * dx + dz * dz) / h2)
+                total = g.sum(1)
+                near = total >= 1e-9  # nothing weighted within reach: stay
+                going, g, total = going[near], g[near], total[near]
+                q = np.stack([(g * x0).sum(1), (g * x1).sum(1)], 1) / total[:, None]
+                step = np.hypot(q[:, 0] - p[going, 0], q[:, 1] - p[going, 1])
+                p[going] = q
+                going = going[step >= 0.05]
             return p
 
         # Candidate peaks: from where we are, and from the fastest runners.
         fast = x[np.argsort(-w)[:5]]
-        cands = [climb(f) for f in fast]
-        best = max(cands, key=density)
+        peaks = climb(fast if cur is None else np.vstack([fast, cur]))
+        best = max(list(peaks[:len(fast)]), key=density)
         if cur is None:
             cur = best
         else:
-            cur = climb(cur)
+            cur = peaks[-1]
             if density(best) > HOT_SWITCH * density(cur) and np.hypot(*(best - cur)) > HOT_BANDWIDTH_M:
                 # A different, stronger spot: move only if it stays stronger.
                 same = challenger is not None and np.hypot(*(best - challenger)) < HOT_BANDWIDTH_M
@@ -1200,10 +1214,11 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
     inside = []
     for i, fd in enumerate(dets):
         xz = []
-        for yw, _, _, feet in fd:
-            x, z = pose.to_pitch(np.degrees(yw), np.degrees(feet))
-            if not np.isnan(x) and abs(x) <= hl + INSIDE_M and abs(z) <= hw + INSIDE_M:
-                xz.append((float(x), float(z)))
+        if fd:  # the frame's blobs together: one at a time was half a minute of a busy ten
+            a = np.array(fd, float)
+            at = pose.to_pitch(np.degrees(a[:, 0]), np.degrees(a[:, 3]))
+            ok = ~np.isnan(at[:, 0]) & (np.abs(at[:, 0]) <= hl + INSIDE_M) & (np.abs(at[:, 1]) <= hw + INSIDE_M)
+            xz = [(float(x), float(z)) for x, z in at[ok]]
         if roles_frames is not None:
             k = min(len(roles_frames) - 1, int(round(i / FPS * roles_fps)))
             ppl = roles_frames[k]["people"]
@@ -1211,8 +1226,10 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
             keepers_at[i] = [np.array(q["xz"]) for q in ppl if q["role"] == "keeper"]
             sided_at[i] = (np.array([q["xz"] for q in ppl if q["role"] == "A"]).reshape(-1, 2),
                            np.array([q["xz"] for q in ppl if q["role"] == "B"]).reshape(-1, 2))
-            if refs:
-                kept = [p_ for p_ in xz if all(np.hypot(*(np.array(p_) - r)) > ROLE_MATCH_M for r in refs)]
+            if refs and xz:
+                p_, r_ = np.array(xz), np.array(refs)
+                far = (np.hypot(p_[:, None, 0] - r_[None, :, 0], p_[:, None, 1] - r_[None, :, 1]) > ROLE_MATCH_M).all(1)
+                kept = [q for q, f_ in zip(xz, far) if f_]
                 n_ref += len(xz) - len(kept)
                 xz = kept
         inside.append(xz)
@@ -1843,6 +1860,17 @@ def plan_path(rec: Path, out: Path, seg: int, start: float, dets, extent, aim: s
 
 def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", features: tuple = ()) -> None:
     sw = Stopwatch()
+    profile = os.environ.get("OSB_FOLLOW_PROFILE") == "1"
+
+    def part(name: str) -> None:
+        """OSB_FOLLOW_PROFILE=1: a lap for one part of a stage, taken once
+        the GPU has finished what was queued (work there is otherwise
+        charged to whichever later step waits for a result). The waiting
+        slows the pass a little, so it is off unless asked for."""
+        if profile:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            sw.lap(name)
     manifest = json.loads((rec / "manifest.json").read_text())
     report = json.loads((rec / "phase0" / "report.json").read_text())
     devs = phase0.paired_devices(manifest, report)
@@ -1951,7 +1979,39 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
     kernel = np.ones((3, 3), np.uint8)
     sample = None
     alones: list[bool] = []
-    seamer = Seams(2 * SEAM_LAMBDA, worker=on_gpu)
+    # On an NVIDIA GPU the seam is searched there too (seam.GpuSeams).
+    # OSB_SEAM=worker keeps the search in Python, in a process of its own;
+    # =check does both and counts the frames whose seams differ.
+    seam_how = os.environ.get("OSB_SEAM", "kernel") if on_gpu and dev.type == "cuda" else "worker"
+    seam_on_gpu = seam_how in ("kernel", "check")
+    if seam_on_gpu:
+        try:
+            seamer = GpuSeams(2 * SEAM_LAMBDA, check=seam_how == "check")
+        except Exception as e:
+            print(f"seam: the GPU search is not available ({type(e).__name__}: {e}); searching in Python", flush=True)
+            seam_on_gpu = False
+    if not seam_on_gpu:
+        seamer = Seams(2 * SEAM_LAMBDA, worker=on_gpu)
+    # Labelling a frame's blobs is OpenCV on the CPU, 6 ms a frame: on two
+    # threads of its own (OpenCV lets other Python run meanwhile), so the
+    # GPU's next frame doesn't wait for it. At most 64 frames' masks wait.
+    labellers = ThreadPoolExecutor(2)
+    waiting = threading.Semaphore(64)
+
+    def label(fg):
+        try:
+            n, lab, stats, cent = cv2.connectedComponentsWithStats(fg)
+            found = []
+            for k in range(1, n):
+                x, y, w, h, area = stats[k]
+                feet_x, feet_y = x + w // 2, min(y + h, PH - 1)
+                if area < 12 or h < 5 or w > 3 * h or not field[feet_y, feet_x]:
+                    continue
+                found.append((float(YY[0, int(cent[k][0])]), float(PP[int(cent[k][1]), 0]), float(area),
+                              float(PP[feet_y, 0])))
+            return found
+        finally:
+            waiting.release()
     if on_gpu:
         mog = gpu.MOG2(PH, PW, dev, history=300, var_threshold=24)
         main_hidden = torch.tensor(~main_sees, device=dev)
@@ -1965,6 +2025,7 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
         alone = bool(missing[min(i, len(missing) - 1)])
         alones.append(alone)
         frames = [gpu.upload_nv12(f, CAL_W, lo_h, dev) for f in (fa, fb)]
+        part("A: frames to planes")
         # After the warm-up, learn the background slowly (~a minute), so a
         # player standing still (a keeper waiting to take a goal kick) stays
         # foreground instead of fading in after ~10 s. When Secondary's
@@ -1977,16 +2038,22 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
         # Searched on row pairs; it moves slowly, so half the rows is plenty.
         if on_gpu:
             pano, cost = warper.warp_gpu(frames, main_only=alone)
+            part("A: warp")
             fg = mog.apply(pano, rate)
+            part("A: background model")
             if alone:
                 fg[main_hidden] = 0
             fg = (fg == 255).float()
             cost = cost + PLAYER_COST * gpu.dilate(fg[:, c0:c1], 7)
             cost[no_overlap] = 50.0
-            half = cost[: PH // 2 * 2].reshape(PH // 2, 2, -1).mean(1).cpu().numpy()
+            half = cost[: PH // 2 * 2].reshape(PH // 2, 2, -1).mean(1)
             # The blobs' mask, opened and grown as below, ready for OpenCV to label.
-            fg = gpu.dilate(gpu.dilate(gpu.erode(fg, 3), 3), 3, iterations=2).to(torch.uint8).cpu().numpy()
-            sw.lap("A: warp+background")
+            fg = gpu.dilate(gpu.dilate(gpu.erode(fg, 3), 3), 3, iterations=2).to(torch.uint8)
+            part("A: seam cost and mask")
+            if not seam_on_gpu:
+                half = half.cpu().numpy()
+            fg = fg.cpu().numpy()
+            sw.lap("A: to the CPU" if profile else "A: warp+background")
         else:
             pano, cost = warper.warp(frames, main_only=alone)
             sw.lap("A: warp+blend")
@@ -2013,27 +2080,24 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
         if not on_gpu:
             fg = cv2.morphologyEx((fg == 255).astype(np.uint8), cv2.MORPH_OPEN, kernel)
             fg = cv2.dilate(fg, kernel, iterations=2)
-        n, lab, stats, cent = cv2.connectedComponentsWithStats(fg)
-        frame_dets = []
-        for k in range(1, n):
-            x, y, w, h, area = stats[k]
-            feet_x, feet_y = x + w // 2, min(y + h, PH - 1)
-            if area < 12 or h < 5 or w > 3 * h or not field[feet_y, feet_x]:
-                continue
-            frame_dets.append((float(YY[0, int(cent[k][0])]), float(PP[int(cent[k][1]), 0]), float(area),
-                               float(PP[feet_y, 0])))
-        dets.append(frame_dets)
+        waiting.acquire()
+        dets.append(labellers.submit(label, fg))
         sw.lap("A: blobs")
         if len(dets) == int(seconds * FPS / 2):
-            sample = (pano.cpu().numpy() if on_gpu else pano.copy(), frame_dets, i)
+            sample = (pano.cpu().numpy() if on_gpu else pano.copy(), len(dets) - 1, i)
+    dets = [d.result() for d in dets]
+    labellers.shutdown()
+    sw.lap("A: blobs")
+    if on_gpu and mog.check_report():
+        print(mog.check_report(), flush=True)
     # Every frame's seam, on all the panorama's rows; the warm-up's are dropped.
     seam_cols = [np.r_[np.repeat(h, 2), h[-1:]][:PH] for h in seamer.results()]
     seams = [np.full(PH, seam_alone) if alone else y0 + (c0 + seam) * step
              for seam, alone in list(zip(seam_cols, alones))[n_warm:n_warm + len(dets)]]
     sw.lap("A: seam")
     if sample is not None:
-        pano, frame_dets, i = sample
-        for yw, pt, *_ in frame_dets:
+        pano, at, i = sample
+        for yw, pt, *_ in dets[at]:
             cv2.circle(pano, (int((yw - y0) / step), int((pt - p0) / step)), 6, (0, 0, 255), 2)
         cv2.polylines(pano, [np.c_[c0 + seam_cols[i], np.arange(PH)].astype(np.int32)], False, (255, 255, 0), 1)
         cv2.imwrite(str(out / "detections.jpg"), pano)
@@ -2044,11 +2108,21 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
     print(f"pass A: {len(dets)} frames, players detected per frame median {int(np.median(counts))}"
           f" (range {min(counts)}-{max(counts)})")
 
-    if os.environ.get("OSB_NO_RENDER"):
+    if os.environ.get("OSB_NO_RENDER") or profile:  # pass A's result, to plan the path again without the video
         passa_cache(out, seg, start, seconds).write_text(json.dumps({
             "dets": dets, "extent": [y0, y1, p0, p1], "alone": alone_frames.tolist(), "mainYaw": main_yaw}))
+    if profile:
+        import cProfile
+        import pstats
+
+        prof = cProfile.Profile()
+        prof.enable()
     yaw, pitch, hfov = plan_path(rec, out, seg, start, dets, (y0, y1, p0, p1), aim, features, alone_frames, main_yaw,
                                  cm)
+    if profile:
+        prof.disable()
+        print("path planning, by function:", flush=True)
+        pstats.Stats(prof, stream=sys.stdout).strip_dirs().sort_stats("cumulative").print_stats(40)
     sw.lap("path")
     if os.environ.get("OSB_NO_RENDER"):
         print("OSB_NO_RENDER set: stopping before pass B")
@@ -2069,8 +2143,12 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
         if i >= T:
             break
         frames = [gpu.upload_nv12(f, SRC_W, SRC_H, dev) for f in (fa, fb)]
-        frame = renderer.render(frames, yaw[i], pitch[i], hfov[i], seams_t[i])
-        sw.lap("B: render")
+        part("B: frames to planes")
+        frame = renderer.render(frames, yaw[i], pitch[i], hfov[i], seams_t[i], on_gpu=profile)
+        if profile:
+            part("B: render")
+            frame = frame.cpu().numpy()
+        sw.lap("B: to the CPU" if profile else "B: render")
         enc.write(frame)
         sw.lap("B: encode")
         if i % 300 == 0:
