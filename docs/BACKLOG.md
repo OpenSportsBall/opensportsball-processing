@@ -1709,6 +1709,27 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         roles; a bad folder falls back.
         The ONNX Runtime CPU figure (~5.8x slower than the GPU) is a first
         hint for a machine without a usable GPU.
+      - Pieces rendered at game.mp4's height on NVIDIA, and joined as
+        they are (2026-11-16). The final step scaled the 1080p render up
+        to 1440p: a decode and an encode of the whole game with little
+        else on the GPU busy (598 s for 30 minutes). `follow.py` now
+        renders at the height fullgame.py hands it (`OSB_RENDER_HEIGHT`;
+        accel.render_height: the game's own height on NVIDIA, 1080p
+        elsewhere, where it is not measured). 1440p has no more detail
+        either way (the 4K source is ~26 px a degree). Three chunks of
+        the 2026-11-11 game on a g5.xlarge, against the run before it:
+        chunks 3,143 -> 3,382 s (pass B's render 206 -> 296 s on the
+        first, its encode 53 -> 90 s; pass A and the path the same),
+        join 598 -> 239 s, game step 3,741 -> 3,620 s; game.mp4 is the
+        same 10.16 GB (45 Mbit/s). `OSB_RENDER_HEIGHT=1080` is the old
+        way (not run on the GPU since). Nobody has watched the 1440p
+        render yet.
+        The 239 s was three writes of the video (pieces -> video.mp4 ->
+        game.mp4, then the index moved to the front). Pieces at
+        game.mp4's height now go straight into it from the list, with
+        no video.mp4 (also a 1080p game's, on any platform); the disk
+        check counts that (~49 GB for 100 minutes still). Tried on
+        synthetic 1440p pieces on a Mac only: not yet timed on the GPU.
       - Peak memory (2026-11-07, rec7 2-minute clip, `footprint` sampled
         every 2 s, GPU included): ball 5.2 GB (Python 4.3, GPU 3.1; each
         ffmpeg decoder ~0.6), roles 3.4 GB (GPU 1.2), render 3.3 GB (GPU

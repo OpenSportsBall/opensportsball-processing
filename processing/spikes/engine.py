@@ -46,7 +46,9 @@ run: the whole game (fullgame.py: ball, roles and follow in chunks), once
 every question is answered. Writes <recording>/fullgame/game.mp4. It first
 checks there is room for what is still to be written (the pieces, their
 join video.mp4 and game.mp4 at the output's bitrate: ~49 GB for 100
-minutes at 1440p, rec7 took 46) and stops with not_enough_disk if not. Once game.mp4 is
+minutes at 1440p, rec7 took 46; the same ~49 GB where the pieces are
+rendered at 1440p themselves and go straight into game.mp4, with no
+video.mp4, accel.render_height) and stops with not_enough_disk if not. Once game.mp4 is
 written and as long as the game, it deletes the pieces, video.mp4 and
 audio.m4a (job option keepIntermediates keeps them) and writes
 fullgame/done.json, so a rerun reports the game done instead of
@@ -977,7 +979,12 @@ def disk_needed(job: Job) -> float:
     todo = sum(sec for k, sec in enumerate(chunks) if not (pieces / f"piece_{k:02d}.mp4").exists())
     total = sum(chunks)
     game_bps = GAME_BPS.get(job.height, GAME_BPS[1440])
-    return todo * PIECE_BPS + total * PIECE_BPS + total * game_bps + copy
+    # Pieces rendered at game.mp4's height (NVIDIA, or a 1080p game) are its size and go straight into it;
+    # 1080p pieces for a higher game are joined into video.mp4 first.
+    render_h = accel.render_height(job.height)
+    piece_bps = GAME_BPS.get(render_h, PIECE_BPS)
+    join = 0.0 if render_h == job.height else total * piece_bps
+    return todo * piece_bps + join + total * game_bps + copy
 
 
 def disk_to_free(job: Job) -> int | None:
@@ -1010,12 +1017,7 @@ def video_seconds(path: Path) -> float | None:
 
 
 def video_height(path: Path) -> int | None:
-    try:
-        r = subprocess.run([accel.ffprobe(), "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=height",
-                            "-of", "csv=p=0", str(path)], capture_output=True, text=True, timeout=60)
-        return int(r.stdout.strip().split(",")[0])
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return None
+    return accel.video_height(path)
 
 
 def finish_output(job: Job, game: Path, secs: float) -> None:
@@ -1026,7 +1028,7 @@ def finish_output(job: Job, game: Path, secs: float) -> None:
     got = video_seconds(game)
     if got is None or abs(got - want) > LENGTH_TOLERANCE * want:
         raise Failed("output_check_failed", f"game.mp4 is {got if got is None else round(got)} s long, the chunks "
-                     f"{want:.0f} s: kept the pieces and video.mp4 to look into it", log=job.logs / "game.log")
+                     f"{want:.0f} s: kept the pieces to look into it", log=job.logs / "game.log")
     freed = 0
     if not job.keep_intermediates:
         for p in [*sorted((out / "pieces").glob("piece_*.mp4")), out / "video.mp4", out / "audio.m4a"]:

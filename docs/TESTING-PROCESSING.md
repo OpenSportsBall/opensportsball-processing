@@ -613,7 +613,7 @@ questions pending exits 3. Both prepare and run hash every segment
 against the manifest's SHA-256 the first time (a changed byte exits 2,
 `footage_corrupt`); `run` refuses to start without room for what it
 still writes (`not_enough_disk`: ~49 GB for 100 minutes at 1440p) and,
-once `game.mp4` is checked, deletes the pieces, `video.mp4` and
+once `game.mp4` is checked, deletes the pieces, `video.mp4` (if one was made) and
 `audio.m4a` unless the job has `"options": {"keepIntermediates": true}`.
 A copy made for a test with fewer segments needs a manifest listing only
 those.

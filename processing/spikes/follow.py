@@ -88,7 +88,10 @@ FPS = 30
 CAL_W = 960            # width the cameras are estimated at (phase0.PREVIEW_W)
 REF_W = 1920           # width the camera model is refined and held at
 SRC_W, SRC_H = 3840, 2160
-OUT_W, OUT_H = 1920, 1080
+OUT_W, OUT_H = 1920, 1080  # the render, unless OSB_RENDER_HEIGHT asks for more (fullgame.py: a 1440p game)
+# The encoder's rate for a render of each height (bitrate, cap). 1440p is
+# what the upload copy has always asked for: hardware gives ~2/3 of it.
+PIECE_RATE = {1080: ("16M", None), 1440: ("45M", "45M")}
 PANO_DEG_PER_PX = 0.08  # pass A panorama resolution
 WARMUP_S = 20           # background model warm-up before the excerpt
 MIN_HFOV, MAX_HFOV = 50.0, 70.0  # below ~55 deg a 1080p view upsamples the 4K source (26 px/deg at a phone's centre)
@@ -677,11 +680,11 @@ def prefetch(gen, depth: int = 6):
 class NV12Encoder:
     """H.264 from NV12 frames, in hardware where there is an encoder (accel.py)."""
 
-    def __init__(self, path: Path, w: int, h: int, fps: int = FPS, bitrate: str = "16M"):
+    def __init__(self, path: Path, w: int, h: int, fps: int = FPS, bitrate: str = "16M", maxrate: str | None = None):
         self.proc = subprocess.Popen(
             [accel.ffmpeg(), "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "nv12",
              "-s", f"{w}x{h}", "-r", str(fps), "-i", "-",
-             *accel.h264_args(bitrate),
+             *accel.h264_args(bitrate, maxrate), *(["-profile:v", "high"] if maxrate else []),
              "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709",
              "-color_trc", "bt709", str(path)],
             stdin=subprocess.PIPE)
@@ -2208,12 +2211,17 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
 
     # Pass B: render the virtual camera from full-resolution frames. Each
     # pixel comes from one phone, switching at that frame's seam.
-    renderer = gpu.ViewRenderer([cm, cs], flip, SRC_W, OUT_W, OUT_H, gains, main_right,
+    out_h = int(os.environ.get("OSB_RENDER_HEIGHT") or OUT_H)
+    if out_h not in PIECE_RATE:
+        sys.exit(f"OSB_RENDER_HEIGHT={out_h}: the render is one of {sorted(PIECE_RATE)} high")
+    out_w = out_h * OUT_W // OUT_H
+    print(f"pass B: rendering {out_w} x {out_h}", flush=True)
+    renderer = gpu.ViewRenderer([cm, cs], flip, SRC_W, out_w, out_h, gains, main_right,
                                 p0, step, np.radians(SEAM_FEATHER_DEG),
                                 np.radians(TONE_FEATHER_DEG), dev)
     seams_t = torch.tensor(np.array(seams), dtype=torch.float32, device=dev)
     streams = streams_at(start, seconds, SRC_W)
-    enc = NV12Encoder(out / f"follow_{tag}.mp4", OUT_W, OUT_H)
+    enc = NV12Encoder(out / f"follow_{tag}.mp4", out_w, out_h, FPS, *PIECE_RATE[out_h])
     for i, (fa, fb) in enumerate(zip(*streams)):
         sw.lap("B: decode")
         if i >= T:

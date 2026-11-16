@@ -19,12 +19,16 @@ as the ball stage alone. A chunk whose piece exists is skipped, so the
 run can be resumed. At the end the pieces are concatenated and Main's
 audio is muxed in: <recording>/<out>/game.mp4.
 
-game.mp4 is scaled up from the pieces' 1080p to 1440p by default (--height
-1080 keeps it as rendered, with no re-encode). Upscaling adds no detail, but
-YouTube serves an upload of 1440p or more with VP9 and a much higher
-bitrate, and on rec7 that looked clearly better than the 1080p upload's
-AV1 stream. The scale and encode add ~26 min for a 95 min game and roughly
-double the file (~22 GB).
+game.mp4 is 1440p by default (--height 1080 for 1080p). 1440p has no more
+detail than 1080p (the phones' 4K is ~26 px a degree, less than either asks
+for), but YouTube serves an upload of 1440p or more with VP9 and a much
+higher bitrate, and on rec7 that looked clearly better than the 1080p
+upload's AV1 stream; the file is roughly double (~22 GB for 95 min).
+On NVIDIA the pieces are rendered at game.mp4's height and joined as they
+are, straight into game.mp4 (no video.mp4 then). Elsewhere, or with OSB_RENDER_HEIGHT=1080, they are rendered at 1080p
+and the join scales them up, which decodes and encodes the whole game
+again (~26 min for a 95 min game; accel.render_height). Pieces left by an
+earlier run decide it for the run that carries on from them.
 
 Logs: <recording>/<out>/logs/, with each chunk's camera log and path
 (camlog_NN.txt, path_NN.json; score a path with playeval.py).
@@ -49,7 +53,7 @@ HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 import accel  # noqa: E402
 DETECTOR = HERE.parents[1] / "footage" / "models" / "ball_detector.pth"  # the standard ball detector (README there)
-PIECE_H = 1080       # follow.py's render height (follow.OUT_H; 16:9)
+PIECE_H = accel.RENDER_H  # follow.py's render height unless the game is higher (follow.OUT_H; 16:9)
 UPLOAD_BITRATE = {1440: "45M"}  # hardware H.264 lands at ~2/3 of this (~31 Mbit/s)
 
 
@@ -91,7 +95,7 @@ def main() -> None:
     ap.add_argument("--events", type=Path, default=None,
                     help="also append progress as JSON lines here (engine.py reads them; see schemas/engine-events)")
     ap.add_argument("--height", type=int, default=1440, choices=(PIECE_H, *UPLOAD_BITRATE),
-                    help=f"game.mp4's height: {PIECE_H} keeps the render as is; more scales it up for YouTube (default 1440)")
+                    help="game.mp4's height: 1440 (the default) is for YouTube, which serves it much better than 1080")
     a = ap.parse_args()
     rec = a.rec
     manifest = json.loads((rec / "manifest.json").read_text())
@@ -134,6 +138,14 @@ def main() -> None:
 
     def roles_file(start, seconds):
         return rec / "detect" / f"roles_0_{start:g}_{seconds:g}.json"
+
+    # The pieces' height: an earlier run's pieces decide it (the join can't
+    # mix heights), else accel.render_height. follow.py reads it from the
+    # environment.
+    made = [piece(k) for k in range(len(chunks)) if piece(k).exists()]
+    render_h = (accel.video_height(made[0]) if made else None) or accel.render_height(a.height)
+    os.environ["OSB_RENDER_HEIGHT"] = str(render_h)
+    print(f"pieces rendered {render_h}p{' (as the pieces already made)' if made else ''}, game.mp4 {a.height}p", flush=True)
 
     if "roles" in a.features and not a.teams:
         sys.exit("--teams <set> is needed for the roles feature (teams.py), or drop roles from --features")
@@ -219,12 +231,23 @@ def main() -> None:
     logs = sorted((out / "logs").glob("camlog_*.txt"))
     if logs:
         (out / "camlog.txt").write_text("".join(l.read_text() for l in logs))
-    # Concatenate the pieces, then mux Main's audio (its segments are back to back).
+    # The pieces in order, with Main's audio (its segments are back to back).
+    # Pieces at game.mp4's height go straight into it, read from the list:
+    # joining them into video.mp4 first wrote the whole game once more
+    # (10 GB for 30 minutes at 1440p). Pieces to be scaled up are joined
+    # first, as before.
+    direct = render_h == a.height
     lst = out / "pieces.txt"
     lst.write_text("".join(f"file '{piece(k).resolve()}'\n" for k in range(len(chunks))))
     log = out / "logs" / "concat.log"
-    run([accel.ffmpeg(), "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy",
-         str(out / "video.mp4")], log)
+    t_join = time.time()
+    if direct:
+        (out / "video.mp4").unlink(missing_ok=True)  # an earlier run's: not this game's video any more
+        joined = ["-f", "concat", "-safe", "0", "-i", str(lst)]
+    else:
+        run([accel.ffmpeg(), "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy",
+             str(out / "video.mp4")], log)
+        joined = ["-i", str(out / "video.mp4")]
     alst = out / "audio.txt"
     alst.write_text("".join(f"file '{(rec / s['objectKey']).resolve()}'\n" for s in devs["main"]["segments"]))
     run([accel.ffmpeg(), "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(alst), "-vn", "-c:a", "copy",
@@ -236,11 +259,12 @@ def main() -> None:
     sound = ["-ss", f"{a.start:g}", "-t", f"{video_s:g}", "-i", str(out / "audio.m4a")]
 
     def mux(decode: list[str], video: list[str]) -> int:
-        return run([accel.ffmpeg(), "-v", "error", "-y", *decode, "-i", str(out / "video.mp4"), *sound,
+        return run([accel.ffmpeg(), "-v", "error", "-y", *decode, *joined, *sound,
                     *video, "-shortest", str(out / "game.mp4")], log)
 
-    if a.height == PIECE_H:
-        rc = mux([], ["-c", "copy"])
+    if direct:
+        rc = mux([], ["-map", "0:v", "-map", "1:a", "-c", "copy",
+                      *([] if a.height == PIECE_H else ["-movflags", "+faststart"])])
     else:
         br = UPLOAD_BITRATE[a.height]
         size = f"{a.height * 16 // 9}:{a.height}"
@@ -257,6 +281,8 @@ def main() -> None:
         if rc:
             rc = mux([], ["-map", "0:v", "-map", "1:a", "-vf", f"scale={size}:flags=lanczos",
                           *accel.h264_args(br, br), "-pix_fmt", "yuv420p", *tail])
+    print(f"game.mp4 from the pieces: {time.time() - t_join:.0f} s"
+          f" ({'joined as they are' if direct else f'scaled up from {render_h}p'})", flush=True)
     print(f"{'done' if rc == 0 else 'mux FAILED'}: {out / 'game.mp4'} ({a.height}p) in {(time.time() - t0) / 3600:.1f} h",
           flush=True)
     event(event="done" if rc == 0 else "failed", output=str(out / "game.mp4"), seconds=round(time.time() - t0, 1),

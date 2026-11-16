@@ -125,7 +125,7 @@ def apply_gain(y, uv, g: float):
 
 
 class ViewRenderer:
-    """Renders the 1080p virtual camera from both phones' 4K NV12 frames:
+    """Renders the virtual camera (out_w x out_h) from both phones' 4K NV12 frames:
     one phone per pixel along the seam, two-band blended."""
 
     GRID = 4
