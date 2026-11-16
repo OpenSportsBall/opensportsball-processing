@@ -51,7 +51,7 @@ The repository mirrors the `footage/` directory of
 
 | Path | What |
 |---|---|
-| `bench/rec3/`, `bench/rec4cal/` | The bench store for two night games: the phones' video segments the benches read (unchanged, sha256-checked against each manifest), plus sync, pitch maps, team colours, background models, play-box sets, ball label sets and detector caches |
+| `bench/rec3/`, `bench/rec4cal/`, `bench/rec7/` | The bench store for three night games (rec7, added 2026-11-15, for the play bench only: one play-box set, the video of its 10 minutes, and that piece's detector caches): the phones' video segments the benches read (unchanged, sha256-checked against each manifest), plus sync, pitch maps, team colours, background models, play-box sets, ball label sets and detector caches |
 | `bench/fixtures/pitch/` | Pitch-mapping regression fixtures and the marked-field benchmark |
 | `models/` | The standard ball detector and judge, with a README of what each was trained on |
 | `rec5-game/`, `rec6/`, `rec7/` | Pitch maps (`pitch/`) and ball label sets (`labels*/`, with their frames) from three more games: an orange ball, the first daylight game, and a night game with a yellow ball, with the cameras the pitch maps were made with (`phase0/cameras.json`). rec5-game and rec7 also have team sides (`teams/`), and rec7 a play-box set (`playeval/`). Their full videos are not included |
