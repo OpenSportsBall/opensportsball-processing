@@ -13,7 +13,7 @@ files and progress lines (the main repo's `docs/LICENSING.md`).
 | Part | From | Notes |
 |---|---|---|
 | Python 3.12 | python-build-standalone (pinned release, SHA-256 checked) | |
-| Python packages | `requirements.txt`, pinned for macOS arm64 from `requirements.in` | torch, rfdetr, coremltools, opencv, scipy, scikit-learn, jsonschema, pyyaml and what they need |
+| Python packages | `requirements.txt`, pinned for macOS 15 and later on arm64 from `requirements.in` | torch, rfdetr, coremltools, opencv, scipy, scikit-learn, jsonschema, pyyaml and what they need |
 | ffmpeg, ffprobe | `build_ffmpeg.sh`: built from the release tarball | LGPL (no x264: the Mac encodes with VideoToolbox), static, no Homebrew libraries |
 | Engine code | `processing/spikes/*.py`, `lenses.json`, `schemas/` | the repo's layout, so the scripts find everything as in a checkout |
 | Models | `footage/models/` (ball detector, judge), RF-DETR's `rf-detr-medium.pth` | not in git; the build machine needs them |
