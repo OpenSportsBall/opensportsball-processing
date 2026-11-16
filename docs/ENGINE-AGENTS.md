@@ -96,7 +96,9 @@ unless `--share` is given. A model must not pass `--share`, or run
   `ballLow` (one chunk can't tell: rec7 gave 31% for its first and 0-2%
   for the rest). `status` has the same fields at any time, and
   `chunkDetails`: each chunk's two stages, how long they took, their logs
-  and the chunk's ball share.
+  and the chunk's ball share. They are of the game as it now stands: when
+  a game is made again, a chunk says nothing of the last run until it is
+  done again, and a ball stage whose results were kept says `kept`.
 - When `ballLow` is true, tell the user, and that ball labels teach later
   models (not this video). `label <job> ball` works while `run` is still
   going, from the chunks done so far; it is the user's decision, as above.

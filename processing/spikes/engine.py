@@ -1049,8 +1049,14 @@ def ball_by_chunk(job: Job) -> dict[int, dict]:
     a ball the judge accepted."""
     import re
 
+    plan, stages = chunk_stages(job)
     out = {}
     for p in sorted((job.rec / "fullgame" / "logs").glob("follow_*.log")):
+        k = int(p.stem.split("_")[1])
+        # A chunk being made again has the last run's log (logs are added
+        # to) until its follow stage ends: that figure is the old video's.
+        if plan is not None and k not in plan.get("done", []) and stages.get((k, "follow"), {}).get("status") != "done":
+            continue
         text = p.read_text(errors="replace")
         m = re.findall(r"aim at the ball in (\d+)% of the clip", text)
         if not m:
@@ -1059,7 +1065,7 @@ def ball_by_chunk(job: Job) -> dict[int, dict]:
         n = re.findall(r"detected in (\d+)/(\d+) frames", text)
         if n and int(n[-1][1]):
             d["detectedPct"] = round(100 * int(n[-1][0]) / int(n[-1][1]))
-        out[int(p.stem.split("_")[1])] = d
+        out[k] = d
     return out
 
 
@@ -1079,15 +1085,18 @@ def ball_share(job: Job, final: bool = True) -> dict:
     return out
 
 
-def chunk_details(job: Job) -> list[dict]:
-    """Each chunk of the game for `status`: when it starts in the game, how
-    long it is, where its two stages stand (ball: candidates and roles;
-    follow: the camera and the render), how long each took, their logs, and
-    what the camera made of the ball. From fullgame.py's events, so only
-    for a game this engine has started."""
+def chunk_stages(job: Job) -> tuple[dict | None, dict]:
+    """The last run's plan and where each (chunk, stage) stands, from
+    fullgame.py's events (None and {} for a game no run has started).
+
+    A run makes again every chunk that has no piece when it starts, so
+    what earlier runs said of those chunks is dropped at its plan: without
+    that, a game made again showed the last run's times and ball figures
+    until each chunk was done again. A chunk whose piece is there keeps
+    its history."""
     events = job.dir / "events.jsonl"
     if not events.exists():
-        return []
+        return None, {}
     plan, stages = None, {}
     for line in events.read_text().splitlines():
         try:
@@ -1096,13 +1105,26 @@ def chunk_details(job: Job) -> list[dict]:
             continue  # a line still being written
         if e.get("event") == "plan":
             plan = e
-            # A new run: what an earlier one left running was stopped.
-            stages = {k: v for k, v in stages.items() if v["status"] != "running"}
+            stages = {k: v for k, v in stages.items() if k[0] in plan.get("done", [])}
         elif e.get("event") == "start":
             stages[(e["chunk"], e["stage"])] = {"status": "running", "startedAt": e["at"]}
         elif e.get("event") == "chunk":
             s = {"status": "done" if e["ok"] else "failed", "seconds": e.get("seconds")}
+            if e["ok"] and e.get("kept"):
+                # Nothing was run: the stage's results were on disk from before.
+                s = {"status": "done", "kept": True}
             stages[(e["chunk"], e["stage"])] = s
+    return plan, stages
+
+
+def chunk_details(job: Job) -> list[dict]:
+    """Each chunk of the game for `status`: when it starts in the game, how
+    long it is, where its two stages stand (ball: candidates and roles;
+    follow: the camera and the render), how long each took, their logs, and
+    what the camera made of the ball. From fullgame.py's events, so only
+    for a game this engine has started. A ball stage whose results were
+    there from an earlier run is `kept`, with no time."""
+    plan, stages = chunk_stages(job)
     if plan is None:
         return []
     logs = job.rec / "fullgame" / "logs"

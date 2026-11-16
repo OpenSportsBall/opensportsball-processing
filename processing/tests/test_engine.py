@@ -733,6 +733,46 @@ def test_status_lists_each_chunk(tmp_path, capsys):
     assert line["ballAimByChunk"] == [31] and "ballLow" not in line
 
 
+def test_a_game_made_again_doesnt_show_the_last_runs_chunks(tmp_path, capsys):
+    """The video was deleted and the game run again: the ball and the roles
+    are on disk, the camera and the render are done again. Status says
+    nothing of the last run's times or ball figures for a chunk until it
+    is made again."""
+    job = ready_to_run(tmp_path)
+    first = [{"event": "plan", "chunks": 2, "chunkS": 600, "gameS": 1199, "done": []}]
+    for k in range(2):
+        first += [{"event": "start", "stage": "ball", "chunk": k},
+                  {"event": "chunk", "stage": "ball", "chunk": k, "ok": True, "seconds": 1500, "log": "x"},
+                  {"event": "start", "stage": "follow", "chunk": k},
+                  {"event": "chunk", "stage": "follow", "chunk": k, "ok": True, "seconds": 1300}]
+    again = [{"event": "plan", "chunks": 2, "chunkS": 600, "gameS": 1199, "done": []},
+             {"event": "start", "stage": "ball", "chunk": 0},
+             {"event": "chunk", "stage": "ball", "chunk": 0, "ok": True, "seconds": 0.0, "log": "x", "kept": True},
+             {"event": "start", "stage": "follow", "chunk": 0}]
+    fullgame_events(job, first + again)
+    follow_log(job, 0, 35)
+    follow_log(job, 1, 63)
+    engine.status(job)
+    line = json.loads(capsys.readouterr().out)
+    engine.validate(line, "engine-event.schema.json", "event")
+    c = line["chunkDetails"]
+    assert c[0]["ball"] == {"status": "done", "kept": True}
+    assert c[0]["follow"]["status"] == "running" and "seconds" not in c[0]["follow"]
+    # (The last run's logs are still there to open: they are added to, not replaced.)
+    assert c[1]["ball"] == {"status": "waiting"} and c[1]["follow"]["status"] == "waiting"
+    assert "seconds" not in c[1]["follow"]
+    assert not any("ballAimPct" in x for x in c) and "ballAimByChunk" not in line
+
+    # Chunk 0 made again: its new figure, and still nothing of chunk 1's old one.
+    fullgame_events(job, [{"event": "chunk", "stage": "follow", "chunk": 0, "ok": True, "seconds": 1200}])
+    follow_log(job, 0, 71)
+    engine.status(job)
+    line = json.loads(capsys.readouterr().out)
+    c = line["chunkDetails"]
+    assert (c[0]["follow"]["status"], c[0]["follow"]["seconds"], c[0]["ballAimPct"]) == ("done", 1200, 71)
+    assert "ballAimPct" not in c[1] and line["ballAimByChunk"] == [71]
+
+
 def test_a_ball_set_can_be_made_while_the_game_runs(tmp_path, monkeypatch, capsys):
     job = make_job(tmp_path)
     segs = [{"index": i, "durationMs": 300000} for i in range(6)]

@@ -152,6 +152,8 @@ def main() -> None:
             if piece(k).exists():
                 continue
             t0, rc = time.time(), 0
+            # Both there from an earlier run (the game is being made again, or carried on): nothing to run.
+            kept = cands(start, seconds).exists() and (not a.teams or roles_file(start, seconds).exists())
             event(event="start", stage="ball", chunk=k)
             if not cands(start, seconds).exists():  # the candidates may be there from an earlier run
                 rc = run([*accel.python_cmd(), str(HERE / "ballwin.py"), str(rec), "0", f"{start:g}", f"{seconds:g}",
@@ -165,7 +167,7 @@ def main() -> None:
                     rc = 0
             print(f"ball chunk {k}: {'ok' if rc == 0 else f'FAILED rc={rc}'} in {(time.time() - t0) / 60:.1f} min", flush=True)
             event(event="chunk", stage="ball", chunk=k, ok=rc == 0, seconds=round(time.time() - t0, 1),
-                  log=str(out / "logs" / f"ball_{k:02d}.log"))
+                  log=str(out / "logs" / f"ball_{k:02d}.log"), **({"kept": True} if kept else {}))
             if rc:
                 failed.append(("ball", k))
                 stop.set()
