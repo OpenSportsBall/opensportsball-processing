@@ -1698,6 +1698,63 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         `footage/rec8/{detect,fullgame}`; second run's: the app's game
         folder, paths also in
         `footage/rec8/playeval/*/paths/fullgame_2026-11-15.json`.
+      - Look-ahead to the next tracked ball (2026-11-15, `follow.py`
+        feature `ahead`, off by default). After every rule has set its
+        per-frame aim: a frame without the ball whose rule is `lull` or
+        `ballhold`, with the ball tracked again within `AHEAD_S`, drops
+        that aim; the run of dropped frames is filled by a straight line
+        (aim, tilt, width) from the frame before it to the frame after
+        it. `aheadhot` drops `hotspot` and `unsure` frames too. Scored
+        with `playbench.py` on rec8's 16 missed-play boxes (six added
+        that day: 9:29, 9:44, 11:31, 12:18, 13:13, 13:42), features
+        `goalkick,goalframe,unsure,ball,goalin,ballhold,roles,kickoff`,
+        on each full-game run's ball candidates (`footage/rec8`, and
+        `footage/rec8-run2` whose `detect/` links to the app's game
+        folder). First run's candidates: baseline 2/16, `AHEAD_S` 1 s
+        2/16, 2 s 2/16, 3 s 4/16 (gained 13:13 and 1:02:04, 65 -> 100%).
+        Second run's: 4/16, 5/16 (17:33), 5/16, 7/16 (13:11 57 -> 100%,
+        13:13). No box lost in either; median width 50 deg throughout.
+        `aheadhot` captures the same boxes (9:29 reaches 24% at 3 s).
+        Still missed at 3 s on both: 9:29, 9:44 (`goalkick`), 11:31 (a
+        20 s lull), 13:28, 14:51, 54:37, 1:04:27. Standard bench with
+        `peoplesurge`: 29/41 with and without `ahead,AHEAD_S=3` (rec3
+        20/26, rec4cal 9/15, every moment the same). Longer, on the
+        second run's candidates only (the user's word: the first run
+        had a processing flaw): 4 s 6/16 (12:18 at 95%, 14:51 at 19%,
+        and 17:33, gained at 1-3 s, back to 0%), 5 s 8/16 (12:18 and
+        14:51 at 100%; 17:33 still 0%: the lull before it holds 42.6
+        deg and the ball returns at -58 deg, so a longer ramp starts
+        from farther back). `aheadhot` the same boxes (9:29 52%,
+        1:04:27 31% at 5 s). Standard bench at 4 s and 5 s: 28/41, one
+        rec3 moment lost (`seg3-225`'s first, clip 0:02.5, 100 -> 90 -> 76%). Not
+        tried: a speed or distance limit on the jump, interpolating on
+        the pitch instead of in camera angles.
+      - Lower running threshold (2026-11-15, `play.RUN_SPEED=1.5`
+        instead of 2.5 m/s; the one constant sets who counts as running
+        for lulls, the hotspot's pool, the zoom and the surge). rec8's
+        16 boxes on the second run's candidates: 8/16 against 4/16
+        (gained 13:11, 13:13, 13:42, 17:33; 13:28 at 43%), nothing
+        lost. With `ahead,AHEAD_S=3` on top: 8/16, the same boxes
+        (13:28 back to 0%): the two changes fix mostly the same lulls
+        and don't add up. Standard bench with `peoplesurge`: 27/41
+        against 29/41, with or without `ahead` (rec3 17/26: three
+        captured moments fall to 52-90%; rec4cal 10/15: two gained,
+        one lost at 9%). Median width 53 / 55 deg against 55 / 58.
+        For lulls only (`LULL_RUN_SPEED=1.5`, a new constant, 0 =
+        `play.RUN_SPEED`; hotspot, zoom and surge stay at 2.5): rec8
+        the same 8/16 and the same boxes, with or without `ahead` at
+        3 s, so all of rec8's gain is from fewer lulls. Standard bench
+        still 27/41 (rec3 18/26: two captured moments fall to 16% and
+        53%; rec4cal 9/15: one gained, one lost at 48%), so the losses
+        are lulls that were holding the right aim, not the hotspot.
+        `LULL_RUN_SPEED=2`: rec8 4/16 (the baseline's boxes; 7/16
+        with `ahead` at 3 s, as `ahead` alone), standard bench 26/41
+        (rec3 18/26, rec4cal 8/15), worse than either 2.5 or 1.5.
+        rec7's 5 boxes (in the standard bench from this day: 46
+        moments, baseline 33/46): 4/5 for the baseline, `ahead` at
+        3 s, and `LULL_RUN_SPEED` 2 and 1.5 with and without
+        `ahead`, every moment the same. So on 46: baseline 33,
+        `ahead` 3 s 33, lull 2 m/s 30, lull 1.5 m/s 31.
 - [ ] Follow cam speed, further ideas (a full game is ~2.5 h locally
       today, half in each pass):
       - Profile (2026-11-08, rec7 0 2084.88 600, follow.py alone on the

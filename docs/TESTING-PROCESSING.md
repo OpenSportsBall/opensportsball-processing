@@ -138,10 +138,12 @@ together (the pass-A caches for both clips are in `footage/rec4cal/follow/`). `f
 holds the same boxes in the first camera model and is kept only to score the first full-game run (no
 `clip.json`: not benched).
 
-rec7 has one set, `footage/rec7/playeval/seg0-1484` (5 moments on the full-game run's piece 2; a
-`clip.json`, but not part of the standard bench), scored against that run's path files.
+rec7 has one set, `footage/rec7/playeval/seg0-1484` (5 moments on the full-game run's piece 2), part of
+the standard bench since 2026-11-15: `playbench.py footage/bench/rec3 footage/bench/rec4cal footage/bench/rec7`
+benches 46 moments, baseline 33/46 with `peoplesurge` (rec3 20/26, rec4cal 9/15, rec7 4/5). Figures quoted
+as "/41" are rec3 and rec4cal alone.
 
-rec8 (the 2026-11-11 night game, run by the Mac app) has three sets on the full-game run's pieces 1, 5 and 6: `footage/rec8/playeval/seg0-600` (13:11, 13:28, 14:51, 15:02, 17:33, 17:39), `seg0-3000` (54:37; 55:03, 56:39 and 56:54 have panoramas but no box) and `seg0-3600` (1:02:04, 1:03:02, 1:04:27; 1:05:16 without a box). All 10 are plays the follow cam missed while watching the game, not random moments, so a score here is a count of misses fixed and says nothing about plays it already caught. From 54:37 on Secondary has no footage: those panoramas, and the camera, have Main's half of the pitch only. Each set has a `clip.json` (not part of the standard bench) and `paths/fullgame_2026-11-14.json`, the Mac app's run (`goalkick,goalframe,unsure,ball,goalin,ballhold,roles,kickoff`): 0/10 captured, in `lull` at six of them (the held aim, far from the ball; `fullgame/camlog.txt`). `paths/fullgame_2026-11-15.json` is a second run by the same app and engine build (0.1.8, engine `ed0d4d4`) after deleting `fullgame/`, `detect/` and `follow/`: 4/10 (15:02, 17:39, 1:02:04, 1:03:02; still missed: 13:11 at 57%, 13:28, 14:51, 17:33, 54:37, 1:04:27). Nothing but the run differs, so the 4 are run-to-run variation in the ball stage, not a fix: a change scored on these sets needs more than one run each way (BACKLOG.md, "Run-to-run variation"). The sets were drawn from an engine label set (`engine.py label job.json moments --at ...`) and split by piece.
+rec8 (the 2026-11-11 night game, run by the Mac app) has four sets on the full-game run's pieces 0, 1, 5 and 6: `footage/rec8/playeval/seg0-0` (9:29, 9:44), `seg0-600` (11:31, 12:18, 13:11, 13:13, 13:28, 13:42, 14:51, 15:02, 17:33, 17:39), `seg0-3000` (54:37; 55:03, 56:39 and 56:54 have panoramas but no box) and `seg0-3600` (1:02:04, 1:03:02, 1:04:27; 1:05:16 without a box). All 16 are plays the follow cam missed while watching the game (the first 10 boxed on 2026-11-14, six more on 2026-11-15: 9:29, 9:44, 11:31, 12:18, 13:13, 13:42; 13:13 is the same play as 13:11, 2 s later, so that play counts twice), not random moments, so a score here is a count of misses fixed and says nothing about plays it already caught. From 54:37 on Secondary has no footage: those panoramas, and the camera, have Main's half of the pitch only. Each set has a `clip.json` (not part of the standard bench) and `paths/fullgame_2026-11-14.json`, the Mac app's run (`goalkick,goalframe,unsure,ball,goalin,ballhold,roles,kickoff`): 0/10 captured, in `lull` at six of them (the held aim, far from the ball; `fullgame/camlog.txt`). `paths/fullgame_2026-11-15.json` is a second run by the same app and engine build (0.1.8, engine `ed0d4d4`) after deleting `fullgame/`, `detect/` and `follow/`: 4/10 (15:02, 17:39, 1:02:04, 1:03:02; still missed: 13:11 at 57%, 13:28, 14:51, 17:33, 54:37, 1:04:27). Nothing but the run differs, so the 4 are run-to-run variation in the ball stage, not a fix: a change scored on these sets needs more than one run each way (BACKLOG.md, "Run-to-run variation"). The figures above are on the first 10 boxes. On the six added on 2026-11-15 the first run captures 2/6 (12:18 and 13:42, both on the `ball` rule there) and the second 0/6: in `lull` at 11:31, 12:18, 13:13 and 13:42 (a tracked ball, 2 s of `ballhold`, then the held aim until the ball is found again), on `hotspot` at 9:29 and on `goalkick` at 9:44 (73 deg wide, aimed away from the box). On all 16: 2/16 and 4/16. The sets were drawn from two engine label sets (`engine.py label job.json moments --at ...`, `moments-1` and `moments-2`) and split by piece.
 
 Bench of both recordings on 2026-10-23 (after the loiter-band, ball-jump, restart and surge changes):
 `goalkick,goalframe,unsure,ball,goalin,ballhold,roles,kickoff,peoplesurge` captures 29/41 (rec3 20/26,
@@ -453,7 +455,7 @@ The whole `footage/` layout, its S3 backup and how to restore it are in
 
 | Path | What |
 |---|---|
-| `footage/bench/` | the bench store: both games' bench inputs and video, mirrored to S3 (section 6) |
+| `footage/bench/` | the bench store: three games' bench inputs and video, mirrored to S3 (section 6) |
 | `footage/rec3/pitch/` | pitch map, goals, background panorama, overview map |
 | `footage/fixtures/pitch/` | mapping regression fixtures; `night-2026-10-21/` is the marked-field benchmark |
 | `footage/rec3/follow/` | pass A caches (`passA_*.json`), the last run's path files, `camlog.txt` and `play_debug.json` |
@@ -495,7 +497,7 @@ object keys, e.g.
 ## 6. The bench store
 
 `footage/bench/` holds everything the benches in sections 1-3 read, for
-both games, including the video they need, so any of them can be rerun
+three games, including the video they need, so any of them can be rerun
 from scratch (new detectors, ballwin settings, roles) without going back
 to the full recordings. It is mirrored to `s3://<footage bucket>/bench/`,
 outside `accounts/`: the upload Lambda ignores it, and deleting a game's
@@ -507,11 +509,13 @@ raw footage after rendering won't touch it.
 | `bench/rec3/<device>/` | Main segments 0-6 and 9 and their Secondary pairs (16 files, 20 GB): game 0:00-30:00, the seg 3 and seg 9 clips |
 | `bench/rec4cal/` | the 2026-10-21 night game in the corrected camera model: manifest, `phase0/`, `pitch/`, `lens/`, `teams/`, `bg/`, `playeval/` (2 sets, 15 moments), `follow/`, `detect/`, `balljudge/` (rec3's judge) |
 | `bench/rec4cal/<device>/` | Main segments 2-6 and their Secondary pairs (10 files, 12.5 GB): game 10:00-30:00 |
+| `bench/rec7/` | the 2026-11-04 night game (yellow ball), added 2026-11-15 for the play bench only: manifest, `phase0/` (report, cameras), `pitch/`, `teams/`, `playeval/` (1 set, 5 moments), `follow/` (the pass A cache), `detect/` (that piece's ball candidates and roles). Its ball label set stays in `footage/rec7/labels_seg6` |
+| `bench/rec7/<device>/` | Main segments 5-7 and Secondary 4-7 (7 files, 9.1 GB): game 20:00-30:00 (24:45-34:45 into the recording). `benchstore.py` checks Secondary 5-7, Main's pairs; Secondary 4 holds the piece's first seconds |
 | `bench/fixtures/pitch/` | the pitch regression fixtures and the marked-field benchmark |
 
 Run the benches on it by giving its recordings:
 
-    uv run processing/spikes/playbench.py footage/bench/rec3 footage/bench/rec4cal [variant ...]
+    uv run processing/spikes/playbench.py footage/bench/rec3 footage/bench/rec4cal footage/bench/rec7 [variant ...]
     OSB_BALL_TAG=win uv run processing/spikes/balleval.py footage/bench/rec3 seg3
     OSB_PITCH_FIXTURES=footage/bench/fixtures/pitch uv run ... pytest processing/tests/test_pitch_regression.py
 
@@ -520,7 +524,8 @@ manifest's sha256, the play bench gives 29/41 (rec3 20/26, rec4cal 9/15)
 as on the working recordings, balleval matches them, and ballwin decodes
 the rec4cal video. The pitch regression test fails 4/4 on both copies of
 its fixtures alike (since the line-mask change of 2026-10-22, 637b3ba; section 1),
-not the store.
+not the store. rec7 (2026-11-15): its seven segments match the manifest's sha256 for the six
+`benchstore.py` checks, and the play bench gives 4/5 from the store as from `footage/rec7`.
 
 The benches write their outputs (paths, candidate files, caches) into the
 store as they do into any recording; don't push scratch variants to S3.

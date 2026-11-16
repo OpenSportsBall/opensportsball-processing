@@ -782,6 +782,7 @@ def setup_cameras(rec: Path, report: dict, devs: dict, flip: list[bool]) -> tupl
 AIM_UP = 0.1             # the aim point (on the grass) sits this fraction of the view below centre
 LULL_RUNNERS = 1         # at most this many running players: play has stopped
 LULL_MIN_S = 1.0         # ... for at least this long
+LULL_RUN_SPEED = 0.0     # m/s a player must exceed to count as running for a lull only (0: play.RUN_SPEED)
 HOLD_BACK_S = 1.0        # in a lull, hold the aim from this long before it began
 STILL_SPEED = 1.0        # m/s: a restart taker stands about still
 TAKER_ALONE_M = 12.0     # ... this far from everyone else (goal kicks, corners)
@@ -1053,6 +1054,9 @@ WEAK_HFOV = (60.0, 80.0) # ... then frame all tracked players, this wide
 BALL_MIN_RUN_S = 0.5     # ball: trust the tracked ball only in stretches at least this long
 BALL_OFF_PITCH_M = 3.0   # ... and within this of the lines (a lofted ball projects beyond them)  # unsure: with at most N runners near the hotspot, at least this wide
 LEAD_S = 1.0             # lead: aim where the hotspot will be this much later (processing is offline)
+AHEAD_S = 2.0            # ahead: the ball is tracked again within this long: a weak rule's aim until then is ignored
+AHEAD_WEAK = ("lull", "ballhold")              # ... the rules that count as weak
+AHEAD_WEAK_HOT = ("hotspot", "unsure")         # ... and with "aheadhot" these too
 
 
 def ball_track(rec: Path, start: float, T: int, pos, pose, loiter=None) -> np.ndarray:
@@ -1207,9 +1211,12 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
     kick-off: hold the centre circle until play moves), "netevent" (flowcands.py's goal-net change: after the net
     moves, keep that goal in frame for NET_HOLD_S), "ballhold" (in a lull,
     stay on where the ball was last seen,
-    with the players around it) and "gk2" (goal kicks
+    with the players around it), "gk2" (goal kicks
     end when the hotspot leaves that end or the taker pattern is gone, and
-    don't repeat at the same end for GK_COOLDOWN_S).
+    don't repeat at the same end for GK_COOLDOWN_S) and "ahead" (a frame
+    without the ball on lull or ballhold, with the ball tracked again
+    within AHEAD_S, drops that aim and goes straight to the ball's;
+    "aheadhot": on hotspot or unsure too).
 
     A feature "NAME=value" (value "a:b" for a pair) overrides a module
     constant for this run, e.g. "WEAK_HFOV=50:70", "LULL_RUNNERS=-1"."""
@@ -1436,7 +1443,9 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
 
     # Lulls: few runners for long enough (median-filtered so a lone jogger
     # doesn't break one up).
-    lull = median_filter((running <= LULL_RUNNERS).astype(np.uint8), int(FPS) | 1) > 0
+    lull_running = running if not LULL_RUN_SPEED else np.array(
+        [(np.hypot(*v.T) > LULL_RUN_SPEED).sum() if len(v) else 0 for v in vel])
+    lull = median_filter((lull_running <= LULL_RUNNERS).astype(np.uint8), int(FPS) | 1) > 0
     events, i = [], 0
     while i < T:
         if not lull[i]:
@@ -1708,6 +1717,38 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
                 mode[i] = "goalframe"
                 n += 1
         print(f"goalframe: {n} frames widened to include a goal")
+
+    if "ahead" in features or "aheadhot" in features:
+        # Offline, so the next tracked ball is known. A frame without the
+        # ball whose aim comes from a weak rule, with the ball tracked again
+        # within AHEAD_S, drops that aim: it goes straight from the last
+        # frame kept (the ball's last aim when the whole gap is this short,
+        # else the weak rule's own) to the aim at the frame that ends the run.
+        weak = AHEAD_WEAK + (AHEAD_WEAK_HOT if "aheadhot" in features else ())
+        n_a = int(AHEAD_S * FPS)
+        nxt, k = np.full(T, -1), -1
+        for i in range(T - 1, -1, -1):
+            if has_ball[i]:
+                k = i
+            nxt[i] = k
+        skip = [mode[i] in weak and not has_ball[i] and 0 <= nxt[i] - i <= n_a for i in range(T)]
+        n_skip, i = 0, 0
+        while i < T:
+            if not skip[i]:
+                i += 1
+                continue
+            j = i
+            while skip[j]:  # ends by the next ball frame at the latest
+                j += 1
+            a = i - 1 if i else j
+            for f in range(i, j):
+                w = (f - a) / (j - a) if j > a else 1.0
+                for arr in (tyaw, tpitch, thfov):
+                    arr[f] = (1 - w) * arr[a] + w * arr[j]
+                mode[f] = "ahead"
+            n_skip += j - i
+            i = j
+        print(f"ahead: {n_skip} frames of {', '.join(weak)} dropped (the ball tracked again within {AHEAD_S:g} s)")
 
     print(f"play: {len(tracks)} player tracks; running per frame median {int(np.median(running))}")
     for e in events:
