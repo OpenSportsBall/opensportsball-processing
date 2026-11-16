@@ -292,6 +292,10 @@
                     "type": "number",
                     "description": "How long the stage took."
                   },
+                  "kept": {
+                    "type": "boolean",
+                    "description": "The stage's results were there from an earlier run: nothing was run, so there is no time."
+                  },
                   "log": {
                     "type": "string",
                     "description": "The stage's log file."
