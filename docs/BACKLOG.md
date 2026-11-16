@@ -1659,6 +1659,18 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         `pitch_field`; and the old caches were made by older pass A
         code, so other pass A changes since are in the differences
         too. Worth a rerun on main before quoting.
+        Rerun on main (2026-11-16, `38d6771`, the same commit at the
+        start and the end, nothing uncommitted): pass A redone for all
+        twelve clips on fresh mirrors (`footage/mainbench/`; rec4's
+        segments 0 and 2-6 and rec7's 0 and 4-7 pulled from S3). rec8
+        13/16 (mean share 89%, width at captures 62 deg; missed, as
+        above: 24%, 95% and 10%). Standard bench 36/46: rec3 21/26,
+        rec4cal 11/15, rec7 4/5, so the 21 and 11 above hold on one
+        code version. No colour-pitch run on the same code
+        (`OSB_FIELD=colour`), so the "before" is still the old caches.
+        The 33/46 baseline quoted elsewhere (rec3 20, rec4cal 9) is
+        three lower; not traced, probably pass A caches made before
+        the fitted pitch.
         Checked in ballwin.py (2026-11-08): `OSB_DETECTOR_COREML=<folder
         of the b1 and b8 fp32 exports>` (run with `--with coremltools`)
         swaps the detector for Core ML, batch 8 for calls over 6 crops,
@@ -1761,6 +1773,17 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         rec3 moment lost (`seg3-225`'s first, clip 0:02.5, 100 -> 90 -> 76%). Not
         tried: a speed or distance limit on the jump, interpolating on
         the pitch instead of in camera angles.
+        With the fitted pitch in pass A (2026-11-16, main `38d6771`,
+        pass A redone on `footage/mainbench/`), `ahead,AHEAD_S=3`
+        changes no score: rec8 13/16 with and without, standard bench
+        36/46 with and without (rec3 21/26, rec4cal 11/15, rec7 4/5),
+        every moment's share the same. It still fires: 34-574 frames
+        a clip become `ahead` (88-383 of 18,000 on rec8's four) and
+        the aim moves by up to 17 deg, but not at a boxed moment;
+        on rec7's clip it never fires. So the rec8 boxes it gained
+        above (2 -> 4, 4 -> 7) were probably lulls the colour pitch
+        caused, which the fitted pitch fixes without it (not checked
+        box by box).
       - Lower running threshold (2026-11-15, `play.RUN_SPEED=1.5`
         instead of 2.5 m/s; the one constant sets who counts as running
         for lulls, the hotspot's pool, the zoom and the surge). rec8's
