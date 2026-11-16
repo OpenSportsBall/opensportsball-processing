@@ -65,7 +65,9 @@ SHA-256 (footage_corrupt: download it again); a file is hashed once, then
 remembered by its size and modification time (engine/verified.json).
 
 status: what's done and what's pending, and the command to run next, as
-one JSON line.
+one JSON line. It also says the free space run asks for (diskNeededBytes:
+the same figure as run's not_enough_disk refusal), so an app can say it
+before run is started.
 
 questions, answer: the same questions for a script or a model with no app
 to draw them (docs/ENGINE-AGENTS.md). Every question in questions.json
@@ -978,6 +980,16 @@ def disk_needed(job: Job) -> float:
     return todo * PIECE_BPS + total * PIECE_BPS + total * game_bps + copy
 
 
+def disk_to_free(job: Job) -> int | None:
+    """Free bytes run asks for before it starts: what is still to be written and the margin (0 when
+    nothing is). None when the game's length can't be told yet (no readable manifest)."""
+    try:
+        need = disk_needed(job)
+    except (Failed, StopIteration, KeyError, TypeError, ValueError):
+        return None
+    return int(need + DISK_MARGIN) if need > 0 else 0
+
+
 def check_disk(job: Job) -> None:
     import shutil
 
@@ -1484,6 +1496,7 @@ def status(job: Job) -> int:
          pieces=len(pieces), output=str(out / "game.mp4") if (out / "game.mp4").exists() else None,
          youtubeOutput=(lambda y: str(y) if y else None)(youtube_made(job)),
          **ball_share(job, final=(out / "done.json").exists()), chunkDetails=chunk_details(job),
+         **({} if (need := disk_to_free(job)) is None else {"diskNeededBytes": need}),
          next=next_step(job, st))
     return EXIT_OK
 

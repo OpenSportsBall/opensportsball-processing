@@ -353,7 +353,7 @@ def test_footage_is_hashed_once_and_a_bad_file_refused(tmp_path, monkeypatch, ca
         engine.validate(json.loads(line), "engine-event.schema.json", "event")
 
 
-def test_disk_estimate_and_check(tmp_path, monkeypatch):
+def test_disk_estimate_and_check(tmp_path, monkeypatch, capsys):
     job = footage_job(tmp_path, segs=10)        # 6000 s, the 1440p default
     monkeypatch.setattr(engine, "game_seconds", lambda j: 6000.0)
     need = engine.disk_needed(job)
@@ -368,6 +368,13 @@ def test_disk_estimate_and_check(tmp_path, monkeypatch):
     with pytest.raises(engine.Failed) as e:
         engine.check_disk(job)
     assert e.value.code == "not_enough_disk"
+    # status says the same figure the refusal does, so whatever shows it agrees with run
+    capsys.readouterr()
+    engine.status(job)
+    line = json.loads(capsys.readouterr().out)
+    engine.validate(line, "engine-event.schema.json", "event")
+    assert line["diskNeededBytes"] == int(engine.disk_needed(job) + engine.DISK_MARGIN)
+    assert f"{line['diskNeededBytes'] / 1e9:.0f} GB" in e.value.message
 
 
 @pytest.mark.parametrize("length,keep,ok", [(5999.0, False, True), (5999.0, True, True), (3000.0, False, False)])

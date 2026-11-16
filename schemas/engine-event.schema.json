@@ -221,6 +221,11 @@
         "event": {
           "const": "status"
         },
+        "diskNeededBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Free bytes run asks for on the recording's disk before it starts: what it still has to write (the pieces, their join and game.mp4, and the YouTube copy if asked for) plus its margin. 0 when nothing is left to write. The same figure run's not_enough_disk refusal gives. Absent while the game's length isn't known."
+        },
         "next": {
           "type": "string",
           "description": "The command to run next (or that the game is done)."
