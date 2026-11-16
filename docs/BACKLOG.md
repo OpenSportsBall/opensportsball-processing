@@ -1627,6 +1627,38 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         lights gives several blobs; not yet looked at. The same game has
         no team A or B in roles.py's output at all (everyone "other"):
         open.
+        The app's full-game run of that game (2026-11-15, 03:26-04:57)
+        still shows the colour pitch: a median of 0 players a frame in
+        every ten minutes from 50:00 on, 2-3% of roles.py's people
+        standing in the colour patch, and 60:00-70:00 on `lull` for
+        354 s of 600. It was most likely made by the app build before
+        this change (the installed app's engine has `pitch_field`,
+        files dated 17:00 that day); the game has not been processed
+        again. 60:00-70:00 replanned with the pitch from pitch.json
+        (the app run's ball candidates and roles): players a frame
+        median 0 -> 18, running 0 -> 3, `lull` 354 -> 133 s, `hotspot`
+        18 -> 178 s; `goalkick` fires 16 times there (68 s, mostly
+        without the ball; not looked at).
+        Play benches (2026-11-15), each planned from the old pass A
+        caches (colour pitch) and from pass A redone with the fitted
+        pitch, on mirror folders with their own `follow/`
+        (`footage/rec8-run3[-old]`, `footage/fieldfix[-old]/`; rec4's
+        segments 0 and 2-6 pulled back from S3 for it). The night
+        game's 16 missed-play boxes (features
+        `goalkick,goalframe,unsure,ball,goalin,ballhold,roles,kickoff`)
+        4 -> 13, mean share of the box in view 29% -> 89%, width at
+        captures 50 -> 62 deg, nothing lost (10:00-20:00 2/10 -> 10/10;
+        still missed: 0:00-10:00's two at 24% and 95%, 60:00-70:00's
+        third at 10%). Standard bench (the same plus `peoplesurge`)
+        29 -> 32/41: rec3 20 -> 21/26 (two gained, from 0% and 95%;
+        one lost, 100% -> 86%), rec4cal 9 -> 11/15 (two gained, from
+        24% and 95%; nothing lost). Not a clean measurement of this
+        change: the checkout moved to main part-way, so rec8, rec4cal
+        and rec3's first clip ran a duplicate of it written that day
+        (the same test, a 2 m margin) and rec3's other four clips ran
+        `pitch_field`; and the old caches were made by older pass A
+        code, so other pass A changes since are in the differences
+        too. Worth a rerun on main before quoting.
         Checked in ballwin.py (2026-11-08): `OSB_DETECTOR_COREML=<folder
         of the b1 and b8 fp32 exports>` (run with `--with coremltools`)
         swaps the detector for Core ML, batch 8 for calls over 6 crops,
