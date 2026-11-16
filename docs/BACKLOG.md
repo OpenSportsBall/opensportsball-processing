@@ -1730,6 +1730,13 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         no video.mp4 (also a 1080p game's, on any platform); the disk
         check counts that (~49 GB for 100 minutes still). Tried on
         synthetic 1440p pieces on a Mac only: not yet timed on the GPU.
+        Pass B's frames are written to the encoder by a thread of its
+        own (follow.NV12Encoder), which also copies them down from the
+        GPU: that hand-off held the render loop for 104 s of a busy
+        chunk at 1440p (12 s copying, 92 s writing; 61 s at 1080p) with
+        the GPU idle. Same bytes in the same order; a failed encoder
+        now fails the pass. 150 frames at 1440p on a Mac; not yet timed
+        on the GPU.
       - Peak memory (2026-11-07, rec7 2-minute clip, `footprint` sampled
         every 2 s, GPU included): ball 5.2 GB (Python 4.3, GPU 3.1; each
         ffmpeg decoder ~0.6), roles 3.4 GB (GPU 1.2), render 3.3 GB (GPU
