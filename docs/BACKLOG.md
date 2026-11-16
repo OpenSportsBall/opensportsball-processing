@@ -2083,7 +2083,8 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
       LGPL ffmpeg doesn't have; both use accel.h264_args now.
 - [ ] Sign and notarize the engine (needs a Developer ID Application
       certificate; packaging/mac/README.md), then test on a second Mac or a
-      macOS VM. coremltools 9 warns it is untested with torch 2.11: the
+      macOS VM. coremltools 9 warns it is untested with torch 2.11 (and
+      with 2.15, the Mac engine's since 2026-11-16, FINDINGS.md): the
       exports worked, but pin torch to what coremltools supports if one
       ever fails (detect.py falls back to PyTorch, ~30% slower).
 - [ ] The render waits on the ball stage about half of a game (44 vs 24
