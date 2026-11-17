@@ -248,3 +248,48 @@ def test_from_s3(tmp_path, monkeypatch):
             assert 0 < line["bytes"] < whole.stat().st_size and line["gets"] > 3
         finally:
             remote.reset()
+
+
+def test_one_decode_gives_the_frames_grabbed_one_at_a_time(footage):
+    """labelset.frames_once (the engine's kit sample): the frames of
+    phase0.frame_at, from a whole file and from a placeholder, and None
+    past the file's end."""
+    labelset = pytest.importorskip("labelset")
+    whole, here, served = footage
+    remote.placeholder(here, whole.stat().st_size)
+    times = [4.0, 4.2, 6.0, 8.0]
+    want = [phase0.frame_at(whole, t, 320) for t in times]
+    for path in (whole, here):
+        got = list(labelset.frames_once(path, times, False, 320))
+        assert [t for t, _ in got] == times
+        assert all(np.array_equal(a, b) for a, (_, b) in zip(want, got)), path
+    late = list(labelset.frames_once(whole, [8.0, SECONDS + 5.0], False, 320))
+    assert np.array_equal(late[0][1], want[-1]) and late[1][1] is None
+    assert served.sent < 0.9 * whole.stat().st_size  # 0 s to 9 s of 12: the stretch with its margins, not the file
+
+
+def test_grabs_from_several_threads_at_once(footage):
+    """phase0.grabs on one placeholder: each fetch keeps the others' note of
+    what is here, and the frames are the whole file's."""
+    whole, here, served = footage
+    remote.placeholder(here, whole.stat().st_size)
+    times = [3.0, 3.5, 5.0, 6.5, 8.0, 9.5, 10.0, 4.2]
+    got = phase0.grabs([lambda t=t: phase0.frame_at(here, t, 320) for t in times] +
+                       [lambda: phase0.load_audio(here)])
+    assert all(np.array_equal(g, phase0.frame_at(whole, t, 320)) for g, t in zip(got, times))
+    assert np.array_equal(got[-1], phase0.load_audio(whole))
+    before = served.requests
+    phase0.grabs([lambda t=t: phase0.frame_at(here, t, 320) for t in times])
+    assert served.requests == before
+
+
+
+def test_threads_asking_at_once_leave_one_stats_line(footage, tmp_path, monkeypatch):
+    whole, here, served = footage
+    note = Path(__import__("os").environ[remote.ENV])
+    note.write_text(json.dumps({**json.loads(note.read_text()), "stats": str(tmp_path / "stats.jsonl")}))
+    remote.reset()
+    registered = []
+    monkeypatch.setattr(remote.atexit, "register", registered.append)
+    phase0.grabs([remote.spec] * 16)
+    assert len(registered) == 1

@@ -92,7 +92,7 @@ FETCH_STREAMS = 24  # 8 gave 173 MB/s with the CPUs at 11%: each stream is about
 FETCH_ATTEMPTS = 3
 SYNC_EVERY_S = 300.0
 # prepare's steps, in order, for a fraction (engine.py prepare).
-PREPARE_STEPS = ["verify-footage", "sync", "pitch", "goals", "kit-sample", "kits", "pitch-review"]
+PREPARE_STEPS = ["verify-footage", "sync", "pitch", "goals", "pitch-review"]
 # Fields of questions.json that name a picture, relative to the recording.
 PICTURE_KEYS = {"image", "overlay", "background", "mainLeft", "secondaryLeft"}
 # Never copied to the work prefix: the output itself and what it is joined from at the end.

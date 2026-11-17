@@ -10,7 +10,7 @@
 
     uv run processing/spikes/labelset.py footage/rec3 [count] [seed]
     uv run processing/spikes/labelset.py footage/rec3 pano
-    uv run processing/spikes/labelset.py footage/rec3 clip <name> <segment> <start s> <seconds> [step s] [--heldout]
+    uv run processing/spikes/labelset.py footage/rec3 clip <name> <segment> <start s> <seconds> [step s] [--heldout] [--frames-only]
     uv run processing/spikes/labelset.py footage/rec3 pairs
     uv run processing/spikes/labelset.py footage/rec5-game ball <candidates file in detect/> [count] [phone] [seed] [--out <dir>]
 
@@ -53,7 +53,10 @@ the secondary phone) through `grab`, which decodes with a preroll; a plain
 seek (phase0.frames_at) returns a frame up to 0.9 s later than asked. A
 frame's "dtS" is its image's offset from that time: 0.0 for sets made
 since 2026-10-18; the earlier clip sets carry the offset ballheat.py
-measured. The random set (labels/) was grabbed the old way and has no
+measured. "clip --frames-only" (engine.py's kit sample, which teams.py
+reads the frames of and nothing else) writes the same frames with no
+suggestions and no panoramas, and decodes each phone's file once for all
+its moments (`frames_once`) rather than once a moment. The random set (labels/) was grabbed the old way and has no
 dtS: its labels sit on its images, so nothing reads its times except
 motion.py, which seeks the same way and so lands on the same frame.
 """
@@ -91,6 +94,49 @@ def grab(path: Path, t: float, flip: bool, width: int = 3840) -> np.ndarray | No
                     print(f"{path.name} {t:.2f} s: stepped back {0.25 * back:.2f} s at the end of the file", flush=True)
                 return img
     return None
+
+
+ONCE_LEAD_S = 3.0  # frames_once decodes from this long before its first time: grab's preroll and lead-in together
+
+
+def frames_once(path: Path, times: list[float], flip: bool, width: int = 3840):
+    """(time, frame) for each of one file's `times` (ascending), upright,
+    from a single decode of the stretch they span: the frames `grab` gives
+    one at a time, without starting a decoder and decoding 3 s of video
+    for each. The frames are taken off the same 30 a second grid as
+    phase0.frame_at's, which starts where the decoding does, so every time
+    must be a whole number of frames after the first (clip's moments are).
+    start_time=0 holds the grid there: the decoder's first frames after a
+    seek are missing, and the grid would otherwise start at the first one
+    it gives, up to 0.9 s on.
+    A frame the file ends before comes back None (grab steps back for it)."""
+    import subprocess
+
+    import accel
+    import remote
+
+    height = round(width * 9 / 16 / 2) * 2
+    seek = max(0.0, times[0] - ONCE_LEAD_S)
+    ks = [int(round((t - seek) * 30)) for t in times]
+    want = sorted(set(ks))
+    remote.video(path, seek, times[-1] + 1 / 30)  # a file still in the cloud: this stretch, first
+    vf = ("hflip,vflip," if flip else "") + "fps=30:start_time=0,select='" + "+".join(f"eq(n,{k})" for k in want) + \
+        f"',scale={width}:{height}"
+    proc = subprocess.Popen(
+        [accel.ffmpeg(), "-v", "error", "-noautorotate", "-ss", f"{seek:.4f}", "-i", str(path), "-vf", vf,
+         "-fps_mode", "passthrough", "-frames:v", str(len(want)), "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
+        stdout=subprocess.PIPE)
+    size, got, last = width * height * 3, {}, None
+    try:
+        for t, k in zip(times, ks):
+            if k != last:
+                raw = proc.stdout.read(size)
+                got = {k: np.frombuffer(raw, np.uint8).reshape(height, width, 3)} if len(raw) == size else {}
+                last = k
+            yield t, got.get(k)
+    finally:
+        proc.stdout.close()
+        proc.wait()
 
 
 def candidates(model, bgr: np.ndarray):
@@ -254,7 +300,8 @@ def pairs(rec: Path) -> None:
     panoramas(rec)
 
 
-def clip(rec: Path, name: str, seg0: int, start: float, seconds: float, step: float, heldout: bool = False) -> None:
+def clip(rec: Path, name: str, seg0: int, start: float, seconds: float, step: float, heldout: bool = False,
+         frames_only: bool = False) -> None:
     """A set of both-phone moments every `step` s along a clip (clip times
     as in follow.py: from `start` s into `seg0`, running on into the next
     segments), in <recording>/labels_<name>/, for ball ground truth along
@@ -265,7 +312,9 @@ def clip(rec: Path, name: str, seg0: int, start: float, seconds: float, step: fl
     moment's time; sets made before 2026-10-18 were grabbed up to 0.9 s
     late and have their measured offset there (ballheat.py <set> dt).
     With `heldout` the set is a test clip from the start (holdout.py):
-    no model may train on it."""
+    no model may train on it. With `frames_only` the set is the frames
+    alone: no suggestions and no panoramas, and each phone's file decoded
+    once (`frames_once`)."""
     import follow
     import holdout
     import playeval
@@ -278,8 +327,8 @@ def clip(rec: Path, name: str, seg0: int, start: float, seconds: float, step: fl
     (out / "images").mkdir(parents=True, exist_ok=True)
     cands_path = rec / "detect" / f"ball_{seg0}_{start:g}_{seconds:g}.json"
     clip_cands = json.loads(cands_path.read_text()) if cands_path.exists() else None
-    model = None if clip_cands else __import__("rfdetr").RFDETRMedium()
-    items = []
+    model = None if clip_cands or frames_only else __import__("rfdetr").RFDETRMedium()
+    moments = []
     for clip_t in np.arange(0.0, seconds, step):
         seg, t = playeval.segment_time(devs, seg0, start + clip_t)
         # A phone's file can end just before a segment switch (or, for phones
@@ -287,17 +336,44 @@ def clip(rec: Path, name: str, seg0: int, start: float, seconds: float, step: fl
         for role in ("secondary", "main"):
             while (f := follow.phone_at(devs, report, role, seg, t)) and f[1] > f[2] - 1.5:
                 t, clip_t = t - 0.2, clip_t - 0.2
-        base = f"c{seg0}_{start:g}_t{clip_t:06.2f}"
+        moments.append((f"c{seg0}_{start:g}_t{clip_t:06.2f}", seg, t, clip_t))
+
+    def save(iid, img):
+        cv2.imwrite(str(out / "images" / f"{iid}.jpg"), img, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        return img.shape
+
+    saved = {}  # frames_only: the frames one decode of each file gave, by id: their shape
+    if frames_only:
+        for role in ("secondary", "main"):
+            files = {}
+            for base, seg, t, _ in moments:
+                if f := follow.phone_at(devs, report, role, seg, t):
+                    files.setdefault(f[0], []).append((f[1], f"{base}_{role}"))
+            for key, asked in files.items():
+                asked.sort()
+                for (_, iid), (_, img) in zip(asked, frames_once(rec / key, [a[0] for a in asked], flip[role])):
+                    if img is not None:
+                        saved[iid] = save(iid, img)
+            print(f"{role}: {sum(i.endswith(role) for i in saved)} of {len(moments)} frames in one pass", flush=True)
+
+    items = []
+    for base, seg, t, clip_t in moments:
         halves = {}
         for role in ("secondary", "main"):
             iid = f"{base}_{role}"
+            if iid in saved:
+                halves[role] = {"id": iid, "phone": role, "image": f"images/{iid}.jpg", "width": saved[iid][1],
+                                "height": saved[iid][0], "candidates": [], "dtS": 0.0}
+                continue
             f = follow.phone_at(devs, report, role, seg, t)
             img = grab(rec / f[0], f[1], flip[role]) if f else None
             if img is None:
                 where = f"{f[0].split('/')[-1]} at {f[1]:.2f} s" if f else "no file covers it"
                 raise SystemExit(f"no frame for {role} in segment {seg} at {t:.2f} s ({where}; clip {clip_t:.1f} s)")
-            cv2.imwrite(str(out / "images" / f"{iid}.jpg"), img, [cv2.IMWRITE_JPEG_QUALITY, 92])
-            if clip_cands and int(round(clip_t * clip_cands["fps"])) < len(clip_cands["frames"]):
+            save(iid, img)
+            if frames_only:
+                cs = []
+            elif clip_cands and int(round(clip_t * clip_cands["fps"])) < len(clip_cands["frames"]):
                 k = int(round(clip_t * clip_cands["fps"]))
                 phone = 0 if role == "main" else 1
                 cs = [{"x": round((d["box"][0] + d["box"][2]) / 2, 1), "y": round((d["box"][1] + d["box"][3]) / 2, 1),
@@ -321,7 +397,8 @@ def clip(rec: Path, name: str, seg0: int, start: float, seconds: float, step: fl
     else:
         print(f"for training. If it is to be a test clip, mark it before anything trains on it:"
               f" holdout.py {rec} mark {out.name}")
-    panoramas(rec, out)
+    if not frames_only:
+        panoramas(rec, out)
 
 
 BALL_GAP_S = 1.5  # "ball" set frames at least this far apart in game time
@@ -476,6 +553,9 @@ if __name__ == "__main__":
     HELDOUT = "--heldout" in sys.argv
     if HELDOUT:
         sys.argv.remove("--heldout")
+    FRAMES_ONLY = "--frames-only" in sys.argv
+    if FRAMES_ONLY:
+        sys.argv.remove("--frames-only")
     NOJUDGE = "--nojudge" in sys.argv
     if NOJUDGE:
         sys.argv.remove("--nojudge")
@@ -493,7 +573,7 @@ if __name__ == "__main__":
         pairs(Path(sys.argv[1]))
     elif len(sys.argv) > 6 and sys.argv[2] == "clip":
         clip(Path(sys.argv[1]), sys.argv[3], int(sys.argv[4]), float(sys.argv[5]), float(sys.argv[6]),
-             float(sys.argv[7]) if len(sys.argv) > 7 else 2.0, HELDOUT)
+             float(sys.argv[7]) if len(sys.argv) > 7 else 2.0, HELDOUT, FRAMES_ONLY)
     else:
         main(Path(sys.argv[1]), int(sys.argv[2]) if len(sys.argv) > 2 else 300,
              int(sys.argv[3]) if len(sys.argv) > 3 else 1)

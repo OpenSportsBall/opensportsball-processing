@@ -295,6 +295,7 @@ def test_no_stitch_asks_left_right_then_needs_taps(tmp_path, monkeypatch, capsys
 
     engine.prepare(job, {"pitch": {"round": 2, "approve": True}})
     assert questions()["pending"] == [] and "kits" not in questions()  # the sides are teams.py's own: nothing to ask
+    assert not {"kit-sample", "kits"} & set(calls)  # run's, not prepare's: the pitch question doesn't wait for them
     for line in capsys.readouterr().out.splitlines():
         engine.validate(json.loads(line), "engine-event.schema.json", "event")
 
@@ -709,7 +710,12 @@ def test_run_says_the_ball_is_low_after_the_second_chunk(tmp_path, monkeypatch, 
     monkeypatch.setattr(engine, "check_disk", lambda j: None)
     monkeypatch.setattr(engine, "finish_output", lambda *a: None)
 
+    steps = []
+
     def fake_fullgame(job_, name, args, *, done=None, uv_with=(), watch=None):
+        steps.append(name)
+        if name in ("kit-sample", "kits"):  # run's first steps, since prepare stopped making the kit groups
+            return
         fullgame_events(job, [{"event": "plan", "chunks": 3, "chunkS": 600, "gameS": 1800, "done": []}])
         watch(None)
         for k, aim in enumerate([31, 2, 0]):
@@ -721,6 +727,7 @@ def test_run_says_the_ball_is_low_after_the_second_chunk(tmp_path, monkeypatch, 
             watch(None)
     monkeypatch.setattr(engine, "step", fake_fullgame)
     assert engine.run(job, None) == engine.EXIT_OK
+    assert steps[:2] == ["kit-sample", "kits"] and len(steps) == 3  # the kit groups, then the game
     ev = [json.loads(l) for l in capsys.readouterr().out.splitlines()]
     for e in ev:
         engine.validate(e, "engine-event.schema.json", "event")

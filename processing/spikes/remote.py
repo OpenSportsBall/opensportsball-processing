@@ -73,10 +73,13 @@ def spec() -> dict | None:
     """Where the footage is, or None when it is all here."""
     global _spec
     if _spec is False:
-        p = os.environ.get(ENV)
-        _spec = json.loads(Path(p).read_text()) if p else None
-        if _spec and _spec.get("stats"):
-            atexit.register(_write_stats)
+        with _lock:  # threads asking at once: read once, and one stats line a process
+            if _spec is False:
+                p = os.environ.get(ENV)
+                found = json.loads(Path(p).read_text()) if p else None
+                if found and found.get("stats"):
+                    atexit.register(_write_stats)
+                _spec = found
     return _spec
 
 
@@ -149,6 +152,17 @@ def _side(path: Path) -> Path:
 def partial(path: Path) -> bool:
     """Whether `path` is a placeholder: some of the segment, not all of it."""
     return _side(path).exists()
+
+
+_file_locks: dict[str, threading.Lock] = {}
+
+
+def _file_lock(path: Path) -> threading.Lock:
+    """One at a time per file: callers grab frames from several threads
+    (phase0.grabs), and two fetches into one file would each write its note
+    of what is here over the other's."""
+    with _lock:
+        return _file_locks.setdefault(str(path), threading.Lock())
 
 
 def _load(path: Path) -> dict:
@@ -341,15 +355,16 @@ def audio(path: Path) -> None:
     if spec() is None or not partial(Path(path)):
         return
     path = Path(path)
-    st = _load(path)
-    if st["audio"]:
-        return
-    spans = _merged([[a, a + n] for a, n in _index(str(path), b"soun")["chunks"]])
-    todo = [s for a, b in spans for s in _missing(st["have"], a, b)]
-    _fetch_into(path, _key(path), todo, AUDIO_STREAMS)
-    st["have"] = _merged(st["have"] + spans)
-    st["audio"] = True
-    _save(path, st)
+    with _file_lock(path):
+        st = _load(path)
+        if st["audio"]:
+            return
+        spans = _merged([[a, a + n] for a, n in _index(str(path), b"soun")["chunks"]])
+        todo = [s for a, b in spans for s in _missing(st["have"], a, b)]
+        _fetch_into(path, _key(path), todo, AUDIO_STREAMS)
+        st["have"] = _merged(st["have"] + spans)
+        st["audio"] = True
+        _save(path, st)
 
 
 def video(path: Path, t0: float, t1: float) -> None:
@@ -373,11 +388,12 @@ def video(path: Path, t0: float, t1: float) -> None:
     # (with the sound that lies between, a few kB).
     a = min(v["offsets"][i0:i1 + 1])
     b = max(o + n for o, n in zip(v["offsets"][i0:i1 + 1], v["sizes"][i0:i1 + 1]))
-    st = _load(path)
-    todo = [(x, min(y, x + PIECE)) for p, q in _missing(st["have"], a, b)
-            for x, y in ((s, q) for s in range(p, q, PIECE))]
-    if not todo:
-        return
-    _fetch_into(path, _key(path), todo, 4)
-    st["have"] = _merged(st["have"] + [[a, b]])
-    _save(path, st)
+    with _file_lock(path):
+        st = _load(path)
+        todo = [(x, min(y, x + PIECE)) for p, q in _missing(st["have"], a, b)
+                for x, y in ((s, q) for s in range(p, q, PIECE))]
+        if not todo:
+            return
+        _fetch_into(path, _key(path), todo, 4)
+        st["have"] = _merged(st["have"] + [[a, b]])
+        _save(path, st)

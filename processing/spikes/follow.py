@@ -299,8 +299,8 @@ def phone_backgrounds(rec: Path, devs: dict, report: dict, flip: list[bool], seg
     t0 = max(0.0, -o) + 10
     out = []
     for key, off, fl in ((ms["objectKey"], 0.0, flip[0]), (ss["objectKey"], o, flip[1])):
-        st = [f for t in np.linspace(t0, t0 + dur - 20, LINE_BG_FRAMES)
-              if (f := phase0.frame_at(rec / key, t + off, width, fl)) is not None]
+        st = [f for f in phase0.grabs([lambda t=t: phase0.frame_at(rec / key, t + off, width, fl)
+                                       for t in np.linspace(t0, t0 + dur - 20, LINE_BG_FRAMES)]) if f is not None]
         if len(st) < 3:
             return None
         out.append(np.median(np.stack(st), 0).astype(np.uint8))
@@ -767,9 +767,10 @@ def setup_cameras(rec: Path, report: dict, devs: dict, flip: list[bool]) -> tupl
     # The frames phase0 calibrated on: from after both phones settled
     # (before, one may still have been in someone's hand).
     t0 = max(t0, min(report.get("calibrationFromS", t0), t1))
-    pairs = [(phase0.frames_at(rec / m0["objectKey"], t, 1, FPS, CAL_W, flip[0])[0],
-              phase0.frames_at(rec / sec0["objectKey"], t + s0["offsetS"], 1, FPS, CAL_W, flip[1])[0])
-             for t in np.linspace(t0, t1, phase0.CALIB_FRAMES)]
+    pairs = phase0.grabs([lambda t=t: (phase0.frames_at(rec / m0["objectKey"], t, 1, FPS, CAL_W, flip[0])[0],
+                                       phase0.frames_at(rec / sec0["objectKey"], t + s0["offsetS"], 1, FPS, CAL_W,
+                                                        flip[1])[0])
+                          for t in np.linspace(t0, t1, phase0.CALIB_FRAMES)])
     st, cal = phase0.calibrate(pairs, phase0.expected_focals(devs["secondary"], devs["main"], CAL_W))
     if st is None:
         sys.exit("calibration failed: no frame pair gave a stitch these lenses could have made")
@@ -778,7 +779,7 @@ def setup_cameras(rec: Path, report: dict, devs: dict, flip: list[bool]) -> tupl
 
     cm, cs = Camera.from_stitcher(cams[1]), Camera.from_stitcher(cams[0])
     covered = covered or [cal]
-    fit_pairs = []
+    fit_calls = []
     sampled = sorted({covered[round(x)] for x in np.linspace(0, len(covered) - 1, LINE_SEGMENTS)})
     for sg in sampled:
         o = report["segments"][sg]["offsetS"]
@@ -786,10 +787,11 @@ def setup_cameras(rec: Path, report: dict, devs: dict, flip: list[bool]) -> tupl
         for t in (40.0, 140.0):
             if t + abs(o) + 1 > dur:  # the last segment can be short
                 continue
-            fit_pairs.append((
+            fit_calls.append(lambda sg=sg, t=t, o=o: (
                 phase0.frames_at(rec / devs["main"]["segments"][sg]["objectKey"], t, 1, FPS, REF_W, flip[0])[0],
                 phase0.frames_at(rec / devs["secondary"]["segments"][sg]["objectKey"], t + o, 1, FPS, REF_W,
                                  flip[1])[0]))
+    fit_pairs = phase0.grabs(fit_calls)
     matches = match_pairs(fit_pairs)
     ps = np.concatenate([x[0] for x in matches]); pm = np.concatenate([x[1] for x in matches])
     before = transfer_error(cm, cs, ps, pm)
