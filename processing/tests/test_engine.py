@@ -353,7 +353,35 @@ def test_footage_is_hashed_once_and_a_bad_file_refused(tmp_path, monkeypatch, ca
         engine.validate(json.loads(line), "engine-event.schema.json", "event")
 
 
+def test_render_height(monkeypatch):
+    accel = engine.accel
+    monkeypatch.delenv("OSB_RENDER_HEIGHT", raising=False)
+    monkeypatch.setattr(accel, "platform", lambda: "nvidia")
+    assert accel.render_height(1440) == 1440 and accel.render_height(1080) == 1080  # NVIDIA: at the game's height
+    monkeypatch.setattr(accel, "platform", lambda: "mac")
+    assert accel.render_height(1440) == 1080 and accel.render_height(1080) == 1080  # elsewhere: 1080p, scaled at the end
+    monkeypatch.setenv("OSB_RENDER_HEIGHT", "1440")
+    assert accel.render_height(1440) == 1440 and accel.render_height(1080) == 1080  # never above the game's height
+    monkeypatch.setattr(accel, "platform", lambda: "nvidia")
+    monkeypatch.setenv("OSB_RENDER_HEIGHT", "1080")
+    assert accel.render_height(1440) == 1080                                        # the way back
+    monkeypatch.setenv("OSB_RENDER_HEIGHT", "720")
+    assert accel.render_height(1440) == 1440                                        # not a height it renders: ignored
+
+
+def test_disk_estimate_with_pieces_at_the_games_height(tmp_path, monkeypatch):
+    job = footage_job(tmp_path, segs=10)
+    monkeypatch.setattr(engine, "game_seconds", lambda j: 6000.0)
+    monkeypatch.delenv("OSB_RENDER_HEIGHT", raising=False)
+    monkeypatch.setattr(engine.accel, "platform", lambda: "nvidia")
+    assert engine.disk_needed(job) == pytest.approx(2 * 5999 * engine.GAME_BPS[1440], rel=1e-3)  # pieces 25 + game.mp4 25 GB
+    monkeypatch.setenv("OSB_RENDER_HEIGHT", "1080")
+    assert 46e9 < engine.disk_needed(job) < 52e9
+
+
 def test_disk_estimate_and_check(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("OSB_RENDER_HEIGHT", raising=False)
+    monkeypatch.setattr(engine.accel, "platform", lambda: "mac")
     job = footage_job(tmp_path, segs=10)        # 6000 s, the 1440p default
     monkeypatch.setattr(engine, "game_seconds", lambda j: 6000.0)
     need = engine.disk_needed(job)
@@ -405,7 +433,7 @@ def test_the_youtube_copy_is_counted_in_the_disk_check(tmp_path, monkeypatch):
     job = footage_job(tmp_path, segs=10)
     monkeypatch.setattr(engine, "game_seconds", lambda j: 6000.0)
     job.height = 1080
-    need = engine.disk_needed(job)               # pieces 12 + video.mp4 12 + game.mp4 12 GB
+    need = engine.disk_needed(job)               # pieces 12 + game.mp4 12 GB (1080p pieces go straight into it)
     job.youtube_copy = True
     copy = 5999 * engine.GAME_BPS[1440]          # ~25 GB (the last chunk stops 1 s short)
     assert engine.disk_needed(job) == pytest.approx(need + copy)

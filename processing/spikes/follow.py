@@ -88,7 +88,10 @@ FPS = 30
 CAL_W = 960            # width the cameras are estimated at (phase0.PREVIEW_W)
 REF_W = 1920           # width the camera model is refined and held at
 SRC_W, SRC_H = 3840, 2160
-OUT_W, OUT_H = 1920, 1080
+OUT_W, OUT_H = 1920, 1080  # the render, unless OSB_RENDER_HEIGHT asks for more (fullgame.py: a 1440p game)
+# The encoder's rate for a render of each height (bitrate, cap). 1440p is
+# what the upload copy has always asked for: hardware gives ~2/3 of it.
+PIECE_RATE = {1080: ("16M", None), 1440: ("45M", "45M")}
 PANO_DEG_PER_PX = 0.08  # pass A panorama resolution
 WARMUP_S = 20           # background model warm-up before the excerpt
 MIN_HFOV, MAX_HFOV = 50.0, 70.0  # below ~55 deg a 1080p view upsamples the 4K source (26 px/deg at a phone's centre)
@@ -675,23 +678,67 @@ def prefetch(gen, depth: int = 6):
 
 
 class NV12Encoder:
-    """H.264 from NV12 frames, in hardware where there is an encoder (accel.py)."""
+    """H.264 from NV12 frames, in hardware where there is an encoder (accel.py).
 
-    def __init__(self, path: Path, w: int, h: int, fps: int = FPS, bitrate: str = "16M"):
+    A frame is written by a thread of its own, so the caller renders the
+    next one meanwhile: copying a frame from the GPU and writing it down
+    the pipe was 100 s of a ten-minute chunk at 1440p with the GPU idle.
+    `write` takes the frame as a flat uint8 array or as a tensor still on
+    the GPU (copied down in the thread); frames go out in the order given,
+    at most QUEUE of them waiting. A failed write is raised by the next
+    `write` or by `close`."""
+
+    QUEUE = 8
+
+    def __init__(self, path: Path, w: int, h: int, fps: int = FPS, bitrate: str = "16M", maxrate: str | None = None):
+        self.frames: queue.Queue = queue.Queue(self.QUEUE)
+        self.error: BaseException | None = None
+        self.busy_s = 0.0  # the thread's time copying down and writing
+        self.thread = threading.Thread(target=self._run, name="encoder", daemon=True)
         self.proc = subprocess.Popen(
             [accel.ffmpeg(), "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "nv12",
              "-s", f"{w}x{h}", "-r", str(fps), "-i", "-",
-             *accel.h264_args(bitrate),
+             *accel.h264_args(bitrate, maxrate), *(["-profile:v", "high"] if maxrate else []),
              "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709",
              "-color_trc", "bt709", str(path)],
             stdin=subprocess.PIPE)
+        self.thread.start()
 
-    def write(self, frame: np.ndarray) -> None:
-        self.proc.stdin.write(frame.tobytes())
+    def _run(self) -> None:
+        while True:
+            frame = self.frames.get()
+            if frame is None:
+                return
+            if self.error is not None:
+                continue  # keep taking frames so the caller isn't left waiting on a full queue
+            try:
+                t0 = time.perf_counter()
+                if isinstance(frame, torch.Tensor):
+                    frame = frame.cpu().numpy()
+                self.proc.stdin.write(memoryview(np.ascontiguousarray(frame)))
+                self.busy_s += time.perf_counter() - t0
+            except BaseException as e:  # the encoder went away (a full disk, say)
+                self.error = e
+
+    def _check(self) -> None:
+        if self.error is not None:
+            raise RuntimeError(f"the video encoder stopped: {type(self.error).__name__}: {self.error}") from self.error
+
+    def write(self, frame) -> None:
+        self._check()
+        self.frames.put(frame)
 
     def close(self) -> None:
-        self.proc.stdin.close()
-        self.proc.wait()
+        self.frames.put(None)
+        self.thread.join()
+        try:
+            self.proc.stdin.close()
+        except OSError as e:
+            self.error = self.error or e
+        rc = self.proc.wait()
+        self._check()
+        if rc:
+            raise RuntimeError(f"the video encoder exited with {rc}")
 
 
 def setup_cameras(rec: Path, report: dict, devs: dict, flip: list[bool]) -> tuple[Camera, Camera]:
@@ -2208,29 +2255,34 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
 
     # Pass B: render the virtual camera from full-resolution frames. Each
     # pixel comes from one phone, switching at that frame's seam.
-    renderer = gpu.ViewRenderer([cm, cs], flip, SRC_W, OUT_W, OUT_H, gains, main_right,
+    out_h = int(os.environ.get("OSB_RENDER_HEIGHT") or OUT_H)
+    if out_h not in PIECE_RATE:
+        sys.exit(f"OSB_RENDER_HEIGHT={out_h}: the render is one of {sorted(PIECE_RATE)} high")
+    out_w = out_h * OUT_W // OUT_H
+    print(f"pass B: rendering {out_w} x {out_h}", flush=True)
+    renderer = gpu.ViewRenderer([cm, cs], flip, SRC_W, out_w, out_h, gains, main_right,
                                 p0, step, np.radians(SEAM_FEATHER_DEG),
                                 np.radians(TONE_FEATHER_DEG), dev)
     seams_t = torch.tensor(np.array(seams), dtype=torch.float32, device=dev)
     streams = streams_at(start, seconds, SRC_W)
-    enc = NV12Encoder(out / f"follow_{tag}.mp4", OUT_W, OUT_H)
+    enc = NV12Encoder(out / f"follow_{tag}.mp4", out_w, out_h, FPS, *PIECE_RATE[out_h])
     for i, (fa, fb) in enumerate(zip(*streams)):
         sw.lap("B: decode")
         if i >= T:
             break
         frames = [gpu.upload_nv12(f, SRC_W, SRC_H, dev) for f in (fa, fb)]
         part("B: frames to planes")
-        frame = renderer.render(frames, yaw[i], pitch[i], hfov[i], seams_t[i], on_gpu=profile)
-        if profile:
-            part("B: render")
-            frame = frame.cpu().numpy()
-        sw.lap("B: to the CPU" if profile else "B: render")
+        # The frame stays on the GPU: the encoder's thread copies it down and writes it.
+        frame = renderer.render(frames, yaw[i], pitch[i], hfov[i], seams_t[i], on_gpu=True)
+        part("B: render")
+        sw.lap("B: render")
         enc.write(frame)
-        sw.lap("B: encode")
+        sw.lap("B: encode (waiting for room)")
         if i % 300 == 0:
             print(f"pass B: frame {i}/{T}", flush=True)
     enc.close()
-    sw.lap("B: encode")
+    sw.lap("B: encode (the last frames)")
+    print(f"pass B: the encoder's thread was busy {enc.busy_s:.1f} s copying frames down and writing them", flush=True)
     print(f"wrote {out / f'follow_{tag}.mp4'}")
     print("time by stage:\n" + sw.report({"A": nA, "B": T}))
 

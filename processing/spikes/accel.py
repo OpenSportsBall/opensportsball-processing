@@ -96,6 +96,33 @@ def h264_args(bitrate: str, maxrate: str | None = None) -> list[str]:
     return [*enc, "-b:v", bitrate, *cap]
 
 
+RENDER_H = 1080  # follow.py's render height unless a game asks for more
+
+
+def render_height(output_h: int) -> int:
+    """The height a game's pieces are rendered at, for a game.mp4
+    `output_h` high. On NVIDIA that is the output's own height: the pieces
+    are then joined as they are, where scaling a 1080p render up at the
+    end decodes and encodes the whole game a second time. Elsewhere
+    (not measured there) the pieces stay 1080p and are scaled at the end.
+    OSB_RENDER_HEIGHT says otherwise: 1080 for render-then-scale anywhere,
+    the output's height to render directly anywhere."""
+    asked = os.environ.get("OSB_RENDER_HEIGHT", "")
+    if asked.isdigit() and int(asked) in (RENDER_H, output_h):
+        return min(int(asked), output_h)
+    return output_h if platform() == "nvidia" else min(RENDER_H, output_h)
+
+
+def video_height(path) -> int | None:
+    """A video file's height, None if it can't be read."""
+    try:
+        r = subprocess.run([ffprobe(), "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=height",
+                            "-of", "csv=p=0", str(path)], capture_output=True, text=True, timeout=60)
+        return int(r.stdout.strip().split(",")[0])
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
 def python_cmd() -> list[str]:
     """The command that runs one of the pipeline's scripts: the packaged Python, else uv."""
     py = os.environ.get("OSB_PYTHON")
