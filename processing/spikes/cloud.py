@@ -27,6 +27,9 @@ as on a Mac:
     OSB_SCRATCH          a disk with room for the game (default /scratch)
     OSB_MODELS_PREFIX    where the models in models.json are (default models/)
     OSB_REQUIRE_GPU=1    stop at once (no_gpu) unless accel.py finds an NVIDIA GPU
+    OSB_FOOTAGE_ON_DEMAND=1  prepare and refit leave the footage in S3 and fetch only the
+                         parts their steps read (remote.py): every file's sound and the
+                         frames looked at, about 5 GB of a game. run always fetches it all
     OSB_JOB_OPTIONS      JSON for the engine job's `options` and `output`
                          (schemas/engine-job.schema.json), e.g.
                          {"options": {"maxChunks": 1}} to try one chunk of a game
@@ -79,6 +82,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 sys.path.insert(0, str(HERE))
 import accel  # noqa: E402
+import remote  # noqa: E402
 from cloudprofile import Profile  # noqa: E402
 
 PROGRESS_EVERY_S = 30.0
@@ -181,6 +185,7 @@ class Cloud:
                 log(f"fetching {key} failed ({e}); trying again")
         os.utime(tmp, ns=(mtime_ns, mtime_ns))
         tmp.replace(dest)
+        remote.completed(dest)  # no longer a placeholder, if an earlier command left one
         return h.hexdigest()
 
     def fetch_footage(self, rec: Path) -> tuple[int, float]:
@@ -203,7 +208,8 @@ class Cloud:
                 if o is None:
                     raise Failed("footage_missing", f"segment {s['objectKey']} is not in the bucket")
                 f = rec / s["objectKey"]
-                if not (f.exists() and f.stat().st_size == o["Size"]):
+                # A placeholder (remote.py) has the size and not the video: fetched like a missing file.
+                if not (f.exists() and f.stat().st_size == o["Size"] and not remote.partial(f)):
                     todo.append((s["objectKey"], f, int(o["LastModified"].timestamp()) * 1_000_000_000, s.get("sha256")))
         if not todo:
             return 0, 0.0
@@ -233,6 +239,28 @@ class Cloud:
         path.write_text(json.dumps(seen, indent=1))
         return size, seconds
 
+    def footage_on_demand(self, rec: Path) -> Path:
+        """The footage stays in S3: manifest.json here, and a note of where
+        the segments are for the engine (remote.py), which makes each one a
+        placeholder and fetches the parts its steps read. Returns the file
+        the engine's processes write what they fetched to."""
+        objs = {o["Key"][len(self.footage):]: o for o in self.list(self.footage)}
+        if "manifest.json" not in objs:
+            raise Failed("footage_missing", "the recording's footage is no longer there")
+        self.fetch(self.footage + "manifest.json", rec / "manifest.json")
+        m = json.loads((rec / "manifest.json").read_text())
+        for d in m.get("devices", []):
+            for s in d.get("segments", []):
+                if s["objectKey"] not in objs:
+                    raise Failed("footage_missing", f"segment {s['objectKey']} is not in the bucket")
+        stats = rec.parent / "remote-stats.jsonl"
+        note = rec.parent / "remote.json"
+        note.write_text(json.dumps({"recording": str(rec), "s3": {"bucket": self.bucket, "prefix": self.footage},
+                                    "stats": str(stats)}))
+        os.environ[remote.ENV] = str(note)  # the engine's processes inherit it
+        log("footage left in S3: the engine fetches what it reads")
+        return stats
+
     def restore_work(self, rec: Path) -> None:
         """Everything under the work prefix, with the times it had."""
         objs = self.list(self.work)
@@ -256,7 +284,7 @@ class Cloud:
         """New and changed files of the recording folder, except the footage."""
         todo = []
         for f in rec.rglob("*"):
-            if not f.is_file() or f.name.endswith((".part", ".tmp")):
+            if not f.is_file() or f.name.endswith((".part", ".tmp", remote.SIDE)):
                 continue
             rel = f.relative_to(rec).as_posix()
             if rel in footage or rel in WORK_SKIP or rel == "manifest.json":
@@ -564,12 +592,22 @@ def main() -> int:
             if command != "refit":
                 fetch_models(cloud)
                 profile.mark("models_fetched")
-            nbytes, seconds = cloud.fetch_footage(rec)
-            if nbytes:
-                profile.transfer("footage", nbytes, seconds)
+            on_demand = None
+            if command != "run" and os.environ.get("OSB_FOOTAGE_ON_DEMAND") == "1":
+                on_demand = cloud.footage_on_demand(rec)
+            else:
+                nbytes, seconds = cloud.fetch_footage(rec)
+                if nbytes:
+                    profile.transfer("footage", nbytes, seconds)
             profile.mark("footage_fetched")
             profile.mark("engine_started")
             rc, last = run_engine(cloud, rec, args, footage_files(rec), profile)
+            if on_demand is not None and on_demand.exists():
+                # What the engine's processes fetched: seconds are summed over parallel streams.
+                lines = [json.loads(x) for x in on_demand.read_text().splitlines() if x.strip()]
+                profile.transfers["footageOnDemand"] = {
+                    "bytes": sum(x["bytes"] for x in lines), "requests": sum(x["gets"] for x in lines),
+                    "streamSeconds": round(sum(x["seconds"] for x in lines), 1)}
         profile.mark("engine_finished")
         if command == "run":
             profile.chunks = chunk_details(rec)

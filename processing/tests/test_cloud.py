@@ -40,6 +40,8 @@ FAKE_ENGINE = textwrap.dedent("""
     (rec / "engine" / "logs" / "sync.log").write_text("a log")
     have = sorted(str(p.relative_to(rec)) for p in rec.rglob("*.mp4"))
     (rec / "engine" / "seen.json").write_text(json.dumps(have))
+    if os.environ.get("OSB_FOOTAGE_REMOTE"):
+        (rec / "engine" / "remote.json").write_text(Path(os.environ["OSB_FOOTAGE_REMOTE"]).read_text())
     print("not an event")
     if os.environ.get("ENGINE_FAIL"):
         say(event="error", code=os.environ["ENGINE_FAIL"], message="segment 3 could not be read")
@@ -195,6 +197,36 @@ def test_footage_is_checked_as_it_downloads(aws, monkeypatch):
         assert seen[k] == {"bytes": len(v), "mtimeNs": st.st_mtime_ns, "sha256": hashlib.sha256(v).hexdigest()}
     # The record goes to the work prefix, so the next machine doesn't hash them either.
     assert "engine/verified.json" in keys(s3, WORK)
+
+
+def test_prepare_on_demand_leaves_the_footage_in_s3(aws, monkeypatch):
+    s3, ddb, rec = aws
+    monkeypatch.setenv("OSB_FOOTAGE_ON_DEMAND", "1")
+    monkeypatch.delenv(cloud.remote.ENV, raising=False)
+    assert go(monkeypatch, "prepare") == 0
+    # No segment was fetched; the engine was told where they are (remote.py fetches what its steps read).
+    assert json.loads((rec / "engine" / "seen.json").read_text()) == []
+    note = json.loads((rec / "engine" / "remote.json").read_text())
+    assert note["recording"] == str(rec) and note["s3"] == {"bucket": BUCKET, "prefix": FOOTAGE}
+    assert (rec / "manifest.json").exists()
+    assert json.loads(body(s3, OUT + "questions/questions.json"))["pending"] == ["pitch"]
+    monkeypatch.delenv(cloud.remote.ENV, raising=False)  # cloud.py set it for the engine
+
+
+def test_on_demand_is_for_prepare_only_and_run_replaces_placeholders(aws, monkeypatch):
+    s3, ddb, rec = aws
+    monkeypatch.setenv("OSB_FOOTAGE_ON_DEMAND", "1")
+    monkeypatch.delenv(cloud.remote.ENV, raising=False)
+    # What an on-demand prepare leaves when its folder is kept: a file of the right size that isn't the footage.
+    k, v = next(iter(SEGMENTS.items()))
+    (rec / k).parent.mkdir(parents=True)
+    (rec / k).write_bytes(bytes(len(v)))
+    Path(str(rec / k) + cloud.remote.SIDE).write_text(json.dumps({"bytes": len(v), "moov": [0, 8], "audio": False, "have": []}))
+    assert go(monkeypatch, "run") == 0
+    assert json.loads((rec / "engine" / "seen.json").read_text())[:2] == sorted(SEGMENTS)
+    assert (rec / k).read_bytes() == v and not cloud.remote.partial(rec / k)
+    assert not (rec / "engine" / "remote.json").exists()
+    assert not [x for x in keys(s3, WORK) if x.endswith(cloud.remote.SIDE)]
 
 
 def test_footage_that_is_not_what_the_phone_sent_stops_the_job(aws, monkeypatch):
