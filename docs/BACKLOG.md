@@ -1728,15 +1728,23 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         game.mp4, then the index moved to the front). Pieces at
         game.mp4's height now go straight into it from the list, with
         no video.mp4 (also a 1080p game's, on any platform); the disk
-        check counts that (~49 GB for 100 minutes still). Tried on
-        synthetic 1440p pieces on a Mac only: not yet timed on the GPU.
+        check counts that (~49 GB for 100 minutes still).
         Pass B's frames are written to the encoder by a thread of its
         own (follow.NV12Encoder), which also copies them down from the
         GPU: that hand-off held the render loop for 104 s of a busy
         chunk at 1440p (12 s copying, 92 s writing; 61 s at 1080p) with
         the GPU idle. Same bytes in the same order; a failed encoder
-        now fails the pass. 150 frames at 1440p on a Mac; not yet timed
-        on the GPU.
+        now fails the pass.
+        The same three chunks with both (2026-11-16): join 239 -> 185 s
+        (one write and the index's rewrite, about half each), the
+        follow pass 815 / 795 / 565 -> 720 / 700 / 495 s (the loop
+        waits 2-15 s a chunk for the encoder; its thread is busy
+        100-155 s), chunks 3,383 -> 3,276 s (ball and roles, 1,015 and
+        1,065 s, are the longer side of the second and third), game
+        step 3,620 -> 3,460 s, mean GPU use 73 -> 78%. game.mp4 is the
+        same size to the byte as the run before (contents not
+        compared). The follow pass is still 25-50 s a chunk slower than
+        at 1080p, all in pass B's render.
       - Peak memory (2026-11-07, rec7 2-minute clip, `footprint` sampled
         every 2 s, GPU included): ball 5.2 GB (Python 4.3, GPU 3.1; each
         ffmpeg decoder ~0.6), roles 3.4 GB (GPU 1.2), render 3.3 GB (GPU
