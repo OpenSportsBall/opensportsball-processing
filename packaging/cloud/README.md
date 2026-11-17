@@ -109,6 +109,15 @@ the time S3 has for it, so `engine/verified.json` still holds on another
 machine and nothing is hashed twice), `engine.py prepare`, then
 `questions.json` and every picture it names to the job's output folder.
 
+With `OSB_FOOTAGE_ON_DEMAND=1` on the job, `prepare` (and a `refit` that
+wants the video) leaves the footage in S3 instead: the engine makes each
+segment a placeholder holding its index and fetches, by byte range, only
+what its steps read: every file's sound for the sync and the frames the
+stitch, the pitch and the kit sample look at (`processing/spikes/remote.py`).
+The files are not hashed there; `run` always fetches and checks them
+whole, and replaces a placeholder an earlier command left. The profile's
+`transfers.footageOnDemand` says how much was fetched.
+
 `cloud.py refit`: `engine.py prepare --answers --no-footage` on what the
 first prepare left (restored from the job's work folder). Applying an
 answer reads the background and the kit sample, not the video, so this

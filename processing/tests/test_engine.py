@@ -490,7 +490,7 @@ def test_the_youtube_copy_of_a_finished_game(tmp_path, monkeypatch, capsys):
     st["pitch"]["status"] = "approved"
     job.save_state(st)
     (job.dir / "questions.json").write_text("{}")
-    monkeypatch.setattr(engine, "check_footage", lambda j: {})
+    monkeypatch.setattr(engine, "check_footage", lambda j, whole=False: {})
     monkeypatch.setattr(engine, "step", lambda *a, **k: (_ for _ in ()).throw(AssertionError("rendered again")))
     assert engine.run(job, None) == engine.EXIT_OK
     ev = [json.loads(l) for l in capsys.readouterr().out.splitlines()]

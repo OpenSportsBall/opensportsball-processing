@@ -62,6 +62,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 import accel  # noqa: E402
+import remote  # noqa: E402
 
 FS = 48_000          # audio sample rate used for sync
 PREVIEW_W = 960      # width of each phone's frame in the preview
@@ -97,6 +98,7 @@ def probe_start(path: Path, kind: str) -> float:
 
 def load_audio(path: Path) -> np.ndarray:
     """Mono float32 at FS, sample 0 at file time 0 (audio start_time is 0)."""
+    remote.audio(path)  # a file that is still in the cloud: its sound, first
     raw = subprocess.run(
         [accel.ffmpeg(), "-v", "error", "-i", str(path), "-vn", "-ac", "1",
          "-ar", str(FS), "-f", "f32le", "-"],
@@ -117,6 +119,7 @@ def frames_at(path: Path, start: float, count: int, fps: float,
     # frames with only the changes drawn on them, and a newer one drops
     # them and gives a later frame instead. Either is over within a GOP.
     pre = min(SEEK_LEAD_IN_S, max(0.0, start))
+    remote.video(path, start - pre, start + count / fps)  # a file still in the cloud: these frames, first
     vf = ("hflip,vflip," if rotate180 else "") + f"fps={fps},scale={width}:{height}"
     raw = subprocess.run(
         # -noautorotate: the files' display rotation is handled from the

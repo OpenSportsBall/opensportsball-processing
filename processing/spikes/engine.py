@@ -66,6 +66,13 @@ prepare and run check every segment file against the manifest's size and
 SHA-256 (footage_corrupt: download it again); a file is hashed once, then
 remembered by its size and modification time (engine/verified.json).
 
+prepare can work with the footage still in the cloud (remote.py): with
+OSB_FOOTAGE_REMOTE set, a segment that isn't in the folder is fetched in
+parts, as the steps read them (every file's sound, and the frames the
+stitch, the pitch and the kit sample look at: about 5 GB of a game). Such
+a file is a placeholder: it isn't hashed, and run refuses it
+(footage_missing) until the whole file is there.
+
 status: what's done and what's pending, and the command to run next, as
 one JSON line. It also says the free space run asks for (diskNeededBytes:
 the same figure as run's not_enough_disk refusal), so an app can say it
@@ -140,6 +147,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import accel  # noqa: E402  (python_cmd, ffprobe: the packaged engine's programs)
+import remote  # noqa: E402  (footage still in the cloud: prepare fetches only what it reads)
 SCHEMAS = HERE.parents[1] / "schemas"
 VERSION = 1
 TEAMS_SET = "engine"          # labels_engine/ and teams/engine/: the kit sample this engine makes
@@ -301,7 +309,12 @@ def step(job: Job, name: str, args: list[str], *, done: Path | None = None, uv_w
 # ------------------------------------------------------------------ prepare
 
 
-def check_footage(job: Job) -> dict:
+def check_footage(job: Job, whole: bool = False) -> dict:
+    """The manifest, and every segment file here at its size and SHA-256.
+    With the footage still in the cloud (remote.py: OSB_FOOTAGE_REMOTE), a
+    file that isn't here is made as a placeholder holding its index, and
+    prepare's steps fetch the parts they read; a placeholder is not hashed.
+    `whole` (run, which reads all of every file) refuses placeholders."""
     m = job.manifest()
     if m.get("schemaVersion") != 1:
         raise Failed("bad_manifest", f"manifest schemaVersion {m.get('schemaVersion')} is not one this engine knows",
@@ -310,12 +323,26 @@ def check_footage(job: Job) -> dict:
     if roles != {"main", "secondary"}:
         raise Failed("bad_manifest", f"needs a main and a secondary phone, found {sorted(r for r in roles if r)}",
                      exit_code=EXIT_BAD_INPUT)
+    segs = [s for d in m["devices"] for s in d.get("segments", [])]
+    if remote.spec() is not None and not whole:
+        from concurrent.futures import ThreadPoolExecutor
+
+        todo = [s for s in segs if "bytes" in s and not (job.rec / s["objectKey"]).exists()]
+        if todo:
+            emit("step", step="remote-footage", status="started", files=len(todo))
+            t0 = time.time()
+            try:
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    list(pool.map(lambda s: remote.placeholder(job.rec / s["objectKey"], s["bytes"]), todo))
+            except Exception as e:
+                raise Failed("footage_missing", f"could not read the footage where it is kept: {e}",
+                             exit_code=EXIT_BAD_INPUT)
+            emit("step", step="remote-footage", status="done", seconds=round(time.time() - t0, 1), files=len(todo))
     missing = []
-    for d in m["devices"]:
-        for s in d.get("segments", []):
-            f = job.rec / s["objectKey"]
-            if not f.exists() or ("bytes" in s and f.stat().st_size != s["bytes"]):
-                missing.append(s["objectKey"])
+    for s in segs:
+        f = job.rec / s["objectKey"]
+        if not f.exists() or ("bytes" in s and f.stat().st_size != s["bytes"]) or (whole and remote.partial(f)):
+            missing.append(s["objectKey"])
     if missing:
         raise Failed("footage_missing", f"{len(missing)} segment file(s) missing or the wrong size, e.g. {missing[0]}",
                      exit_code=EXIT_BAD_INPUT)
@@ -344,6 +371,8 @@ def verify_footage(job: Job, m: dict) -> None:
             if "sha256" not in sg:
                 continue
             f = job.rec / sg["objectKey"]
+            if remote.partial(f):
+                continue  # a placeholder (remote.py): run's whole file is the one that is checked
             st = f.stat()
             key = {"bytes": st.st_size, "mtimeNs": st.st_mtime_ns, "sha256": sg["sha256"]}
             if seen.get(sg["objectKey"]) != key:
@@ -857,7 +886,7 @@ def answer(job: Job, question: str | None, a) -> int:
 
 
 def run(job: Job, answers: dict | None) -> int:
-    check_footage(job)
+    check_footage(job, whole=True)
     st = job.state()
     if answers:
         # Answers given to run are applied as prepare would; anything that
