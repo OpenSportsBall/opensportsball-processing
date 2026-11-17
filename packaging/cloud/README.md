@@ -120,7 +120,7 @@ whole, and replaces a placeholder an earlier command left. The profile's
 
 `cloud.py refit`: `engine.py prepare --answers --no-footage` on what the
 first prepare left (restored from the job's work folder). Applying an
-answer reads the background and the kit sample, not the video, so this
+answer reads the background, not the video, so this
 runs on a small CPU task without fetching 40 GB. If a step does want the
 video, it runs again with the footage.
 

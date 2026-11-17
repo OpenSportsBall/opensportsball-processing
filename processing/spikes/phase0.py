@@ -9,7 +9,7 @@
 
 Run on a recording downloaded from S3 (manifest.json plus <deviceId>/ dirs):
 
-    uv run processing/spikes/phase0.py footage/rec1 [preview start, s]
+    uv run processing/spikes/phase0.py footage/rec1 [preview start, s] [--no-preview]
 
 Pairs each Main segment with the Secondary file that overlaps it most and
 syncs the pair by audio, calibrates a stitch from segment 0,
@@ -52,7 +52,10 @@ the phones stay fixed relative to each other on the mount.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
+import math
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -134,6 +137,17 @@ def frames_at(path: Path, start: float, count: int, fps: float,
 
 
 FRAME_PREROLL_S = 1.5  # decode this long before the asked time (see frame_at)
+GRAB_THREADS = 4       # frame grabs run at once (`grabs`): each is its own ffmpeg
+
+
+def grabs(calls) -> list:
+    """What each of `calls` (functions that grab frames) returns, in their
+    order, GRAB_THREADS of them running at a time: a grab is mostly an
+    ffmpeg starting, seeking and decoding its lead-in, and several far
+    apart in a file, or in different files, don't wait on each other."""
+    with concurrent.futures.ThreadPoolExecutor(GRAB_THREADS) as pool:
+        return list(pool.map(lambda c: c(), calls))
+CHECK_W, CHECK_H = 480, 270  # frame_at's window, at this size, for its repeated-frame check
 
 
 def frame_at(path: Path, t: float, width: int, rotate180: bool = False,
@@ -152,15 +166,44 @@ def frame_at(path: Path, t: float, width: int, rotate180: bool = False,
         return None  # (a negative frame count would have ffmpeg decode the whole file)
     pre = min(preroll, t)
     n = int(round(pre * 30)) + 1
-    frames = frames_at(path, t - pre, n, 30, width, rotate180)
-    if len(frames) < n:
+    # The window is frames_at(path, t - pre, n, 30, ...): the same seek, lead-in
+    # and 30 a second grid from the seek point. Only its last frame comes back
+    # at full size; the window itself comes small and grey, for the check that
+    # it isn't one frame repeated. (All of it at full size is over 1 GB at 4K
+    # through a pipe, for each frame kept.)
+    start = t - pre
+    lead = min(SEEK_LEAD_IN_S, max(0.0, start))
+    first = math.floor(lead * 30 + 0.5)  # as ffmpeg's own trim rounds a time to the grid
+    remote.video(path, start - lead, t + 1 / 30)  # a file still in the cloud: these frames, first
+    height = round(width * 9 / 16 / 2) * 2
+    graph = (f"[0:v]{'hflip,vflip,' if rotate180 else ''}fps=30:start_time=0,select='gte(n,{first})',split[a][b];"
+             f"[a]select='eq(n,{n - 1})',scale={width}:{height}[full];[b]scale={CHECK_W}:{CHECK_H}[small]")
+    rd, wr = os.pipe()
+    try:
+        proc = subprocess.Popen(
+            [accel.ffmpeg(), "-v", "error", "-noautorotate", "-ss", f"{start - lead:.4f}", "-i", str(path),
+             "-filter_complex", graph,
+             "-map", "[full]", "-fps_mode", "passthrough", "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1",
+             "-map", "[small]", "-fps_mode", "passthrough", "-frames:v", str(n), "-f", "rawvideo", "-pix_fmt", "gray",
+             f"pipe:{wr}"],
+            stdout=subprocess.PIPE, pass_fds=(wr,))
+    finally:
+        os.close(wr)
+    with os.fdopen(rd, "rb") as small_pipe, concurrent.futures.ThreadPoolExecutor(1) as pool:
+        small_raw = pool.submit(small_pipe.read)
+        raw = proc.stdout.read()
+        small_raw = small_raw.result()
+    proc.stdout.close()
+    # The file ending inside the window leaves the full-size output with no
+    # frame, which ffmpeg counts a failure: that is None, below, not an error.
+    if proc.wait() and not (small_raw and not raw):
+        raise subprocess.CalledProcessError(proc.returncode, proc.args)
+    if len(raw) < width * height * 3 or len(small_raw) < n * CHECK_W * CHECK_H:
         return None
-    small = [cv2.resize(f[..., 1], (480, 270), interpolation=cv2.INTER_AREA).astype(np.int16) for f in frames]
+    small = np.frombuffer(small_raw, np.uint8, count=n * CHECK_W * CHECK_H).reshape(n, CHECK_H, CHECK_W).astype(np.int16)
     if not any(np.abs(small[i] - small[i - 1]).mean() > 0.05 for i in range(1, n)):
         return None
-    # A copy: the frame is a view of the whole window's buffer (over 1 GB at
-    # 4K), which a caller keeping several frames would keep whole each time.
-    return frames[-1].copy()
+    return np.frombuffer(raw, np.uint8, count=width * height * 3).reshape(height, width, 3).copy()
 
 
 # -------------------------------------------------------------------- sync
@@ -422,7 +465,9 @@ def settled_at(dev: dict, seg: dict) -> float:
     return max(0.0, (max(within) - seg["startedAtDeviceMs"]) / 1000)
 
 
-def main(rec: Path, preview_at: float | None) -> None:
+def main(rec: Path, preview_at: float | None, preview: bool = True) -> None:
+    """`preview` False (engine.py's sync: nothing of the engine's shows the
+    video) leaves out stitched_preview.mp4 and the report's "preview"."""
     manifest = json.loads((rec / "manifest.json").read_text())
     devs = {d["role"]: d for d in manifest["devices"]}
     main_d, sec_d = devs["main"], devs["secondary"]
@@ -454,6 +499,21 @@ def main(rec: Path, preview_at: float | None) -> None:
             audio[key] = load_audio(rec / key)
         return audio[key]
 
+    def audio_pair(ms, ss):  # the two read at once: each is its own ffmpeg
+        a, b = grabs([lambda k=k: load_audio(rec / k) for k in (ms["objectKey"], ss["objectKey"])]) \
+            if ms["objectKey"] not in audio and ss["objectKey"] not in audio else (None, None)
+        for seg, x in ((ms, a), (ss, b)):
+            if x is not None:
+                if len(audio) >= 4:
+                    audio.pop(next(iter(audio)))
+                audio[seg["objectKey"]] = x
+        return audio_of(ms), audio_of(ss)
+
+    # Footage still in the cloud: every file's sound fetched now, several
+    # files at a time, not one by one as the syncs come to them.
+    if remote.spec() is not None:
+        grabs([lambda s=s: remote.audio(rec / s["objectKey"]) for d in (main_d, sec_d) for s in d["segments"]])
+
     err, have_err = 0.0, False
     pairs = []
     for ms in main_d["segments"]:
@@ -463,7 +523,7 @@ def main(rec: Path, preview_at: float | None) -> None:
         ov = overlap(ms, ss, guess)
         s = None
         if ov >= COVER_MIN_S:
-            s = sync(audio_of(ms), audio_of(ss), guess, 2.0 if have_err else FIRST_SEARCH_S)
+            s = sync(*audio_pair(ms, ss), guess, 2.0 if have_err else FIRST_SEARCH_S)
             if ov < COVER_SURE_S and not confident(s):
                 s = None
         if s is None:
@@ -558,8 +618,8 @@ def main(rec: Path, preview_at: float | None) -> None:
                     upside_down(frames_at(f, times[len(times) // 2], 1, 30, PREVIEW_W)[0]))
         source.append("manifest" if rot is not None else "picture")
     report["upsideDown"] = {"main": flip[0], "secondary": flip[1], "from": source}
-    cal_pairs = [(frames_at(main_f, t, 1, 30, PREVIEW_W, flip[0])[0],
-                  frames_at(sec_f, t + d, 1, 30, PREVIEW_W, flip[1])[0]) for t in times]
+    cal_pairs = grabs([lambda t=t: (frames_at(main_f, t, 1, 30, PREVIEW_W, flip[0])[0],
+                                    frames_at(sec_f, t + d, 1, 30, PREVIEW_W, flip[1])[0]) for t in times])
     expected = expected_focals(sec_d, main_d, PREVIEW_W)
     st, cal = calibrate(cal_pairs, expected)
     report["calibration"] = cal
@@ -570,20 +630,24 @@ def main(rec: Path, preview_at: float | None) -> None:
 
     # Did the mount hold? Re-estimate on a few pairs in every segment and
     # compare the angle between the phones with segment 0's.
-    stability = []
+    stability, checks = [], []
     for (ms, ss), seg in zip(pairs, report["segments"]):
+        seg_dur = min(ms["durationMs"], ss["durationMs"]) / 1000 - abs(seg["offsetS"]) - 1
+        t0 = max(0.0, -seg["offsetS"]) + 0.5
+        checks.append(None if not seg.get("synced", True) or seg_dur < 2 else [
+            lambda ms=ms, ss=ss, seg=seg, t=t: (
+                frames_at(rec / ms["objectKey"], t, 1, 30, PREVIEW_W, flip[0])[0],
+                frames_at(rec / ss["objectKey"], t + seg["offsetS"], 1, 30, PREVIEW_W, flip[1])[0])
+            for t in np.linspace(t0, t0 + seg_dur - 0.5, 3)])
+    frames = iter(grabs([c for cs in checks if cs for c in cs]))  # every segment's pairs, several at a time
+    for (ms, ss), seg, cs in zip(pairs, report["segments"], checks):
         if not seg.get("synced", True):  # too little of Secondary to compare
             stability.append({"index": ms["index"], "ok": False, "synced": False})
             continue
-        seg_dur = min(ms["durationMs"], ss["durationMs"]) / 1000 - abs(seg["offsetS"]) - 1
-        t0 = max(0.0, -seg["offsetS"]) + 0.5
-        if seg_dur < 2:
+        if cs is None:
             stability.append({"index": ms["index"], "ok": False})
             continue
-        cal_i = calibrate([(frames_at(rec / ms["objectKey"], t, 1, 30, PREVIEW_W, flip[0])[0],
-                            frames_at(rec / ss["objectKey"], t + seg["offsetS"], 1, 30,
-                                      PREVIEW_W, flip[1])[0])
-                           for t in np.linspace(t0, t0 + seg_dur - 0.5, 3)], expected)[1]
+        cal_i = calibrate([next(frames) for _ in cs], expected)[1]
         stability.append({"index": ms["index"], **({"angleBetweenDeg": cal_i["angleBetweenDeg"],
                                                     "focalPx": cal_i["focalPx"]} if cal_i["ok"] else {"ok": False})})
     angles = [x["angleBetweenDeg"] for x in stability if "angleBetweenDeg" in x]
@@ -598,6 +662,7 @@ def main(rec: Path, preview_at: float | None) -> None:
         status, pano = st.composePanorama([s0, m0])
         if status == cv2.Stitcher_OK:
             cv2.imwrite(str(out / "stitched.jpg"), pano)
+    if st is not None and preview:
         # Find the segment pair holding the requested game time.
         i, local = (0, preview_at) if preview_at is not None else (cal_seg, t_main0)
         while i < len(pairs) - 1 and local >= pairs[i][0]["durationMs"] / 1000:
@@ -630,4 +695,7 @@ def main(rec: Path, preview_at: float | None) -> None:
 
 
 if __name__ == "__main__":
-    main(Path(sys.argv[1]), float(sys.argv[2]) if len(sys.argv) > 2 else None)
+    PREVIEW = "--no-preview" not in sys.argv
+    if not PREVIEW:
+        sys.argv.remove("--no-preview")
+    main(Path(sys.argv[1]), float(sys.argv[2]) if len(sys.argv) > 2 else None, PREVIEW)

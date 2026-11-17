@@ -22,10 +22,8 @@ The job (schemas/engine-job.schema.json) names a recording folder: the
 merged manifest.json and every segment file at its objectKey, as
 footagestore.py fetch or the app's download leaves it.
 
-prepare: syncs the phones (phase0.py), fits the pitch (pitch.py: lines,
-goals, review) and groups a sample of people by kit (labelset.py clip,
-teams.py: the two sides, the keepers and the referee, which roles.py reads;
-nobody is asked about them), then writes <recording>/engine/questions.json
+prepare: syncs the phones (phase0.py) and fits the pitch (pitch.py: lines,
+goals, review), then writes <recording>/engine/questions.json
 (schemas/engine-questions.schema.json): the pitch to approve or correct.
 When the phones' views can't be stitched
 (rec5: too little overlap, one view soft), it first asks only which phone
@@ -43,7 +41,11 @@ the first prepare left, not the video, so --no-footage does it without
 the segment files on disk (the cloud job, cloud.py).
 
 run: the whole game (fullgame.py: ball, roles and follow in chunks), once
-every question is answered. Writes <recording>/fullgame/game.mp4. It first
+every question is answered. It first groups a sample of people by kit
+(labelset.py clip, teams.py: the two sides, the keepers and the referee,
+which roles.py reads; nobody is asked about them): that was prepare's
+until 2026-11, and is here so that the pitch question is out as soon as
+the pitch is fitted, with nothing in prepare that wants a GPU. Writes <recording>/fullgame/game.mp4. It first
 checks there is room for what is still to be written (the pieces, their
 join video.mp4 and game.mp4 at the output's bitrate: ~49 GB for 100
 minutes at 1440p, rec7 took 46; the same ~49 GB where the pieces are
@@ -438,7 +440,7 @@ def prepare(job: Job, answers: dict | None, footage: bool = True) -> int:
         m = check_footage(job)
     else:
         # Applying answers reads the pictures an earlier prepare left (the
-        # background, the kit sample), not the video: the cloud job does it
+        # background), not the video: the cloud job does it
         # without fetching the footage again. A step that does want the
         # video fails as it would with a file missing.
         if not answers or not (job.dir / "questions.json").exists():
@@ -448,7 +450,7 @@ def prepare(job: Job, answers: dict | None, footage: bool = True) -> int:
     rec = str(job.rec)
     if answers:
         validate(answers, "engine-answers.schema.json", "answers")
-    step(job, "sync", ["phase0.py", rec], done=job.rec / "phase0" / "report.json")
+    step(job, "sync", ["phase0.py", rec, "--no-preview"], done=job.rec / "phase0" / "report.json")
     seg, start, secs = sample_clip(job, m)  # after the sync: it says where both phones have footage
     pitch_dir = job.rec / "pitch"
     if answers and answers.get("cameras"):
@@ -465,12 +467,6 @@ def prepare(job: Job, answers: dict | None, footage: bool = True) -> int:
         st["cameras"] = {"round": 1, "status": "pending", "reason": f.message}
         return ask_cameras(job, st, seg)
     step(job, "goals", ["pitch.py", rec, "goals"], done=pitch_dir / "goals.json")
-    step(job, "kit-sample", ["labelset.py", rec, "clip", TEAMS_SET, str(seg), f"{start:g}", f"{secs:g}", "2"],
-         done=job.rec / f"labels_{TEAMS_SET}" / "items.json")
-    teams_dir = job.rec / "teams" / TEAMS_SET
-    # sides.json is the last thing teams.py writes that roles.py reads. A folder set up by an engine
-    # that still asked about the kit groups has people.json without it, and every ball chunk then fails.
-    step(job, "kits", ["teams.py", rec, TEAMS_SET, str(TEAMS_K)], done=teams_dir / "sides.json")
 
     if answers:
         apply_answers(job, st, answers, seg)
@@ -485,6 +481,21 @@ def prepare(job: Job, answers: dict | None, footage: bool = True) -> int:
     job.save_state(st)
     emit("questions", path=str(job.dir / "questions.json"), pending=q["pending"])
     return EXIT_OK
+
+
+def kit_steps(job: Job) -> None:
+    """A sample of people from the clip the pitch was fitted on, grouped by
+    kit. Run's first steps: nothing the user is asked needs them, so prepare
+    doesn't keep the pitch question waiting for them. Skipped when a
+    prepare from before 2026-11 already made them."""
+    rec = str(job.rec)
+    seg, start, secs = sample_clip(job, job.manifest())
+    step(job, "kit-sample", ["labelset.py", rec, "clip", TEAMS_SET, str(seg), f"{start:g}", f"{secs:g}", "2", "--frames-only"],
+         done=job.rec / f"labels_{TEAMS_SET}" / "items.json")
+    teams_dir = job.rec / "teams" / TEAMS_SET
+    # sides.json is the last thing teams.py writes that roles.py reads. A folder set up by an engine
+    # that still asked about the kit groups has people.json without it, and every ball chunk then fails.
+    step(job, "kits", ["teams.py", rec, TEAMS_SET, str(TEAMS_K)], done=teams_dir / "sides.json")
 
 
 def ask_cameras(job: Job, st: dict, seg: int) -> int:
@@ -906,6 +917,7 @@ def run(job: Job, answers: dict | None) -> int:
         emit("done", output=str(out / "game.mp4"), **yt, seconds=d.get("seconds", 0), **ball_share(job))
         return EXIT_OK
     check_disk(job)
+    kit_steps(job)
     events = job.dir / "events.jsonl"
     seen = [0]
     prog = {"chunks": 0, "ball": set(), "follow": set(), "start": time.time(), "doneBefore": 0, "last": 0.0,

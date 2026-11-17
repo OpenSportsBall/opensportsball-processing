@@ -85,10 +85,10 @@ def background(rec: Path, seg: int, pano: Pano):
     o = report["segments"][seg]["offsetS"]
     dur = min(devs["main"]["segments"][seg]["durationMs"], devs["secondary"]["segments"][seg]["durationMs"]) / 1000
     stack = []
-    for t in np.linspace(5, dur - 5, BG_FRAMES):
-        a = phase0.frames_at(rec / devs["main"]["segments"][seg]["objectKey"], t, 1, 30, follow.SRC_W, flip[0])[0]
-        b = phase0.frames_at(rec / devs["secondary"]["segments"][seg]["objectKey"], t + o, 1, 30,
-                             follow.SRC_W, flip[1])[0]
+    for a, b in phase0.grabs([lambda t=t: (
+            phase0.frames_at(rec / devs["main"]["segments"][seg]["objectKey"], t, 1, 30, follow.SRC_W, flip[0])[0],
+            phase0.frames_at(rec / devs["secondary"]["segments"][seg]["objectKey"], t + o, 1, 30, follow.SRC_W,
+                             flip[1])[0]) for t in np.linspace(5, dur - 5, BG_FRAMES)]):
         wa = cv2.remap(a, maps[0][0], maps[0][1], cv2.INTER_LINEAR)
         wb = cv2.remap(b, maps[1][0], maps[1][1], cv2.INTER_LINEAR)
         stack.append(np.where(use_main[..., None], wa, wb))
