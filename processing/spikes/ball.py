@@ -35,6 +35,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
+import recpaths  # noqa: E402
 import pitch as P  # noqa: E402
 
 MAX_SPEED = 35.0          # m/s, a hard shot
@@ -82,7 +83,7 @@ def usable(d: dict, pose) -> bool:
 
 
 def load(rec: Path):
-    data = json.loads((rec / "detect" / "detections_pitch.json").read_text())
+    data = json.loads((recpaths.cache(rec) / "detect" / "detections_pitch.json").read_text())
     fps = data["fps"]
     frames = data["frames"]
     balls, people = [], []
@@ -277,7 +278,7 @@ def crops(rec: Path, frames, src, path, n=12):
     report = json.loads((rec / "phase0" / "report.json").read_text())
     devs = phase0.paired_devices(manifest, report)
     flip = [report["upsideDown"]["main"], report["upsideDown"]["secondary"]]
-    seg = json.loads((rec / "detect" / "detections.json").read_text())["segment"]
+    seg = json.loads((recpaths.cache(rec) / "detect" / "detections.json").read_text())["segment"]
     picks = [i for i in range(len(src)) if src[i] is not None]
     picks = [picks[k] for k in np.linspace(0, len(picks) - 1, min(n, len(picks))).astype(int)]
     tiles = []

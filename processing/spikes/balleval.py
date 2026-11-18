@@ -47,6 +47,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
+import recpaths  # noqa: E402
 import ball as B  # noqa: E402
 import follow  # noqa: E402
 import phase0  # noqa: E402
@@ -60,7 +61,7 @@ NOMINAL = bool(os.environ.get("OSB_NOMINAL"))          # compare at the nominal 
 def cands_file(rec: Path, seg0: int, start: float, tag: str) -> Path:
     """The clip's candidate file with exactly this tag: ball_<seg>_<start>_<seconds>[.<tag>].json."""
     pat = re.compile(rf"ball_{seg0}_{start:g}_[\d.]+?{re.escape('.' + tag) if tag else ''}\.json$")
-    paths = sorted(p for p in (rec / "detect").glob(f"ball_{seg0}_{start:g}_*.json") if pat.fullmatch(p.name))
+    paths = sorted(p for p in (recpaths.cache(rec) / "detect").glob(f"ball_{seg0}_{start:g}_*.json") if pat.fullmatch(p.name))
     if not paths:
         raise SystemExit(f"no candidate file ball_{seg0}_{start:g}_*{'.' + tag if tag else ''}.json in {rec / 'detect'}")
     return paths[0]
@@ -124,7 +125,7 @@ def setup(rec: Path, name: str):
     print(f"label times: {when}, offsets {np.mean(dts):+.2f} s mean, {np.min(dts):+.2f} to {np.max(dts):+.2f}")
     # Players per candidate frame, for the tracker's "near a player" score.
     seconds = len(data["frames"]) / data["fps"]
-    cache = follow.passa_cache(rec / "follow", seg0, start, seconds)
+    cache = follow.passa_cache(recpaths.cache(rec) / "follow", seg0, start, seconds)
     people = [np.zeros((0, 2))] * len(data["frames"])
     if cache.exists():
         dets = json.loads(cache.read_text())["dets"]

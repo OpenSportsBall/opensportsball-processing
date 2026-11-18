@@ -6,14 +6,18 @@
 # dependencies = ["numpy>=1.26", "opencv-python-headless>=4.10"]  # phase0.py's
 # ///
 """Checks the bench store: the video segments every benchmark reads are
-present and match their recording's manifest byte for byte.
+present and match their recording's manifest byte for byte. A file the
+sets read only the start of may be cut there (the manifest's
+"trimmedToMs", with the upload's own size and hash kept as
+"originalBytes" and "originalSha256"; "durationMs" stays the upload's, so
+the game's clock is unchanged): it is checked to hold what is read.
 
     uv run processing/spikes/benchstore.py [footage/bench/rec3 ...] [--quick]
 
 With no recording, checks every one under footage/bench/. The needed
-segments are worked out from the recording itself: each must-see set's
+files are worked out from the recording itself: each must-see set's
 clip.json (playbench.py) and each clip label set's items.json
-(balleval.py), on both phones as phase0 paired them. --quick compares
+(balleval.py), on each phone, from the file it has for each moment. --quick compares
 sizes only, not sha256.
 
 The store and its S3 mirror are described in docs/TESTING-PROCESSING.md
@@ -33,36 +37,43 @@ import phase0  # noqa: E402
 STORE = Path("footage/bench")
 
 
-def main_segments(segs: list[dict], seg: int, start: float, seconds: float) -> set[int]:
-    """Main segments a clip from `start` s into `seg`, `seconds` long, reads
-    (it carries on into the following segments, as follow.game_stream does)."""
-    out, t, k, left = set(), start, seg, seconds
-    while left > 0 and k < len(segs):
-        dur = segs[k]["durationMs"] / 1000
-        if t < dur:
-            out.add(k)
-            left -= dur - t
-            t = 0.0
-        else:
-            t -= dur
-        k += 1
-    return out
+LEAD_S = 22.0   # a clip is read from this long before it starts: pass A's background warm-up (follow.WARMUP_S) and the decoder's pre-roll
+TAIL_S = 2.0    # ... to this long after it ends
+LABEL_S = 5.0   # a labelled moment: this long either side of it
+STEP_S = 0.25
 
 
-def needed(rec: Path) -> dict[int, list[str]]:
-    """Main segment index -> the clips that read it."""
-    segs = json.loads((rec / "manifest.json").read_text())
-    segs = {d["role"]: d for d in segs["devices"]}["main"]["segments"]
-    out: dict[int, list[str]] = {}
+def needed(rec: Path, manifest: dict, report: dict) -> dict[str, dict]:
+    """objectKey -> {"from", "to" (s in that file), "sets"} for every file a
+    must-see set (clip.json: playbench.py) or a clip label set (items.json:
+    balleval.py) reads, on each phone, from the file that phone has for
+    each moment (phase0.phone_at: Secondary's file k needn't cover Main's
+    segment k, and where it has no footage nothing is read)."""
+    devs = phase0.paired_devices(manifest, report)
+    segs = devs["main"]["segments"]
+    starts = [phase0.game_start(manifest, k) for k in range(len(segs) + 1)]
+    spans: list[tuple[float, float, str]] = []
     for f in sorted(rec.glob("playeval/*/clip.json")):
         c = json.loads(f.read_text())
-        for k in main_segments(segs, int(c["segment"]), float(c["startS"]), float(c["seconds"])):
-            out.setdefault(k, []).append(f.parent.name)
+        g = starts[int(c["segment"])] + float(c["startS"])
+        spans.append((g - LEAD_S, g + float(c["seconds"]) + TAIL_S, f.parent.name))
     for f in sorted(rec.glob("labels_*/items.json")):
         for it in json.loads(f.read_text()):
-            for k in main_segments(segs, int(it["segment"]), float(it["t"]), 1.0):
-                if f.parent.name not in out.setdefault(k, []):
-                    out[k].append(f.parent.name)
+            g = starts[int(it["segment"])] + float(it["t"])
+            spans.append((g - LABEL_S, g + LABEL_S, f.parent.name))
+    out: dict[str, dict] = {}
+    for a, b, name in spans:
+        t = max(0.0, a)
+        while t <= min(b, starts[-1] - 1e-6):
+            k = max(i for i in range(len(segs)) if starts[i] <= t)
+            for role in ("main", "secondary"):
+                at = phase0.phone_at(devs, report, role, k, t - starts[k])
+                if at is not None:
+                    u = out.setdefault(at[0], {"from": at[1], "to": at[1], "sets": []})
+                    u["from"], u["to"] = min(u["from"], at[1]), max(u["to"], at[1])
+                    if name not in u["sets"]:
+                        u["sets"].append(name)
+            t += STEP_S
     return out
 
 
@@ -77,23 +88,27 @@ def sha256(path: Path) -> str:
 def check(rec: Path, quick: bool) -> bool:
     manifest = json.loads((rec / "manifest.json").read_text())
     report = json.loads((rec / "phase0" / "report.json").read_text())
-    devs = phase0.paired_devices(manifest, report)
-    need = needed(rec)
+    by_key = {s["objectKey"]: (d["role"], s) for d in manifest["devices"] for s in d["segments"]}
+    need = needed(rec, manifest, report)
     ok = True
-    print(f"{rec}: Main segments {sorted(need)}")
-    for k in sorted(need):
-        for role in ("main", "secondary"):
-            s = devs[role]["segments"][k]
-            path = rec / s["objectKey"]
-            if not path.exists():
-                status, ok = "MISSING", False
-            elif path.stat().st_size != s["bytes"]:
-                status, ok = f"SIZE {path.stat().st_size} != {s['bytes']}", False
-            elif not quick and sha256(path) != s["sha256"]:
-                status, ok = "SHA256 MISMATCH", False
-            else:
-                status = "ok"
-            print(f"  {k:2d} {role:9s} {path.name}  {status}  ({', '.join(need[k])})", flush=True)
+    print(f"{rec}: {len(need)} files")
+    for key in sorted(need, key=lambda k: (by_key[k][0], by_key[k][1]["index"])):
+        role, s = by_key[key]
+        path, u = rec / key, need[key]
+        kept = s.get("trimmedToMs", s["durationMs"]) / 1000  # a file cut to what is read (docs/DATA.md)
+        if not path.exists():
+            status, ok = "MISSING", False
+        elif path.stat().st_size != s["bytes"]:
+            status, ok = f"SIZE {path.stat().st_size} != {s['bytes']}", False
+        elif u["to"] > kept:
+            status, ok = f"TRIMMED TOO SHORT: read to {u['to']:.0f} s, the file has {kept:.0f} s", False
+        elif not quick and sha256(path) != s["sha256"]:
+            status, ok = "SHA256 MISMATCH", False
+        else:
+            status = "ok"
+        cut = f", cut to {kept:.0f} s" if "trimmedToMs" in s else ""
+        print(f"  {role:9s} {path.name}  {status}  read {u['from']:.0f}-{u['to']:.0f} of {s['durationMs'] / 1000:.0f} s{cut}"
+              f"  ({', '.join(u['sets'])})", flush=True)
     return ok
 
 

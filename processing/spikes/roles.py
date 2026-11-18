@@ -35,6 +35,7 @@ import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
+import recpaths  # noqa: E402
 import detect  # noqa: E402
 import follow  # noqa: E402
 import gpu  # noqa: E402
@@ -208,7 +209,7 @@ def main(rec: Path, seg: int, start: float, seconds: float, tset: str, fps: floa
             batch = []
     if batch:
         flush(batch)
-    path = rec / "detect" / f"roles_{seg}_{start:g}_{seconds:g}.json"
+    path = recpaths.cache(rec) / "detect" / f"roles_{seg}_{start:g}_{seconds:g}.json"
     path.parent.mkdir(exist_ok=True)
     path.write_text(json.dumps({"segment": seg, "fps": fps, "teams": tset, "frames": frames_out}))
     print(f"{len(frames_out)} frames in {(time.time() - t0) / 60:.1f} min; roles {dict(tally)} -> {path.name}; "

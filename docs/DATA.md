@@ -5,10 +5,14 @@ Footage shows identifiable adult players: nothing here goes in git
 Mac under `footage/` and backed up to the footage bucket in S3
 (`FootageBucket` in the main repo's `infra/cdk-outputs.json`).
 
-Trained weights (`*.pt`, `*.onnx`) stay out of git too. Before training
+Trained weights (`*.pt`, `*.pth`, `*.onnx`) stay out of git too: the standard
+models are pinned by hash in `packaging/cloud/models.json` and published
+as GitHub release assets, so `uv run packaging/cloud/models.py fetch`
+puts them in `footage/models/` on a fresh clone ([MODELS.md](MODELS.md)
+says where each came from). Before training
 on a public dataset (SoccerNet included), check its license, and record
 which datasets every released model was trained on (for the standard
-models, in `footage/models/`'s README).
+models, in [MODELS.md](MODELS.md)).
 
 ## Layout
 
@@ -24,9 +28,45 @@ On the Mac:
 | `footage/<rec>/balldata/`, `balltrain*/`, `balljudge/`, `heattrain/` | training sets and trained models from this recording |
 | `footage/balldata_<recs>/` | a merged training set (`ballmerge.py`; links into the recordings' `balldata/`) |
 | `footage/models/` | the standard ball detector and judge every game uses, with a README of where each came from |
-| `footage/bench/` | the bench store (TESTING-PROCESSING.md section 6) |
-| `footage/fixtures/` | pitch-mapping fixtures |
+| `footage/bench/` | the bench store: everything the benchmarks read that nothing can remake (below) |
+| `footage/bench-cache/` | what is made from the store and only saves time |
+| `footage/bench-out/` | what benchmark runs write; safe to delete |
+| `footage/train/` | what training on the store's label sets makes |
 | `footage/symlinks.json` | every symlink under `footage/`, written by the backup |
+
+### The bench store
+
+The benchmarks are self-contained: `footage/bench/`, `footage/models/` and
+the code are all a run needs (`bench.py check` says whether they are
+there, `bench.py run` runs the standard benchmarks against the baselines
+in `processing/bench_baselines.json`). A recording in the store holds
+only inputs; `processing/spikes/recpaths.py` sends everything made from
+them elsewhere, under the same relative path, so a run never changes the
+store:
+
+| Path | What | Shared |
+|---|---|---|
+| `bench/<rec>/` | `manifest.json`, `phase0/` (sync report, cameras), `pitch/`, `teams/`, `lens/`, must-see sets (`playeval/<set>/`: `clip.json`, `items.json`, `boxes.json`, `pano/`), ball label sets (`labels*/`, `engine/labels/ball-*/`), and in `<deviceId>/` the video segments the sets cover | S3 `bench/`, Hugging Face |
+| `bench/LABELS.md` | every ball label set and whether it is trained on or held out | |
+| `bench/fixtures/pitch/` | pitch-mapping fixtures and the marked-field benchmark | |
+| `bench/soccertrack/` | SoccerTrack's annotations (External datasets, below) | |
+| `bench-cache/<rec>/` | `follow/passA_*.json` (player detections per clip), `detect/` (ball candidates, roles, net series), `bg/` (backgrounds), `labels*/heat_*.json`; `inputs.json` records the cameras, pitch map and models they were made from (`bench.py stamp`), and `bench.py check` reports them stale when those change. Made from the video: hours to remake | S3 `bench-cache/`, Hugging Face (optional: `sharedata.py fetch --no-cache`) |
+| `bench-out/<rec>/` | `follow/` (paths, camera logs, debug images, renders), `playeval/<set>/paths/`, `playeval/bench.json` | never |
+| `train/<rec>/` | `balldata/`, `balltrain*/`, `balljudge/` (crops and a recording's own judges), `heattrain/` | never (the models that become standard are published: `footage/models/`) |
+
+The video is part of the store in S3 and on Hugging Face but need not be
+on the machine: the standard benchmarks run from the caches, and
+`benchstore.py` lists the files the sets read and which part of each. A
+file the sets read only the start of is cut there (2026-11-18: a stream
+copy, the frames that are left unchanged), ten seconds past the last
+frame read; its manifest entry then has `trimmedToMs`, the cut file's
+`bytes` and `sha256`, and the upload's own as `originalBytes` and
+`originalSha256`. `durationMs` stays the upload's, so the game's clock is
+the same; reading past the cut finds no frames. The uploads themselves
+are under `accounts/` in S3. A file read only at its end is kept whole
+(cutting its start would move every time in it). A working recording
+(`footage/rec7`, not in the store) keeps all of the above in its own
+folder, as before.
 
 `<rec>` is `rec<N>` in recording order; a variant of a recording (another
 calibration, a comparison) is `rec<N>-<what>` or `rec<N><what>` and links
@@ -37,8 +77,9 @@ In S3:
 | Prefix | What | Written by |
 |---|---|---|
 | `accounts/<account>/games/<game>/recordings/<recording>/` | the phones' raw video and the manifest | the app (deleting a game on the website deletes it) |
-| `bench/` | `footage/bench/`, video included | `footagestore.py backup` |
-| `data/` | `footage/` without `bench/`, video and symlinks; raw video only for a recording no longer in `accounts/` | `footagestore.py backup` |
+| `bench/` | `footage/bench/`, video included | `footagestore.py backup`; the video by copies within the bucket from `accounts/` |
+| `bench-cache/` | `footage/bench-cache/` | `footagestore.py backup` |
+| `data/` | `footage/` without `bench/`, `bench-cache/`, `bench-out/`, video and symlinks; raw video only for a recording no longer in `accounts/` | `footagestore.py backup` |
 
 The bucket is not versioned: an overwritten or deleted object is gone.
 The backup only uploads; it never deletes from S3.
@@ -63,7 +104,7 @@ is trained on or held out for testing; every new labelling holds part back
 
 | Name | Where | What | Licence | Use |
 |---|---|---|---|---|
-| SoccerTrack (Scott et al., CVPRW 2022) | `footage/soccertrack/wide_view/` (`videos/`, `annotations/`), `footage/soccertrack/fisheye_keypoints.json` | 66 clips of 30 s, 25 fps, 6500 x 1000: one fixed fisheye camera beside the pitch, unwrapped; two university 11-v-11 games (2020-02-20, 2022-02-20), daylight, white ball. Boxes for every player and the ball (team and player `BALL`) in every frame; player boxes were made from the players' GNSS tracks. Downloaded 2026-11-09 from [Kaggle](https://www.kaggle.com/datasets/atomscott/soccertrack) (version 6; the drone and pre-drawn videos left out). | LGPL-3.0 (Kaggle); players gave signed consent (University of Tsukuba ethics approval) | **Held out: test only, never trained on.** A camera, field and light none of our models has seen |
+| SoccerTrack (Scott et al., CVPRW 2022) | `footage/bench/soccertrack/wide_view/` (`videos/`, `annotations/`), `footage/bench/soccertrack/fisheye_keypoints.json` | 66 clips of 30 s, 25 fps, 6500 x 1000: one fixed fisheye camera beside the pitch, unwrapped; two university 11-v-11 games (2020-02-20, 2022-02-20), daylight, white ball. Boxes for every player and the ball (team and player `BALL`) in every frame; player boxes were made from the players' GNSS tracks. Downloaded 2026-11-09 from [Kaggle](https://www.kaggle.com/datasets/atomscott/soccertrack) (version 6; the drone and pre-drawn videos left out). | LGPL-3.0 (Kaggle); players gave signed consent (University of Tsukuba ethics approval) | **Held out: test only, never trained on.** A camera, field and light none of our models has seen |
 
 ## Backing up
 
@@ -79,7 +120,7 @@ copying it to `data/<rec>/`.
 
     uv run processing/spikes/footagestore.py restore
 
-brings back `data/` and `bench/` into `footage/` and recreates the
+brings back `data/`, `bench/` and `bench-cache/` into `footage/` and recreates the
 symlinks. Raw video still in `accounts/` is downloaded per recording when
 needed, through the footage CloudFront distribution (its first TB a month
 is free; S3's transfer out is not), checked against the manifest's sizes
@@ -98,14 +139,18 @@ Contributors get the benchmark data from a gated Hugging Face dataset,
 [`OpenSportsBall/bench`](https://huggingface.co/datasets/OpenSportsBall/bench):
 its card is public, but each person's access request needs a maintainer's
 approval, and they accept the terms in the card ([DATASET_CARD.md](DATASET_CARD.md))
-when they ask. It mirrors `footage/` path for path and holds `bench/`,
-`models/`, and the pitch maps and ball label sets of the recordings outside
-the bench (`sharedata.py`'s `ANNOTATED`), about 37 GB. Full recordings stay in
-S3 only.
+when they ask. It mirrors `footage/` path for path and holds `bench/` (with
+its video and every ball label set), `bench-cache/` and `models/`: about
+58 GB, 54.6 GB of it video. Full recordings stay in S3 only.
 
-    uv run processing/spikes/sharedata.py fetch [--annotations-only]   # contributors, after approval and `hf auth login`
-    uv run processing/spikes/sharedata.py list                         # what upload would send
-    uv run processing/spikes/sharedata.py upload                       # maintainers: after changing any of it
+    uv run processing/spikes/sharedata.py fetch [--no-cache] [--no-video]   # contributors, after approval and `hf auth login`
+    uv run processing/spikes/sharedata.py list                              # what upload would send
+    uv run processing/spikes/sharedata.py upload                            # maintainers: after changing any of it
+    uv run processing/spikes/bench.py check                                 # is what the benchmarks read all here?
+
+`fetch --no-video` (about 3 GB) is enough to run the standard benchmarks;
+the video is for remaking caches (a new detector, other settings) and
+for looking at footage.
 
 `upload` never sends the app's upload state (`upload.json`: the account id
 and S3 upload ids) and removes it from the dataset if it is there. It stops,
@@ -117,7 +162,8 @@ Approve or reject requests on the dataset's **Settings → Gated user access**
 page (Hugging Face emails the maintainers about new ones). Approve people you
 know are working on the project; removing someone there stops further
 downloads but can't recall a copy they already have. To share a new label set
-or pitch map, add it to `ANNOTATED` (or to the bench store) and run `upload`.
+or pitch map, put its recording in the bench store (TESTING-PROCESSING.md
+section 6, "Adding a set"), add it to `bench/LABELS.md` and run `upload`.
 
 ## A new recording
 
@@ -127,5 +173,6 @@ or pitch map, add it to `ANNOTATED` (or to the bench store) and run `upload`.
    and `footagestore.py fetch rec<N>`.
 2. `phase0.py`, then whatever it is for (labels, pitch, a full game).
 3. Add it to the table above and run `footagestore.py backup`.
-4. Once it has labels or a pitch map worth sharing, add it to
-   `sharedata.py`'s `ANNOTATED` and run `sharedata.py upload`.
+4. Once it has labels, must-see boxes or a pitch map worth sharing, copy
+   its inputs into the bench store (TESTING-PROCESSING.md section 6,
+   "Adding a set") and run `sharedata.py upload`.

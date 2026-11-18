@@ -14,7 +14,7 @@ Run after phase0.py and follow.py (cached cameras):
     uv run processing/spikes/pitch.py footage/rec4 taps     (after tapping keypoints in pitchtap/server.py)
     uv run processing/spikes/pitch.py footage/rec4 review   (the fit, for checking in pitchtap/server.py)
     uv run processing/spikes/pitch.py footage/rec5 paint [start pose]  (choose the line colour, to confirm in pitchtap)
-    uv run processing/spikes/pitch.py footage/rec3 fixture footage/fixtures/pitch/<name>
+    uv run processing/spikes/pitch.py footage/rec3 fixture footage/bench/fixtures/pitch/<name>
 
 The phones sit at (nearly) one point and the pitch is flat, so one 3x3
 homography maps pitch coordinates (x along the touchline, z across, in
@@ -38,6 +38,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
+import recpaths  # noqa: E402
 import follow  # noqa: E402
 import phase0  # noqa: E402
 
@@ -433,7 +434,7 @@ def place_detections(rec: Path, pose: PitchPose) -> None:
     """Pitch coordinates for detect.py's detections, an on-pitch flag, and a
     top-down map: people on the pitch coloured by time, people off it in
     grey, ball candidates on it as red dots."""
-    path = rec / "detect" / "detections.json"
+    path = recpaths.cache(rec) / "detect" / "detections.json"
     if not path.exists():
         return
     data = json.loads(path.read_text())
@@ -443,7 +444,7 @@ def place_detections(rec: Path, pose: PitchPose) -> None:
             x, z = pose.to_pitch(d["yaw"], d["pitch"])
             d["xz"] = None if np.isnan(x) else [round(float(x), 2), round(float(z), 2)]
             d["onPitch"] = bool(d["xz"] is not None and abs(x) <= hl and abs(z) <= hw)
-    (rec / "detect" / "detections_pitch.json").write_text(json.dumps(data))
+    (recpaths.cache(rec) / "detect" / "detections_pitch.json").write_text(json.dumps(data))
 
     s, pad = 8, 40  # px per metre, border
     W_, H_ = int(pose.L * s) + 2 * pad, int(pose.W * s) + 2 * pad

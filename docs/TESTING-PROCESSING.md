@@ -65,11 +65,11 @@ start from the files it replaced:
 
     uv run processing/spikes/jointfit.py footage/rec7 holdout --start footage/rec7/pre_joint --out /tmp/rec7-holdout
 
-Fixtures: `footage/fixtures/pitch/<name>/` (`background.png`, `expected.json`),
+Fixtures: `footage/bench/fixtures/pitch/<name>/` (`background.png`, `expected.json`),
 or `$OSB_PITCH_FIXTURES`. The test skips when none exist. Make one from a
 recording whose `pitch.json` and `goals.json` you have verified:
 
-    uv run processing/spikes/pitch.py footage/rec3 fixture footage/fixtures/pitch/<name>
+    uv run processing/spikes/pitch.py footage/rec3 fixture footage/bench/fixtures/pitch/<name>
 
 Tolerances: both goals found and within 0.3 m; goal frames within 1.5 px of
 the white structure and end markings within 3.5 px of the paint; pitch
@@ -85,13 +85,13 @@ goal is sorted out.
 
 ### Marked-field benchmark
 
-`footage/fixtures/pitch/night-2026-10-21/` (rec4, the 2026-10-21 night game) has every pitch marking
+`footage/bench/fixtures/pitch/night-2026-10-21/` (rec4, the 2026-10-21 night game) has every pitch marking
 traced on the paint and completed, the goal frames fitted to their posts, and 15 keypoints tapped by eye
 (`pitchtap/server.py`), in `benchmark.json`; `benchmark.png` shows it. Score a pitch fit against it:
 
 | Step | Command |
 |---|---|
-| Score fits | `uv run processing/spikes/pitchbench.py footage/fixtures/pitch/night-2026-10-21 <pitch.json> ... [--goals goals.json] [--all]` |
+| Score fits | `uv run processing/spikes/pitchbench.py footage/bench/fixtures/pitch/night-2026-10-21 <pitch.json> ... [--goals goals.json] [--all]` |
 | Tap keypoints on a recording's panorama | preview `pitch-tap-rec4` (`processing/spikes/pitchtap/server.py <recording> [port]`), then `uv run processing/spikes/pitch.py <recording> taps` |
 
 Fits must be made on the fixture's own `background.png` (its `cameras.json`). Baselines and how the
@@ -457,9 +457,9 @@ The whole `footage/` layout, its S3 backup and how to restore it are in
 
 | Path | What |
 |---|---|
-| `footage/bench/` | the bench store: three games' bench inputs and video, mirrored to S3 (section 6) |
+| `footage/bench/`, `bench-cache/`, `bench-out/`, `train/` | the bench store (inputs and video, mirrored to S3 and Hugging Face) and what is made from it (section 6) |
 | `footage/rec3/pitch/` | pitch map, goals, background panorama, overview map |
-| `footage/fixtures/pitch/` | mapping regression fixtures; `night-2026-10-21/` is the marked-field benchmark |
+| `footage/bench/fixtures/pitch/` | mapping regression fixtures; `night-2026-10-21/` is the marked-field benchmark |
 | `footage/rec3/follow/` | pass A caches (`passA_*.json`), the last run's path files, `camlog.txt` and `play_debug.json` |
 | `footage/rec3/playeval/` | play-box sets and benched paths, `bench.json` |
 | `footage/rec3/labels/` | the random ball label set (detector training data) |
@@ -498,53 +498,102 @@ object keys, e.g.
 
 ## 6. The bench store
 
-`footage/bench/` holds everything the benches in sections 1-3 read, for
-three games, including the video they need, so any of them can be rerun
-from scratch (new detectors, ballwin settings, roles) without going back
-to the full recordings. It is mirrored to `s3://<footage bucket>/bench/`,
-outside `accounts/`: the upload Lambda ignores it, and deleting a game's
-raw footage after rendering won't touch it.
+The short version, for running the benchmarks and recording a result, is
+[BENCHMARKS.md](BENCHMARKS.md).
 
-| Path | What |
+`footage/bench/` holds everything the benches in sections 1-3 read that
+nothing can remake, for every recording with must-see boxes or ball
+labels, so the benchmarks need only it, `footage/models/` and the code.
+What is made from it is kept apart, under the same relative path
+(`processing/spikes/recpaths.py`; the whole layout is in
+[DATA.md](DATA.md), "The bench store"):
+
+| Folder | What | |
+|---|---|---|
+| `footage/bench/<rec>/` | inputs: manifest, `phase0/`, `pitch/`, `teams/`, must-see sets, ball label sets, and the video the sets cover | S3 `bench/` (outside `accounts/`: deleting a game's raw footage won't touch it) and Hugging Face |
+| `footage/bench-cache/<rec>/` | made from the inputs and the video, hours to remake: `follow/passA_*.json`, `detect/` (ball candidates, roles, net series), `bg/` | S3 `bench-cache/` and Hugging Face, optional |
+| `footage/bench-out/<rec>/` | what runs write: paths, `playeval/bench.json`, camera logs, debug images | nowhere; delete at will |
+| `footage/train/<rec>/` | what training makes: `balldata/`, `balltrain*/`, `balljudge/`, `heattrain/` | nowhere |
+
+So a bench run never changes the store, and a script given a store
+recording (`footage/bench/rec3`) reads and writes its caches and outputs
+in those folders by itself; given a working recording (`footage/rec3`) it
+keeps everything in the recording's folder as before.
+
+| Recording | In the store |
 |---|---|
-| `bench/rec3/` | the first game: manifest, `phase0/`, `pitch/`, `teams/`, `bg/`, `playeval/` (5 sets, 26 moments), `follow/` (pass A caches), `detect/` (candidates by tag, roles, net series), `labels/` (random set), `labels_seg3/`, `labels_seg9/`, `balldata/`, `balltrain/` (the RF-DETR checkpoint), `balljudge/`, `heattrain/*.pt` |
-| `bench/rec3/<device>/` | Main segments 0-6 and 9 and their Secondary pairs (16 files, 20 GB): game 0:00-30:00, the seg 3 and seg 9 clips |
-| `bench/rec4cal/` | the 2026-10-21 night game in the corrected camera model: manifest, `phase0/`, `pitch/`, `lens/`, `teams/`, `bg/`, `playeval/` (2 sets, 15 moments), `follow/`, `detect/`, `balljudge/` (rec3's judge) |
-| `bench/rec4cal/<device>/` | Main segments 2-6 and their Secondary pairs (10 files, 12.5 GB): game 10:00-30:00 |
-| `bench/rec7/` | the 2026-11-04 night game (yellow ball), added 2026-11-15 for the play bench only: manifest, `phase0/` (report, cameras), `pitch/`, `teams/`, `playeval/` (1 set, 5 moments), `follow/` (the pass A cache), `detect/` (that piece's ball candidates and roles). Its ball label set stays in `footage/rec7/labels_seg6` |
-| `bench/rec7/<device>/` | Main segments 5-7 and Secondary 4-7 (7 files, 9.1 GB): game 20:00-30:00 (24:45-34:45 into the recording). `benchstore.py` checks Secondary 5-7, Main's pairs; Secondary 4 holds the piece's first seconds |
+| `bench/rec3/` | the first game: 5 must-see sets (26 moments), `labels` (random set), `labels_seg3`, `labels_seg9` (held out). Video: Main segments 0-6 and 9 and their Secondary pairs (16 files, 17.6 GB): game 0:00-30:00, the seg 3 and seg 9 clips |
+| `bench/rec4cal/` | the 2026-10-21 night game in the corrected camera model: 2 must-see sets (15 moments), `lens/`. Video: Main segments 2-6 and their Secondary pairs (10 files, 10.9 GB): game 10:00-30:00 |
+| `bench/rec5-game/` | the orange-ball game: `labels`, `labels_kits`. Video: segment 18 of both phones (2 files, 2.6 GB), the kit labels' clip |
+| `bench/rec6/` | the first daylight game: `labels` (random set; no video in the store) |
+| `bench/rec7/` | the 2026-11-04 night game (yellow ball): 1 must-see set (5 moments), `labels_seg6` (its last 40 s held out). Video: Main segments 5-7 and Secondary 4-6 (6 files, 6.9 GB); Secondary 4 holds the play clip's first seconds |
+| `bench/rec8/` | the 2026-11-11 night game: 4 must-see sets (16 boxes, all plays the follow cam missed: a count of misses fixed, kept apart from the standard 46), `labels_seg11-136`, `engine/labels/ball-1`. Video: Main segments 0-4 and 10-14 and Secondary 0-4, where it stopped (15 files, 16.6 GB) |
 | `bench/fixtures/pitch/` | the pitch regression fixtures and the marked-field benchmark |
+| `bench/soccertrack/` | SoccerTrack's annotations (held out) |
+| `bench/LABELS.md` | every ball label set: trained on, or held out |
 
-Run the benches on it by giving its recordings:
+The standard benchmarks, against the baselines in
+`processing/bench_baselines.json` (in git: change a baseline in the same
+commit as the change that moves it):
+
+    uv run processing/spikes/bench.py check     # everything a run reads is here, and the caches match the inputs
+    uv run processing/spikes/bench.py run       # the play bench on rec3, rec4cal, rec7 and rec8 (49/62), balleval on rec3's seg3 and seg9
+
+Or one at a time, as in sections 1-3, on the store's recordings:
 
     uv run processing/spikes/playbench.py footage/bench/rec3 footage/bench/rec4cal footage/bench/rec7 [variant ...]
     OSB_BALL_TAG=win uv run processing/spikes/balleval.py footage/bench/rec3 seg3
-    OSB_PITCH_FIXTURES=footage/bench/fixtures/pitch uv run ... pytest processing/tests/test_pitch_regression.py
+    cd processing && uv run --extra dev pytest tests/test_pitch_regression.py
 
-Checked when the store was made (2026-10-29): every segment matches its
-manifest's sha256, the play bench gives 29/41 (rec3 20/26, rec4cal 9/15)
-as on the working recordings, balleval matches them, and ballwin decodes
-the rec4cal video. The pitch regression test fails 4/4 on both copies of
-its fixtures alike (since the line-mask change of 2026-10-22, 637b3ba; section 1),
-not the store. rec7 (2026-11-15): its seven segments match the manifest's sha256 for the six
-`benchstore.py` checks, and the play bench gives 4/5 from the store as from `footage/rec7`.
+Checked when the layout was split (2026-11-17), in a copy holding only
+`bench/`, `bench-cache/`, `models/` and the code: the play bench 36/46
+(rec3 21/26, rec4cal 11/15, rec7 4/5) and balleval seg3 45/53 found
+(2 wrong), seg9 23/37 (3 wrong), the same as on the working recordings;
+nothing was written into `bench/`. rec8 gives 13/16 with the same
+features (and without `peoplesurge`), as on the fresh mirrors of
+2026-11-16; with the pass A caches of its first full-game run, made
+before the fitted-pitch field (113a2c6), it gives 2/16. The pitch regression test fails 4/4
+on its fixtures (since the line-mask change of 2026-10-22, 637b3ba;
+section 1), not the store.
 
-The benches write their outputs (paths, candidate files, caches) into the
-store as they do into any recording; don't push scratch variants to S3.
+The baselines are from caches remade from the video on 2026-11-18 with
+the standard models (`ball_detector.pth` c69adbc8, `ball_judge.pt`
+bd32076c, the stock player detector) and this code: every clip's ball
+candidates (ballwin.py), roles (roles.py) and pass A. Play bench 49/62:
+rec3 19/26, rec4cal 13/15, rec7 4/5, rec8 13/16; balleval seg3 41/53
+found (1 wrong), seg9 24/37 (6 wrong). The figures above (rec3 21,
+rec4cal 11, seg3 45, seg9 23) were on older candidates: rec3's from its
+own first detector (2026-10-16 to 19) and rec4cal's from a detector
+trained on rec4cal (2026-10-22), neither standard since October. The
+caches from before are in `bench-out/<rec>/cache-before-regen/`.
+
+The caches. `bench.py stamp` writes `bench-cache/<rec>/inputs.json`: the
+cameras, sync report, pitch map, goals and standard models the caches
+match; `bench.py check` reports them stale when any of those change, and
+then they are remade from the video before a score means anything (the
+pass A caches in the store were once left over from before the fitted
+pitch, and gave 33/46). A missing pass A cache is remade by the play
+bench itself (the video for the clip must be here); ball candidates by
+`ballwin.py`, roles by `roles.py`, as `fullgame.py` runs them. Stamp
+again once they are current.
 
 | Step | Command |
 |---|---|
 | Check the video every set needs is there and matches the manifest | `uv run processing/spikes/benchstore.py [footage/bench/<rec>] [--quick]` |
-| Get it as a contributor (gated; see DATA.md, "Sharing with contributors") | `uv run processing/spikes/sharedata.py fetch` |
-| Restore it on a new machine | `aws s3 sync --profile sbv s3://<footage bucket>/bench/ footage/bench/` |
-| Save changes to it | `aws s3 sync --profile sbv footage/bench/ s3://<footage bucket>/bench/`, then `sharedata.py upload` |
+| Get it as a contributor (gated; see DATA.md, "Sharing with contributors") | `uv run processing/spikes/sharedata.py fetch [--no-video]` |
+| Restore it on a new machine | `uv run processing/spikes/footagestore.py restore` (the store, without waiting for the video: `aws s3 sync --profile sbv --exclude "*.mp4" s3://<footage bucket>/bench/ footage/bench/`) |
+| Save changes to it | `uv run processing/spikes/footagestore.py backup`, then `sharedata.py upload` |
 
 Adding a set: make it on the full recording (section 2 or 3), copy its
-directory and the files it needs (candidates, pass A cache, roles) into
-the store, and download any segment `benchstore.py` reports missing from
-the recording's S3 prefix with the manifest's object key. Video is kept as
-whole, untouched segments so detector runs reproduce exactly; trimming them
-to the bench stretches would save only ~15%.
+directory into the store and the caches it reads (candidates, pass A
+cache, roles) into `bench-cache/<rec>/`, add a ball label set to
+`bench/LABELS.md`, and copy any segment `benchstore.py` reports missing
+into S3's `bench/<rec>/` from the recording's prefix (a copy within the
+bucket; the manifest has the object key). A file the sets read only the
+start of is cut there (2026-11-18, 62 -> 52 GB; DATA.md, "The bench
+store"): the frames left are the upload's own, so detector runs
+reproduce exactly. `benchstore.py` lists the part of each file that is
+read.
 
 ## 7. The engine commands
 

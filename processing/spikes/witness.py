@@ -36,6 +36,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
+import recpaths  # noqa: E402
 import ball as B  # noqa: E402
 import balleval as E  # noqa: E402
 import follow  # noqa: E402
@@ -51,7 +52,7 @@ FUSE_GATE_M = 25.0       # fuse: candidates this far from the witness are left o
 def players_per_frame(rec: Path, seg0: int, start: float, seconds: float, fps: float, pose):
     """Pitch positions of the tracked people at each candidate frame, from
     follow.py's cached pass A detections (30 fps) at the candidate rate."""
-    cache = follow.passa_cache(rec / "follow", seg0, start, seconds)
+    cache = follow.passa_cache(recpaths.cache(rec) / "follow", seg0, start, seconds)
     dets = json.loads(cache.read_text())["dets"]
     n = int(round(seconds * fps))
     out = []

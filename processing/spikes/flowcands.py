@@ -37,6 +37,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
+import recpaths  # noqa: E402
 import balljudge  # noqa: E402
 import detect  # noqa: E402
 import follow  # noqa: E402
@@ -207,9 +208,9 @@ def main(rec: Path, seg: int, start: float, seconds: float, fps: float) -> None:
             if (k + 1) % 200 == 0:
                 print(f"phone {phone}: {k + 1}/{n_out} frames, {(time.time() - t0) / 60:.1f} min", flush=True)
     frames_out = [{"t": round(start + k / fps, 3), "detections": per_frame[k]} for k in range(n_out)]
-    path = rec / "detect" / f"ball_{seg}_{start:g}_{seconds:g}.flow.json"
+    path = recpaths.cache(rec) / "detect" / f"ball_{seg}_{start:g}_{seconds:g}.flow.json"
     path.write_text(json.dumps({"segment": seg, "fps": fps, "mode": "flow", "frames": frames_out}))
-    (rec / "detect" / f"net_{seg}_{start:g}_{seconds:g}.json").write_text(json.dumps({"fps": fps, "net": net}))
+    (recpaths.cache(rec) / "detect" / f"net_{seg}_{start:g}_{seconds:g}.json").write_text(json.dumps({"fps": fps, "net": net}))
     n = sum(len(f) for f in per_frame)
     print(f"{n_out} frames, {n} motion candidates ({n / n_out:.1f} per frame), {(time.time() - t0) / 60:.1f} min -> {path.name}")
 

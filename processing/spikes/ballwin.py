@@ -58,6 +58,7 @@ import torch
 import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).parent))
+import recpaths  # noqa: E402
 import balljudge  # noqa: E402
 import detect  # noqa: E402
 import follow  # noqa: E402
@@ -509,7 +510,7 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
     if not n:
         raise SystemExit("no frames decoded (are the clip's segment files on disk?)")
     tag = os.environ.get("OSB_WIN_TAG", "win")  # output name; e.g. "win4" for a cadence experiment
-    path = rec / "detect" / f"ball_{seg}_{start:g}_{seconds:g}.{tag}.json"
+    path = recpaths.cache(rec) / "detect" / f"ball_{seg}_{start:g}_{seconds:g}.{tag}.json"
     path.parent.mkdir(exist_ok=True)
     path.write_text(json.dumps({"segment": seg, "fps": fps, "model": str(ckpt), "mode": "window", "wasb": WASB,
                                 "judge": os.environ.get("OSB_JUDGE") or "standard",  # rec7's need judge_v4

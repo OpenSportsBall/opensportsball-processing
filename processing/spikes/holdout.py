@@ -115,15 +115,32 @@ class Holdout:
             raise HeldOut(f"{d} is held out for testing (heldout.json): it can't be a training set")
 
 
+def located(rec: Path) -> Path | None:
+    """Where the recording a stamp names is now. A stamp holds the path the
+    data was built from; the recording may since have moved into or out of
+    the bench store, or the data come from another machine, so a path that
+    is gone is looked up by the recording's name under this repo's
+    footage/bench/ and footage/."""
+    if rec.exists():
+        return rec
+    footage = Path(__file__).resolve().parents[2] / "footage"
+    for p in (footage / "bench" / rec.name, footage / rec.name):
+        if (p / "manifest.json").exists():
+            return p
+    return None
+
+
 def check_stamp(stamp: dict | None, what: str) -> None:
     """Refuses training data built before the current held-out marks."""
     if not stamp:
         raise HeldOut(f"{what} carries no held-out stamp (built before held-out labels were checked): "
                       f"rebuild it (balljudge.py data / balldata.py) so held-out labels are left out")
     for rec, built in stamp.items():
-        p = Path(rec)
-        if not p.exists():
-            continue  # another machine's path: checked where it was built
+        p = located(Path(rec))
+        if p is None:
+            print(f"{what}: {Path(rec).name} is not on this machine, so its held-out time "
+                  f"could not be checked against the stamp", file=sys.stderr)
+            continue
         now = windows(p)
         if now != built:
             raise HeldOut(f"{what}: {p.name}'s held-out time changed since it was built "

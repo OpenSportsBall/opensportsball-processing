@@ -29,6 +29,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
+import recpaths  # noqa: E402
 import detect  # noqa: E402
 import follow  # noqa: E402
 import phase0  # noqa: E402
@@ -40,7 +41,7 @@ MERGE_DEG = 0.4     # the same ball seen by both phones
 
 
 def clip_path(rec: Path, seg: int, start: float, seconds: float) -> Path:
-    return rec / "detect" / f"ball_{seg}_{start:g}_{seconds:g}.json"
+    return recpaths.cache(rec) / "detect" / f"ball_{seg}_{start:g}_{seconds:g}.json"
 
 
 def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: float) -> None:

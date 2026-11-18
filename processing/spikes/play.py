@@ -40,6 +40,7 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.optimize import linear_sum_assignment
 
 sys.path.insert(0, str(Path(__file__).parent))
+import recpaths  # noqa: E402
 import accel  # noqa: E402
 import pitch as P  # noqa: E402
 
@@ -242,7 +243,7 @@ def main(rec: Path) -> None:
     out = rec / "play"
     out.mkdir(exist_ok=True)
     pose = P.load_pose(rec)
-    data = json.loads((rec / "detect" / "detections_pitch.json").read_text())
+    data = json.loads((recpaths.cache(rec) / "detect" / "detections_pitch.json").read_text())
     fps, frames = data["fps"], data["frames"]
     b = json.loads((rec / "ball" / "ball.json").read_text())["frames"]
     ball = [np.array(f["xz"]) if f["xz"] is not None else None for f in b]

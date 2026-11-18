@@ -7,7 +7,7 @@
 # ///
 """Scores pitch fits against a marked-field benchmark.
 
-    uv run processing/spikes/pitchbench.py footage/fixtures/pitch/<name> <pitch.json> [<pitch.json> ...]
+    uv run processing/spikes/pitchbench.py footage/bench/fixtures/pitch/<name> <pitch.json> [<pitch.json> ...]
                                            [--goals <goals.json>] [--all]
 
 A benchmark fixture holds background.png, the cameras.json it was built with,

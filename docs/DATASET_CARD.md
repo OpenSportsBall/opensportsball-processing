@@ -86,7 +86,7 @@ After your request is approved, from a checkout of
 
     hf auth login                                      # a read token is enough
     uv run processing/spikes/sharedata.py fetch        # everything (~37 GB)
-    uv run processing/spikes/sharedata.py fetch --annotations-only   # pitch maps and labels only (~1 GB)
+    uv run processing/spikes/sharedata.py fetch --no-video   # everything but the video (~3 GB): enough to run the standard benchmarks
     uv run processing/spikes/benchstore.py             # check the bench video
 
 `docs/TESTING-PROCESSING.md` in that repository describes each benchmark and

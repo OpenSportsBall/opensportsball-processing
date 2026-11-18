@@ -129,6 +129,18 @@ def test_game_stream_is_blank_from_the_start_of_a_clip_past_the_footage(numbered
     assert all(np.array_equal(f, follow.blank_frame(W)) for f in frames)
 
 
+def test_exposure_is_matched_on_a_moment_of_the_clip_both_phones_have():
+    m, report = stopped_early()
+    devs = phase0.paired_devices(m, report)
+    # The middle of the clip, in the files that have it: 150 s into the game is Main's file 1, Secondary's file 1.
+    assert follow.exposure_moment(devs, report, 0, 120.0, 60.0) == (("main/main_001.mp4", 50.0), ("sec/sec_001.mp4", 30.0))
+    # Secondary stops 240 s in: a clip whose middle is past that is matched on an earlier moment of it.
+    (key_a, t_a), (key_b, t_b) = follow.exposure_moment(devs, report, 2, 20.0, 60.0)
+    assert (key_a, t_a, key_b) == ("main/main_002.mp4", 35.0, "sec/sec_001.mp4") and t_b == 115.0
+    # None of the clip has Secondary: nothing to match on.
+    assert follow.exposure_moment(devs, report, 3, 10.0, 30.0) is None
+
+
 def test_the_view_stays_on_main_where_secondary_has_no_footage(tmp_path):
     # Canvas -80..80 deg, Secondary on the left, Main seeing -10..80. Players (blobs) far to the
     # left, where only Secondary looks: with both phones the view goes there; alone it stops at Main's edge.

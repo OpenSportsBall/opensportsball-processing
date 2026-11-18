@@ -59,6 +59,7 @@ import torch
 import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).parent))
+import recpaths  # noqa: E402
 import ballheat  # noqa: E402
 import balljudge  # noqa: E402
 import holdout  # noqa: E402
@@ -88,7 +89,7 @@ def setup(rec: Path):
 
 
 def bg_path(rec: Path, role: str, seg: int) -> Path:
-    return rec / "bg" / f"{role}_{seg}.png"
+    return recpaths.cache(rec) / "bg" / f"{role}_{seg}.png"
 
 
 def load_bg(rec: Path, role: str, seg: int) -> np.ndarray:
@@ -101,7 +102,7 @@ def load_bg(rec: Path, role: str, seg: int) -> np.ndarray:
 
 def make_bg(rec: Path) -> None:
     devs, _, flip = setup(rec)
-    (rec / "bg").mkdir(exist_ok=True)
+    (recpaths.cache(rec) / "bg").mkdir(exist_ok=True)
     for role in ("main", "secondary"):
         for s in devs[role]["segments"]:
             out, path = bg_path(rec, role, s["index"]), rec / s["objectKey"]
@@ -131,7 +132,7 @@ def make_data(rec: Path, sets: list[str]) -> None:
     for name in sets:
         lab = rec / name
         labels = json.loads((lab / "labels.json").read_text())
-        out = rec / "heattrain" / name
+        out = recpaths.train(rec) / "heattrain" / name
         out.mkdir(parents=True, exist_ok=True)
         meta_path = out / "meta.json"
         meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
@@ -175,7 +176,7 @@ def load_sets(rec: Path, hold: str | None) -> tuple[list[dict], list[dict]]:
     train, held = [], []
     marked = holdout.Holdout(rec)
     n_marked = 0
-    for d in sorted((rec / "heattrain").glob("*/meta.json")):
+    for d in sorted((recpaths.train(rec) / "heattrain").glob("*/meta.json")):
         name = d.parent.name
         for fid, m in json.loads(d.read_text()).items():
             row = dict(m, set=name, id=fid)
@@ -207,7 +208,7 @@ class Crops(torch.utils.data.Dataset):
     def arrays(self, r):
         key = (r["set"], r["id"])
         if key not in self.cache:
-            self.cache[key] = np.load(self.rec / "heattrain" / r["set"] / f"{r['id']}.npy", mmap_mode="r")
+            self.cache[key] = np.load(recpaths.train(self.rec) / "heattrain" / r["set"] / f"{r['id']}.npy", mmap_mode="r")
         bkey = (r["role"], r["segment"])
         if bkey not in self.cache:
             self.cache[bkey] = load_bg(self.rec, *bkey)
@@ -273,7 +274,7 @@ def score(rec: Path, rows: list[dict], wasb, judge=None) -> dict:
     peaks = {t: [0, 0] for t in THRESHOLDS}
     for r in rows:
         bg = load_bg(rec, r["role"], r["segment"])
-        trip = np.load(rec / "heattrain" / r["set"] / f"{r['id']}.npy")
+        trip = np.load(recpaths.train(rec) / "heattrain" / r["set"] / f"{r['id']}.npy")
         fr = torch.from_numpy(trip).to(dev).permute(0, 3, 1, 2).float() / 255
         b = torch.from_numpy(bg).to(dev).permute(2, 0, 1).float() / 255
         cands = wasb(fr, corners, b, base=2)
@@ -326,7 +327,7 @@ def train(rec: Path, name: str, hold: str | None, steps: int) -> None:
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, steps)
     loader = torch.utils.data.DataLoader(Crops(rec, rows, steps * BATCH), batch_size=BATCH, num_workers=2,
                                          persistent_workers=True)
-    out = rec / "heattrain" / f"{name}.pt"
+    out = recpaths.train(rec) / "heattrain" / f"{name}.pt"
     t0, run = time.time(), []
     for step, (x, tgt, mask) in enumerate(loader, 1):
         x, tgt, mask = x.to(dev), tgt.to(dev), mask.to(dev)
@@ -354,7 +355,7 @@ def evaluate(rec: Path, name: str, hold: str) -> None:
     dev = gpu.device()
     _DIAM["rec"] = rec
     _, held = load_sets(rec, hold)
-    w = ballwin.Wasb(dev, None if name == "stock" else rec / "heattrain" / f"{name}.pt")
+    w = ballwin.Wasb(dev, None if name == "stock" else recpaths.train(rec) / "heattrain" / f"{name}.pt")
     judge = balljudge.load_judge(rec)
     print_score(f"{name} on {hold}", score(rec, held, w, judge))
 
