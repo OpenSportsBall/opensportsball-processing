@@ -1745,6 +1745,57 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         same size to the byte as the run before (contents not
         compared). The follow pass is still 25-50 s a chunk slower than
         at 1080p, all in pass B's render.
+      - The detectors as TensorRT engines (2026-11-17, g5.xlarge A10G,
+        TensorRT 11.5, rfdetr 1.12's export; `OSB_DETECTOR_TRT`,
+        detect.TrtDetector: one engine per batch size, each replayed as
+        a CUDA graph, built on first use). The same three chunks of the
+        2026-11-11 game, against the compiled fp32 ball detector and the
+        fp16 people detector at 64 crops a call (production's settings),
+        one run each. Minutes in the network per chunk:
+
+        | | ball | people |
+        |---|---|---|
+        | production's settings | 2.8 / 5.0 / 6.1 | 1.6 / 1.7 / 2.1 |
+        | TensorRT fp32, batches 1, 2, 4, 8 | 3.0 (first chunk only) | - |
+        | TensorRT fp16, ball at 1, 2, 4, 8, people at 8 | 1.0 / 2.0 / 2.2 | 1.4 / 2.3 / 2.3 |
+
+        At full precision TensorRT is no faster than the compiled
+        detector, and 0.4% of frames differ. In half precision the ball
+        network is 2.5-2.8x faster and the ball pass 3.8 / 7.3 / 8.9 ->
+        2.0 / 4.3 / 4.5 min, but 12-23% of frames differ from the
+        baseline's and the camera's aim is over 10 degrees away in 3-8%
+        of frames: the same cost fp16 had in PyTorch, not through the
+        must-see bench. The people engine at 8 crops a call (4,800 calls
+        a chunk) is slower than PyTorch's fp16 at 64; a 64-crop engine
+        could not be built in the job's 14 GB (the first run was killed
+        there). The game step: 2,866 -> 2,656 s, with 276 s of engine
+        builds in the first chunk (69-78 s for a first fp16 engine,
+        35-47 s for the next sizes; fp32 21-25 s each) and the chunks now
+        waiting for the follow pass or roles.
+        Nothing says TensorRT's fp16 is closer to fp32 than PyTorch's
+        was (9-18% of frames then, against the uncompiled fp32 detector):
+        the same rounding, compounded the same way by a pass that looks
+        where it last found something. It found a judged ball on the
+        pitch in 1-5% fewer frames a chunk than the baseline (4,950 /
+        2,833 / 2,220 against 5,005 / 2,972 / 2,255). What differs is
+        the price: PyTorch's fp16 cut the ball network 10-20%, this
+        2.5-2.8x. From these runs, the ball on TensorRT fp16 with people
+        left on PyTorch would take the three chunks from about 40 to 33
+        minutes (not run).
+        Not taken further (2026-11-17). The switch stays in detect.py,
+        off, but the image does not carry TensorRT: it took the image
+        from 3.7 to 7.8 GB. To run it again, `rfdetr[tensorrt]` in
+        packaging/cloud/requirements.in (pinned then: tensorrt 11.5.0.63,
+        onnx 1.23.2, onnxruntime-gpu 1.32.0, polygraphy 0.53.6,
+        onnxconverter-common 1.16.0); without it the stage says TensorRT
+        is unavailable and uses PyTorch. Engines are kept for the job
+        only (OSB_TRT_CACHE), so every job would build them again. If it
+        is picked up: the must-see bench on the fp16 ball engine first;
+        untried, a build that keeps some layers in fp32 or rfdetr's int8
+        export, and a people engine at 64 crops built with more memory.
+        The fp16 run's job failed after the game step, sending the result
+        to S3 (botocore's UnseekableStreamError on a retried upload in
+        cloud.py); not looked into, and not the detectors.
       - Peak memory (2026-11-07, rec7 2-minute clip, `footprint` sampled
         every 2 s, GPU included): ball 5.2 GB (Python 4.3, GPU 3.1; each
         ffmpeg decoder ~0.6), roles 3.4 GB (GPU 1.2), render 3.3 GB (GPU
