@@ -50,7 +50,7 @@ store:
 | `bench/LABELS.md` | every ball label set and whether it is trained on or held out | |
 | `bench/fixtures/pitch/` | pitch-mapping fixtures and the marked-field benchmark | |
 | `bench/soccertrack/` | SoccerTrack's annotations (External datasets, below) | |
-| `bench-cache/<rec>/` | `follow/passA_*.json` (player detections per clip), `detect/` (ball candidates, roles, net series), `bg/` (backgrounds), `labels*/heat_*.json`; `inputs.json` records the cameras, pitch map and models they were made from (`bench.py stamp`), and `bench.py check` reports them stale when those change. Made from the video: hours to remake | S3 `bench-cache/`, Hugging Face (optional: `sharedata.py fetch --no-cache`) |
+| `bench-cache/<rec>/` | `follow/passA_*.json` (player detections per clip), `detect/` (ball candidates, roles, net series), `bg/` (backgrounds), `labels*/heat_*.json`; `inputs.json` records the cameras, pitch map and models they were made from (`bench.py stamp`), and `bench.py check` reports them stale when those change. Made from the video: hours to remake | S3 `bench-cache/` only: not shared on Hugging Face (a contributor makes their own from the video) |
 | `bench-out/<rec>/` | `follow/` (paths, camera logs, debug images, renders), `playeval/<set>/paths/`, `playeval/bench.json` | never |
 | `train/<rec>/` | `balldata/`, `balltrain*/`, `balljudge/` (crops and a recording's own judges), `heattrain/` | never (the models that become standard are published: `footage/models/`) |
 
@@ -140,10 +140,11 @@ Contributors get the benchmark data from a gated Hugging Face dataset,
 its card is public, but each person's access request needs a maintainer's
 approval, and they accept the terms in the card ([DATASET_CARD.md](DATASET_CARD.md))
 when they ask. It mirrors `footage/` path for path and holds `bench/` (with
-its video and every ball label set), `bench-cache/` and `models/`: about
-58 GB, 54.6 GB of it video. Full recordings stay in S3 only.
+its video and every ball label set) and `models/`: about 54 GB, 52 GB of
+it video. The caches (`bench-cache/`) are not shared: a contributor makes
+their own from the video ([BENCHMARKS.md](BENCHMARKS.md)). Full recordings stay in S3 only.
 
-    uv run processing/spikes/sharedata.py fetch [--no-cache] [--no-video]   # contributors, after approval and `hf auth login`
+    uv run processing/spikes/sharedata.py fetch [--no-video]              # contributors, after approval and `hf auth login`
     uv run processing/spikes/sharedata.py list                              # what upload would send
     uv run processing/spikes/sharedata.py upload                            # maintainers: after changing any of it
     uv run processing/spikes/bench.py check                                 # is what the benchmarks read all here?

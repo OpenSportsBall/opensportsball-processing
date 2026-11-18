@@ -511,7 +511,7 @@ What is made from it is kept apart, under the same relative path
 | Folder | What | |
 |---|---|---|
 | `footage/bench/<rec>/` | inputs: manifest, `phase0/`, `pitch/`, `teams/`, must-see sets, ball label sets, and the video the sets cover | S3 `bench/` (outside `accounts/`: deleting a game's raw footage won't touch it) and Hugging Face |
-| `footage/bench-cache/<rec>/` | made from the inputs and the video, hours to remake: `follow/passA_*.json`, `detect/` (ball candidates, roles, net series), `bg/` | S3 `bench-cache/` and Hugging Face, optional |
+| `footage/bench-cache/<rec>/` | made from the inputs and the video, hours to remake: `follow/passA_*.json`, `detect/` (ball candidates, roles, net series), `bg/` | S3 `bench-cache/`; not on Hugging Face (a contributor makes their own) |
 | `footage/bench-out/<rec>/` | what runs write: paths, `playeval/bench.json`, camera logs, debug images | nowhere; delete at will |
 | `footage/train/<rec>/` | what training makes: `balldata/`, `balltrain*/`, `balljudge/`, `heattrain/` | nowhere |
 
