@@ -114,30 +114,30 @@ wheels = [
 
 [[package]]
 name = "boto3"
-version = "1.44.0"
+version = "1.44.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "botocore" },
     { name = "jmespath" },
     { name = "s3transfer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e7/b4/da0e5fd912f51d04e9f019fea50cbb859a4ba07947c6e28262ff59c98360/boto3-1.44.0.tar.gz", hash = "sha256:5d311d2988ae560f83e5fb8a284cb57b48e2c8d444ecb78a6d6752ae1740e04a", size = 112741, upload-time = "2026-11-10T20:22:34.536Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/58/f3/625dd5a18c17e703f10029e16ccd991802e784b27cc627045f16d60a5d4c/boto3-1.44.3.tar.gz", hash = "sha256:bba566b5cba78db05c5f6c44d219c8f6fb2cd2b923106f767289e4cd0b87b093", size = 112741, upload-time = "2026-11-13T20:16:51.884Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e2/53/9c2ca547dc9fa1e9e2a0fec0096b9e25277f6864faba580ace75e0db5585/boto3-1.44.0-py3-none-any.whl", hash = "sha256:ae3009db1294fd4ca2e30d9592ead8ab56f0e270bcad0b95e555f03f7875716d", size = 140153, upload-time = "2026-11-10T20:22:31.736Z" },
+    { url = "https://files.pythonhosted.org/packages/9a/b5/2807516d854b60f430917590fcfe470bc60c5383cd6b27dc57aa6dc6afea/boto3-1.44.3-py3-none-any.whl", hash = "sha256:8c9c4844c7ce184494b102983696d6cdb09f5307ec7f238ca4ad5849fb14e26b", size = 140155, upload-time = "2026-11-13T20:16:50.577Z" },
 ]
 
 [[package]]
 name = "botocore"
-version = "1.44.0"
+version = "1.44.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jmespath" },
     { name = "python-dateutil" },
     { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/4d/92/480a2c685a9b02a947541a217ae615d5e78f287d833cc1b9f23dfc39e313/botocore-1.44.0.tar.gz", hash = "sha256:224efbd3ee978856da460585533ebf1b97831960e575857ca2424f33e554917b", size = 16577303, upload-time = "2026-11-10T20:22:28.42Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/09/f4/ca9bcb9774e8d0a903b95743abb252c78d05d80faa97eb6ee7f9c7167e0b/botocore-1.44.5.tar.gz", hash = "sha256:a988f39e3a4484def0b8010f41128f71157da0515a4804fccce4739aa8f216da", size = 16859049, upload-time = "2026-11-17T20:24:18.73Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c1/0f/82dd92901fdc21a3444eba19e23e0a8584046f8c7d6f9ae171e38ecd7dda/botocore-1.44.0-py3-none-any.whl", hash = "sha256:9055745fc16400377ac7e825ac63b8f77af17305e1c77c9a5519a648d7b2e87c", size = 16277656, upload-time = "2026-11-10T20:22:24.273Z" },
+    { url = "https://files.pythonhosted.org/packages/73/0b/9f5dad3e0acf5307f34e38fa9a3c3e93f3e4da51667a5939846015269587/botocore-1.44.5-py3-none-any.whl", hash = "sha256:8f16a56d1dff125dd65322ae021efa7ba5195a6db5102b96862566055b748921", size = 16555415, upload-time = "2026-11-17T20:24:14.604Z" },
 ]
 
 [[package]]
@@ -2494,7 +2494,7 @@ wheels = [
 
 [[package]]
 name = "rfdetr"
-version = "1.12.0"
+version = "1.12.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
@@ -2508,9 +2508,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "transformers" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/13/e1/514be0835a8a9f63a4bdb5549b7d85a3830aa3a2bc21d95a96f4521a92c0/rfdetr-1.12.0.tar.gz", hash = "sha256:fdb1608532e31b9dcd8475059944ed55894088d0927db0aab2c0d7d54ea10076", size = 980362, upload-time = "2026-11-06T14:08:13.287Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/13/23/16fe5e734196efde67a83858adbb6ef415410db8e68a02c6dab9bf5c6d28/rfdetr-1.12.1.tar.gz", hash = "sha256:15649123e9d62cab1df950e761ddc1f6b43ee1b9b4e9540b6a75057d418bd831", size = 981932, upload-time = "2026-11-12T13:25:17.813Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/9e/26/4a9562f7e2314b70ef6d80df355e05e2e93b17f6f339720c5f4be142f4e5/rfdetr-1.12.0-py3-none-any.whl", hash = "sha256:46e924b789b10a7caee98dc3cf7648b6836d2aa47351bfcc59823d731114f91a", size = 1050065, upload-time = "2026-11-06T14:08:11.186Z" },
+    { url = "https://files.pythonhosted.org/packages/30/09/12b3c68c04ac38e47befa1a6226421405c58e21562a63447ff7d75ae1614/rfdetr-1.12.1-py3-none-any.whl", hash = "sha256:d4671be83f9633f8f3de1a59ab3f9c25b320705175d93c8c788b8e1e8a401724", size = 1051356, upload-time = "2026-11-12T13:25:15.843Z" },
 ]
 
 [[package]]
@@ -3110,7 +3110,7 @@ wheels = [
 
 [[package]]
 name = "ultralytics"
-version = "8.4.208"
+version = "8.4.213"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "matplotlib" },
@@ -3127,9 +3127,9 @@ dependencies = [
     { name = "ultralytics-platform" },
     { name = "ultralytics-thop" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/2f/d8/aadde4f460759463fa4a017138b04b44b10fae6974a9ab0f6d0ec5f15c49/ultralytics-8.4.208.tar.gz", hash = "sha256:e1fc6a7c8d217c22558f3333ae5f518ed994ca4a97183868b0fed8814fff38f8", size = 1315017, upload-time = "2026-11-08T14:54:53.155Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b4/89/1104bdaeacb415ebbaba86ca88a3a3d66cf41d35eef6bfcfbbee0891b4f6/ultralytics-8.4.213.tar.gz", hash = "sha256:da8a89b3f7998987e51150353d8e05396e6a1aec74a4183d982040fffa125a18", size = 1327028, upload-time = "2026-11-14T18:49:01.932Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/22/fb/9973434a136ab921a9b7f3a3083936722fd8a6cb19a4712e92f997490a34/ultralytics-8.4.208-py3-none-any.whl", hash = "sha256:e4798477691ce744e84bfb31d7d7cff2a0875846533d4f330f19d41c477c932e", size = 1455173, upload-time = "2026-11-08T14:54:48.574Z" },
+    { url = "https://files.pythonhosted.org/packages/95/4c/f50af84fd2a245509f819f6b87766e98c6b0fa4ba4b972bdece607c05fda/ultralytics-8.4.213-py3-none-any.whl", hash = "sha256:f785d4505a1f4d55f1f46c6ff27d8ff28154c857c964323c5bf610da7f389a97", size = 1466512, upload-time = "2026-11-14T18:48:57.432Z" },
 ]
 
 [[package]]
