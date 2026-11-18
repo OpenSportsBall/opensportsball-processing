@@ -64,6 +64,7 @@ import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
+import recpaths  # noqa: E402
 import balljudge  # noqa: E402
 import gpu  # noqa: E402
 import phase0  # noqa: E402
@@ -235,13 +236,21 @@ def decode_window(path: Path, t: float, flip: bool, ref: np.ndarray) -> tuple[li
     return frames, int(np.argmin(d)), (moving[0] - 1) if moving else len(frames)
 
 
+def heat_dir(lab: Path) -> Path:
+    """Where a label set's heat_<model>.json caches are: the set's folder,
+    or for a set in the bench store its place under bench-cache/."""
+    d = recpaths.cache(lab.parent) / lab.name
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def run_models(rec: Path, names: list[str], items: list[dict], devs: dict, report: dict, flip: dict,
                lab: Path) -> dict[str, dict]:
     """Candidates per model per labelled frame, from the cache where it has
     them; the frames a model's cache lacks are computed and added."""
     results = {}
     for name in names:
-        cache = lab / f"heat_{name}.json"
+        cache = heat_dir(lab) / f"heat_{name}.json"
         results[name] = json.loads(cache.read_text()) if cache.exists() and not os.environ.get("OSB_REDO") else {}
     todo = [name for name in names
             if any(f["id"] not in results[name] for it in items for f in it["frames"])]
@@ -281,7 +290,7 @@ def run_models(rec: Path, names: list[str], items: list[dict], devs: dict, repor
             print(f"{n + 1}/{len(items)} moments, {el / 60:.1f} min, {tiles / n_frames / len(heats):.0f}"
                   f" tiles/frame/model, label frames {np.mean(dts):+.2f} s from nominal", flush=True)
     for name in todo:
-        (lab / f"heat_{name}.json").write_text(json.dumps(results[name]))
+        (heat_dir(lab) / f"heat_{name}.json").write_text(json.dumps(results[name]))
     print(f"{n_frames} frames x {len(todo)} models in {(time.time() - t0) / 60:.1f} min", flush=True)
     return results
 
@@ -293,7 +302,7 @@ def label_offsets(rec: Path, lab: Path, items: list[dict], devs: dict, report: d
     window decoded with a preroll. items.json is updated and the offsets
     returned per frame id."""
     dts = {f["id"]: f["dtS"] for it in items for f in it["frames"] if "dtS" in f}
-    for cache in sorted(lab.glob("heat_*.json")):
+    for cache in sorted(heat_dir(lab).glob("heat_*.json")):
         for fid, v in json.loads(cache.read_text()).items():
             if isinstance(v, dict) and "dt" in v:
                 dts.setdefault(fid, v["dt"])
@@ -330,7 +339,7 @@ def cands_files(rec: Path, seg0: int, start: float, tag: str) -> list[Path]:
     """The clip's candidate files with exactly this tag ("" is ballclip.py's
     full scan, "win" ballwin.py's windows): ball_<seg>_<start>_<seconds>[.<tag>].json."""
     pat = re.compile(rf"ball_{seg0}_{start:g}_[\d.]+?{re.escape('.' + tag) if tag else ''}\.json$")
-    return sorted(p for p in (rec / "detect").glob(f"ball_{seg0}_{start:g}_*.json") if pat.fullmatch(p.name))
+    return sorted(p for p in (recpaths.cache(rec) / "detect").glob(f"ball_{seg0}_{start:g}_*.json") if pat.fullmatch(p.name))
 
 
 def rfdetr_cands(rec: Path, items: list[dict], seg0: int, start: float, tag: str, dts: dict) -> dict | None:

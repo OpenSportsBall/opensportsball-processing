@@ -17,8 +17,9 @@ FootageBucket in the main repo's infra/cdk-outputs.json (OSB_MAIN_REPO,
 default ../SportsBallVideo):
 
     accounts/...  the phones' uploads: raw video and manifests (the app's)
-    bench/        = footage/bench/, the bench store
-    data/         = footage/ without bench/, video or symlinks
+    bench/        = footage/bench/, the bench store: what the benchmarks read
+    bench-cache/  = footage/bench-cache/: what is made from the store and only saves time
+    data/         = footage/ without those, bench-out/, video or symlinks
 
 bench/ is copied whole, video included (the benches need it).
 
@@ -72,6 +73,9 @@ PROFILE = os.environ.get("OSB_AWS_PROFILE", "sbv")
 DEVICE_DIR = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 SKIP_SUFFIXES = {".mp4", ".m4a", ".mov"}  # video: raw video is handled per recording
 SKIP_NAMES = {".DS_Store"}
+# The bench store and what is made from it (recpaths.py): bench/ and bench-cache/ have their own
+# prefixes in the bucket; bench-out/ is what runs write and is never backed up.
+STORE_DIRS = {"bench", "bench-cache", "bench-out"}
 
 
 def stack_outputs() -> tuple[str, dict]:
@@ -148,7 +152,7 @@ def recordings() -> list[tuple[str, dict, list[str]]]:
     every recording under footage/ whose manifest is a real file."""
     out = []
     for m in sorted(FOOTAGE.glob("*/manifest.json")):
-        if m.is_symlink() or m.parent.name == "bench":
+        if m.is_symlink() or m.parent.name in STORE_DIRS:
             continue
         manifest = json.loads(m.read_text())
         devs = [d["deviceId"] for d in manifest["devices"]
@@ -290,11 +294,12 @@ def fetch(rec_name: str, segs: tuple[int, int] | None, dry: bool) -> int:
 
 
 def check() -> int:
-    data, bench, accounts = listing("data/"), listing("bench/"), listing("accounts/")
+    data, bench, cache, accounts = listing("data/"), listing("bench/"), listing("bench-cache/"), listing("accounts/")
     bad = 0
     for label, local, remote, prefix in (
-            ("data", in_scope(FOOTAGE, {"bench"}, False), data, "data/"),
-            ("bench", in_scope(FOOTAGE / "bench", set(), True), bench, "bench/")):
+            ("data", in_scope(FOOTAGE, STORE_DIRS, False), data, "data/"),
+            ("bench", in_scope(FOOTAGE / "bench", set(), True), bench, "bench/"),
+            ("bench-cache", in_scope(FOOTAGE / "bench-cache", set(), False), cache, "bench-cache/")):
         missing = [p for p, s in local.items() if remote.get(prefix + p) is None]
         differ = [p for p, s in local.items() if remote.get(prefix + p) not in (None, s)]
         size = sum(local.values()) / 1e9
@@ -321,10 +326,13 @@ def backup(dry: list[str]) -> None:
     (FOOTAGE / "symlinks.json").write_text(json.dumps(symlinks(), indent=1) + "\n")
     skip = [a for s in SKIP_SUFFIXES for a in ("--exclude", f"*{s}")] + \
            [a for n in SKIP_NAMES for a in ("--exclude", f"*{n}")]
-    aws("s3", "sync", "--no-follow-symlinks", "--only-show-errors", *dry, "--exclude", "bench/*", *skip,
+    aws("s3", "sync", "--no-follow-symlinks", "--only-show-errors", *dry, *[a for d in sorted(STORE_DIRS) for a in ("--exclude", f"{d}/*")], *skip,
         str(FOOTAGE), f"s3://{b}/data/")
     aws("s3", "sync", "--no-follow-symlinks", "--only-show-errors", *dry, "--exclude", "*.DS_Store",
         str(FOOTAGE / "bench"), f"s3://{b}/bench/")
+    if (FOOTAGE / "bench-cache").is_dir():
+        aws("s3", "sync", "--no-follow-symlinks", "--only-show-errors", *dry, "--exclude", "*.DS_Store",
+            str(FOOTAGE / "bench-cache"), f"s3://{b}/bench-cache/")
     for rec, game, where, _ in video_status(listing("accounts/"), listing("data/")):
         if where == "LOCAL ONLY":
             for dev in next(d for r, _, d in recordings() if r == rec):
@@ -337,6 +345,7 @@ def restore(dry: list[str]) -> None:
     b = bucket()
     aws("s3", "sync", "--only-show-errors", *dry, f"s3://{b}/data/", str(FOOTAGE))
     aws("s3", "sync", "--only-show-errors", *dry, f"s3://{b}/bench/", str(FOOTAGE / "bench"))
+    aws("s3", "sync", "--only-show-errors", *dry, f"s3://{b}/bench-cache/", str(FOOTAGE / "bench-cache"))
     links = FOOTAGE / "symlinks.json"
     for path, target in (json.loads(links.read_text()).items() if links.exists() else []):
         p = FOOTAGE / path

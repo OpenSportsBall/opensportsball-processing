@@ -37,6 +37,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
+import recpaths  # noqa: E402
 import playeval  # noqa: E402
 
 
@@ -86,7 +87,7 @@ VARIANTS = {
 def run_variant(rec: Path, name: str, features: str) -> dict[str, Path]:
     paths = {}
     for set_name, seg, start, seconds in clips(rec):
-        dest = rec / "playeval" / set_name / "paths" / f"{name}.json"
+        dest = recpaths.out(rec) / "playeval" / set_name / "paths" / f"{name}.json"
         dest.parent.mkdir(parents=True, exist_ok=True)
         env = dict(os.environ, OSB_NO_RENDER="1")
         r = subprocess.run(["uv", "run", "-q", str(Path(__file__).parent / "follow.py"), str(rec), str(seg),
@@ -98,9 +99,9 @@ def run_variant(rec: Path, name: str, features: str) -> dict[str, Path]:
             if line.startswith("ball:"):
                 print(f"  [{set_name}] {line[line.index('aim at the ball'):]}", flush=True)
         flags = [f for f in features.split(",") if "=" not in f]
-        src = rec / "follow" / ("path_" + "_".join(["play", *flags]) + ".json")
+        src = recpaths.out(rec) / "follow" / ("path_" + "_".join(["play", *flags]) + ".json")
         shutil.copy(src, dest)
-        shutil.copy(rec / "follow" / "play_debug.json", dest.with_name(f"{name}_debug.json"))
+        shutil.copy(recpaths.out(rec) / "follow" / "play_debug.json", dest.with_name(f"{name}_debug.json"))
         paths[set_name] = dest
     return paths
 
@@ -148,7 +149,9 @@ def main(recs: list[Path], names: list[str]) -> None:
         if len(recs) > 1:
             print(f"{name:22s} {'all':8s} captured {caps:2d}/{n}", flush=True)
     for rec in recs:
-        (rec / "playeval" / "bench.json").write_text(json.dumps(results[rec], indent=1))
+        dest = recpaths.out(rec) / "playeval" / "bench.json"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(json.dumps(results[rec], indent=1))
 
 
 if __name__ == "__main__":

@@ -27,18 +27,21 @@ from pathlib import Path
 import cv2, numpy as np
 
 SP = Path(__file__).resolve().parent
-ST = SP.parents[1] / "footage" / "soccertrack" / "wide_view"
-OUT = ST.parent / "bench.json"
+ST = SP.parents[1] / "footage" / "bench" / "soccertrack" / "wide_view"
+OUT = SP.parents[1] / "footage" / "bench-out" / "soccertrack" / "bench.json"
 _a = [x for x in sys.argv[1:] if not x.startswith("--")]
 STEP = float(_a[0]) if _a else 2.0
 MAXC = int(_a[1]) if len(_a) > 1 else 999
 sys.path.insert(0, str(SP))
-import balljudge as J, detect  # noqa: E402
+import balljudge as J, detect, recpaths  # noqa: E402
 import rfdetr  # noqa: E402
 
 FOOT = SP.parents[1] / "footage"
 model = rfdetr.RFDETRMedium(pretrain_weights=str(FOOT / "models" / "ball_detector.pth"))
-judges = {"v3": J.load_judge(FOOT, None), "v4": J.load_judge(FOOT / "rec7", "judge_v4")}
+judges = {"standard": J.load_judge(FOOT, None)}
+_v4 = FOOT / "bench" / "rec7"  # rec7's own judge, for comparison when it is here (footage/train/rec7/balljudge/)
+if (recpaths.train(_v4) / "balljudge" / "judge_v4.pt").exists():
+    judges["v4"] = J.load_judge(_v4, "judge_v4")
 T = 640
 
 def tiles(h, w):
@@ -104,6 +107,7 @@ for vi, vp in enumerate(vids):
                               "hit": bool(np.hypot(cx[i] - b[0], cy[i] - b[1]) <= rad)})
         rows.append({"clip": vp.stem, "frame": k, "W": W, "H": H, "ball": b, "cands": cands})
     print(f"{vi + 1}/{len(vids)} clips, {len(rows)} frames, {(time.time() - t0) / 60:.1f} min", flush=True)
+    OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(json.dumps(rows))
 
 def summary(rows):

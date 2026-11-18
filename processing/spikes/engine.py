@@ -150,6 +150,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import accel  # noqa: E402  (python_cmd, ffprobe: the packaged engine's programs)
 import remote  # noqa: E402  (footage still in the cloud: prepare fetches only what it reads)
+import recpaths  # noqa: E402
 SCHEMAS = HERE.parents[1] / "schemas"
 VERSION = 1
 TEAMS_SET = "engine"          # labels_engine/ and teams/engine/: the kit sample this engine makes
@@ -1270,7 +1271,7 @@ def label(job: Job, kind: str | None, count: int, at: list[float], n_random: int
         chunks = []
         k, t = 0, 0.0
         while t < game_s - 1:
-            f = sorted((job.rec / "detect").glob(f"ball_0_{t:g}_*.win.json"))
+            f = sorted((recpaths.cache(job.rec) / "detect").glob(f"ball_0_{t:g}_*.win.json"))
             if f and k in req.get("chunks", [k]):
                 chunks.append((k, f[0].name, float(f[0].name.split("_")[3].removesuffix(".win.json"))))
             k, t = k + 1, t + job.chunk_s

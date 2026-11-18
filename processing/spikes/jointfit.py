@@ -13,7 +13,7 @@
     uv run processing/spikes/jointfit.py <rec> holdout [--folds 5] [--start DIR] [--out DIR] [fit's options]
     uv run processing/spikes/jointfit.py <rec> score <dir> [<dir> ...] [--seg N]
     uv run processing/spikes/jointfit.py lenses <rec> [<rec> ...]
-    uv run processing/spikes/jointfit.py bench footage/fixtures/pitch/<name> <rec> <dir> [<dir> ...]
+    uv run processing/spikes/jointfit.py bench footage/bench/fixtures/pitch/<name> <rec> <dir> [<dir> ...]
 
 Putting a fit into a recording that already has boxes, goals and detections:
     uv run processing/spikes/jointfit.py mirror <rec> <fit dir> <mirror> <segment>
@@ -138,6 +138,7 @@ from scipy.ndimage import map_coordinates
 from scipy.optimize import least_squares
 
 sys.path.insert(0, str(Path(__file__).parent))
+import recpaths  # noqa: E402
 import follow  # noqa: E402
 import phase0  # noqa: E402
 import pitch as P  # noqa: E402
@@ -1132,7 +1133,7 @@ def convert_passa_main(src: Path, dest: Path) -> None:
     new_cm, new_cs, _ = load_cameras(dest / "phase0" / "cameras.json")
     re = Reangle((old_cm, old_cs), (new_cm, new_cs))
     (dest / "follow").mkdir(exist_ok=True)
-    for p in sorted((src / "follow").glob("passA_*.json")):
+    for p in sorted((recpaths.cache(src) / "follow").glob("passA_*.json")):
         j = json.loads(p.read_text())
         flat = np.array([d for fr in j["dets"] for d in fr], float).reshape(-1, 4)
         if len(flat):
@@ -1156,7 +1157,7 @@ def convert_detect_main(src: Path, dest: Path, start: str, src_detect: Path | No
     """A clip's ball candidates (ball_*_<start>_*.json) and roles (roles_*_<start>_*.json) from src's
     cameras and pitch into dest's (a mirror, or an adopting recording): each through the phone that
     saw it (its "phone"). start "*" takes every clip."""
-    src_detect, dest_detect = src_detect or src / "detect", dest_detect or dest / "detect"
+    src_detect, dest_detect = src_detect or recpaths.cache(src) / "detect", dest_detect or recpaths.cache(dest) / "detect"
     old_cm, old_cs, _ = load_cameras(src / "phase0" / "cameras.json")
     new_cm, new_cs, _ = load_cameras(dest / "phase0" / "cameras.json")
     old = (old_cm.at(W), old_cs.at(W))
@@ -1233,16 +1234,16 @@ def adopt_main(rec: Path, mirror: Path, keep: str = "pre_joint") -> None:
         shutil.copy2(dst, pre / "playeval" / b.parent.name / "boxes.json")
         shutil.copy2(b, dst)
     (pre / "follow").mkdir()
-    for f in (rec / "follow").glob("passA_*.json"):
+    for f in (recpaths.cache(rec) / "follow").glob("passA_*.json"):
         shutil.move(str(f), pre / "follow" / f.name)
     for f in (mirror / "follow").glob("passA_*.json"):
-        shutil.copy2(f, rec / "follow" / f.name)
-    shutil.move(str(rec / "detect"), pre / "detect")
-    (rec / "detect").mkdir()
+        shutil.copy2(f, recpaths.cache(rec) / "follow" / f.name)
+    shutil.move(str(recpaths.cache(rec) / "detect"), pre / "detect")
+    (recpaths.cache(rec) / "detect").mkdir()
     for e in (pre / "detect").iterdir():
         if not (e.suffix == ".json" and e.name.split("_")[0] in ("ball", "roles")):
-            (shutil.copytree if e.is_dir() else shutil.copy2)(e, rec / "detect" / e.name)
-    convert_detect_main(pre, rec, "*", pre / "detect", rec / "detect")
+            (shutil.copytree if e.is_dir() else shutil.copy2)(e, recpaths.cache(rec) / "detect" / e.name)
+    convert_detect_main(pre, rec, "*", pre / "detect", recpaths.cache(rec) / "detect")
     pd = rec / "pitch"
     bg = cv2.imread(str(pd / "background.png"))
     if (pd / "lines.png").exists():

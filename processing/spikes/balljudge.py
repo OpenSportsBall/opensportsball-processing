@@ -46,6 +46,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
+import recpaths  # noqa: E402
 import balldata  # noqa: E402
 import holdout  # noqa: E402
 import phase0  # noqa: E402
@@ -160,7 +161,7 @@ def clip_frames(rec: Path, name: str, split: str, held=None):
     items = json.loads((lab / "items.json").read_text())
     labels = json.loads((lab / "labels.json").read_text())
     seg0, start = int(items[0]["id"].split("_")[0][1:]), float(items[0]["id"].split("_")[1])
-    files = sorted((rec / "detect").glob(f"ball_{seg0}_{start:g}_*.json"))
+    files = sorted((recpaths.cache(rec) / "detect").glob(f"ball_{seg0}_{start:g}_*.json"))
     cands = json.loads(files[0].read_text()) if files else None
     out = []
     for it in items:
@@ -193,7 +194,7 @@ def data(rec: Path, train_sets=(), test_sets=()) -> None:
         frames += clip_frames(rec, name, "train", held)
     for name in test_sets:
         frames += clip_frames(rec, name, "test")
-    out = rec / "balljudge"
+    out = recpaths.train(rec) / "balljudge"
     out.mkdir(exist_ok=True)
     diam_at = expected_at(rec)
     # An unmarked candidate outside the pitch lines may be another game's
@@ -254,14 +255,14 @@ def merge(out_rec: Path, specs: list[str]) -> None:
     repeats that recording's train crops N times, to weight a new set (a
     ball colour the others haven't seen) against a large old one. Each
     keeps its own split."""
-    out = out_rec / "balljudge"
+    out = recpaths.train(out_rec) / "balljudge"
     own = out / "crops.npz"
     if own.exists() and not (out / f"crops_{out_rec.name}.npz").exists():
         own.rename(out / f"crops_{out_rec.name}.npz")
     Xs, ys, splits, stamp = [], [], [], {}
     for spec in specs:
         rec, n = Path(spec.split("*")[0]), int(spec.split("*")[1]) if "*" in spec else 1
-        src = rec / "balljudge" / f"crops_{rec.name}.npz"
+        src = recpaths.train(rec) / "balljudge" / f"crops_{rec.name}.npz"
         if not src.exists():  # a recording's own crops; its crops.npz may be a merge made there
             src = src.with_name("crops.npz")
         z = np.load(src)
@@ -302,7 +303,7 @@ def train(rec: Path, epochs: int, name: str = "judge") -> None:
     import torch
     import torch.nn.functional as F
 
-    out = rec / "balljudge"
+    out = recpaths.train(rec) / "balljudge"
     z = np.load(out / "crops.npz")
     holdout.check_stamp(json.loads(str(z["holdout"])) if "holdout" in z.files else None, str(out / "crops.npz"))
     X, y, split = z["X"], z["y"], z["split"]
@@ -353,14 +354,15 @@ def average_precision(scores, labels) -> float:
 
 
 def load_judge(rec: Path, name: str | None = None):
-    """The standard judge, or <rec>/balljudge/<name>.pt when named."""
+    """The standard judge, or <rec>/balljudge/<name>.pt when named (for a
+    recording in the bench store, footage/train/<rec>/balljudge/: recpaths.train)."""
     import torch
 
     import accel
 
     dev = accel.device()
     net = Judge.build().to(dev)
-    net.load_state_dict(torch.load(STANDARD if name is None else rec / "balljudge" / f"{name}.pt", map_location=dev))
+    net.load_state_dict(torch.load(STANDARD if name is None else recpaths.train(rec) / "balljudge" / f"{name}.pt", map_location=dev))
     net.eval()
 
     def score(crops: np.ndarray) -> np.ndarray:

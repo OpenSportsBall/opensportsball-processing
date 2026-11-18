@@ -4,13 +4,15 @@
       "source": "footage/models/ball_detector.pth",
       "path": "footage/models/ball_detector.pth",
       "key": "c69adbc8c417/ball_detector.pth",
-      "sha256": "c69adbc8c417d1b1b509730991b33539f7b4a9796ddd9c16a3d0e49a47c2b54b"
+      "sha256": "c69adbc8c417d1b1b509730991b33539f7b4a9796ddd9c16a3d0e49a47c2b54b",
+      "release": true
     },
     {
       "source": "footage/models/ball_judge.pt",
       "path": "footage/models/ball_judge.pt",
       "key": "bd32076cbbe4/ball_judge.pt",
-      "sha256": "bd32076cbbe45f3e053564668d411717570faa7713b345c2911956c6a9a8855e"
+      "sha256": "bd32076cbbe45f3e053564668d411717570faa7713b345c2911956c6a9a8855e",
+      "release": true
     },
     {
       "source": "~/.roboflow/models/rf-detr-medium.pth",

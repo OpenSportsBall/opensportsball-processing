@@ -78,6 +78,7 @@ from scipy.ndimage import gaussian_filter1d, median_filter
 from scipy.optimize import least_squares
 
 sys.path.insert(0, str(Path(__file__).parent))
+import recpaths  # noqa: E402
 import accel  # noqa: E402
 import gpu  # noqa: E402
 import nvdec  # noqa: E402
@@ -554,23 +555,26 @@ def piece_runs(pieces: list[dict], t: float, n: int, fps: float) -> list[list]:
     return runs
 
 
-def phone_at(devs: dict, report: dict, role: str, seg: int, t: float):
-    """The file one phone has for `t` s into Main's segment `seg`, as
-    (objectKey, time in that file, the file's duration s), or None when no
-    file has the moment. Main is its own clock; Secondary is read from the
-    segment's "secondaryPieces" when phase0.py listed them (phones that cut
-    segments at different lengths: Secondary's file k needn't cover Main's
-    segment k), else from its file `seg` at the segment's audio offset."""
-    if role == "main":
-        s = devs["main"]["segments"][seg]
-        return s["objectKey"], t, s["durationMs"] / 1000
-    pieces = report["segments"][seg].get("secondaryPieces")
-    if pieces is not None:
-        p = next((q for q in pieces if 0 <= t + q["offsetS"] < q["durationMs"] / 1000), None)
-        return (p["objectKey"], t + p["offsetS"], p["durationMs"] / 1000) if p else None
-    s = devs["secondary"]["segments"][seg]
-    local = t + report["segments"][seg]["offsetS"]
-    return (s["objectKey"], local, s["durationMs"] / 1000) if 0 <= local < s["durationMs"] / 1000 else None
+phone_at = phase0.phone_at  # the file one phone has for a moment of a Main segment
+
+
+def exposure_moment(devs: dict, report: dict, seg: int, start: float, seconds: float):
+    """A moment of the clip both phones have a frame for, to match their
+    exposure on: ((Main's objectKey, time in that file), (Secondary's, time
+    in its file)), or None when Secondary has no footage in the clip. The
+    middle of the clip when it can be, else the nearest of a few other
+    moments; never the last second of a file."""
+    segs = devs["main"]["segments"]
+    for frac in (0.5, 0.25, 0.75, 0.1, 0.9, 0.0):
+        t, k = start + frac * seconds, seg
+        while k < len(segs) and t >= segs[k]["durationMs"] / 1000:
+            t, k = t - segs[k]["durationMs"] / 1000, k + 1
+        if k >= len(segs):
+            continue
+        sec = phone_at(devs, report, "secondary", k, t)
+        if sec is not None and sec[1] < sec[2] - 1.0 and t < segs[k]["durationMs"] / 1000 - 1.0:
+            return (segs[k]["objectKey"], t), sec[:2]
+    return None
 
 
 def game_stream(rec: Path, devs: dict, report: dict, phone: int, seg: int, start: float, seconds: float,
@@ -1119,7 +1123,7 @@ def ball_track(rec: Path, start: float, T: int, pos, pose, loiter=None) -> np.nd
     import ball as B
 
     tag = os.environ.get("OSB_BALL_TAG", "")  # "" prefers ballwin.py's candidates (.win.json) when present
-    paths = sorted((rec / "detect").glob(f"ball_*_{start:g}_*{tag}.json"))
+    paths = sorted((recpaths.cache(rec) / "detect").glob(f"ball_*_{start:g}_*{tag}.json"))
     if not tag:
         paths = sorted(paths, key=lambda p_: (not p_.name.endswith(".win.json"), p_.name))
     if not paths:
@@ -1178,7 +1182,7 @@ def ball_near_point(rec: Path, start: float, T: int, point, radius_m: float) -> 
     `point` on the pitch. Raw candidates, not the chain: a ball parked
     for a kick-off is exactly what the tracker's static filter removes."""
     tag = os.environ.get("OSB_BALL_TAG", "")
-    paths = sorted((rec / "detect").glob(f"ball_*_{start:g}_*{tag}.json"))
+    paths = sorted((recpaths.cache(rec) / "detect").glob(f"ball_*_{start:g}_*{tag}.json"))
     if not tag:
         paths = sorted(paths, key=lambda p_: (not p_.name.endswith(".win.json"), p_.name))
     out = np.zeros(T, bool)
@@ -1200,7 +1204,7 @@ def ball_seen_far_from(rec: Path, start: float, T: int, point, far_m: float, min
     min_conf sure (judged >= 0.3, on the pitch) more than far_m from
     `point`, and none within far_m of it."""
     tag = os.environ.get("OSB_BALL_TAG", "")
-    paths = sorted((rec / "detect").glob(f"ball_*_{start:g}_*{tag}.json"))
+    paths = sorted((recpaths.cache(rec) / "detect").glob(f"ball_*_{start:g}_*{tag}.json"))
     if not tag:
         paths = sorted(paths, key=lambda p_: (not p_.name.endswith(".win.json"), p_.name))
     out = np.zeros(T, bool)
@@ -1282,7 +1286,7 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
     # tracking, keepers are remembered for the goal-kick rule.
     roles_frames = None
     if "roles" in features:
-        rp = sorted((rec / "detect").glob(f"roles_*_{start:g}_*.json"))
+        rp = sorted((recpaths.cache(rec) / "detect").glob(f"roles_*_{start:g}_*.json"))
         if rp:
             rd = json.loads(rp[0].read_text())
             roles_frames, roles_fps = rd["frames"], rd["fps"]
@@ -1715,7 +1719,7 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
 
     net_side = np.zeros(T, int)  # netevent: goal side whose net moved recently (0: none)
     if "netevent" in features:
-        paths = sorted((rec / "detect").glob(f"net_*_{start:g}_*.json"))
+        paths = sorted((recpaths.cache(rec) / "detect").glob(f"net_*_{start:g}_*.json"))
         if paths:
             nd = json.loads(paths[0].read_text())
             arr, nfps = np.array(nd["net"]), nd["fps"]
@@ -1803,7 +1807,7 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
     for e in events:
         print(f"  lull {e['startS']:.1f}-{e['endS']:.1f} s"
               + (f": {e['restart']} in {e['restartFrames']} frames" if e["restart"] else ": held"))
-    (rec / "follow" / "lulls.json").write_text(json.dumps(
+    (recpaths.out(rec) / "follow" / "lulls.json").write_text(json.dumps(
         {"events": events, "running": running.tolist(), "startS": start, "fps": FPS}))
     # A readable log of which rule drove the camera: one line per change.
     def clock(t):
@@ -1817,9 +1821,9 @@ def play_targets(rec: Path, dets, extent, start: float = 0.0, features: tuple = 
             hot = "-" if np.isnan(spots[i, 0]) else f"({spots[i, 0]:.0f}, {spots[i, 1]:.0f})"
             lines.append(f"{clock(start + i / FPS)}  {mode[i]:9s}  {(j - i) / FPS:5.1f} s  aim {np.degrees(tyaw[i]):6.1f}"
                          f"  width {np.degrees(thfov[i]):3.0f}  ball {'yes' if has_ball[i] else 'no ':3s}  hot {hot}")
-    (rec / "follow" / "camlog.txt").write_text("\n".join(lines) + "\n")
+    (recpaths.out(rec) / "follow" / "camlog.txt").write_text("\n".join(lines) + "\n")
     # Per-frame players and aim, for diagnosing what the camera followed.
-    (rec / "follow" / "play_debug.json").write_text(json.dumps({"startS": start, "fps": FPS, "frames": [
+    (recpaths.out(rec) / "follow" / "play_debug.json").write_text(json.dumps({"startS": start, "fps": FPS, "frames": [
         {"pos": np.round(pos[i], 1).tolist(), "vel": np.round(vel[i], 1).tolist(),
          "ball": None if not has_ball[i] else np.round(ball_at[i], 1).tolist(),
          "hot": None if np.isnan(spots[i, 0]) else np.round(spots[i], 1).tolist(),
@@ -1991,9 +1995,11 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
     manifest = json.loads((rec / "manifest.json").read_text())
     report = json.loads((rec / "phase0" / "report.json").read_text())
     devs = phase0.paired_devices(manifest, report)
-    out = rec / "follow"
-    out.mkdir(exist_ok=True)
-    cache = passa_cache(out, seg, start, seconds)
+    out = recpaths.out(rec) / "follow"  # paths, logs, debug images and the render
+    out.mkdir(parents=True, exist_ok=True)
+    cache_dir = recpaths.cache(rec) / "follow"  # the pass A cache
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache = passa_cache(cache_dir, seg, start, seconds)
     if os.environ.get("OSB_NO_RENDER") and cache.exists():
         c = json.loads(cache.read_text())
         print(f"pass A from {cache.name}")
@@ -2052,22 +2058,24 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
     main_yaw = [float(lo_side.max()), float(hi_side.min())]
     seam_alone = (y0 - 1.0) if main_right else (y1 + 1.0)
 
-    # Exposure: match Secondary to Main in the overlap, mid the segment the
-    # cameras were calibrated on (segment 0 unless Secondary started late).
-    cal = report.get("calibrationSegment", 0)
-    s0 = report["segments"][cal]
-    t_mid = 0.5 * min(devs["main"]["segments"][cal]["durationMs"], devs["secondary"]["segments"][cal]["durationMs"]) / 1000
-    t_mid = max(t_mid, -s0["offsetS"] + 1.0)
-    a = phase0.frames_at(rec / devs["main"]["segments"][cal]["objectKey"], t_mid, 1, FPS, CAL_W, flip[0])[0]
-    b = phase0.frames_at(rec / devs["secondary"]["segments"][cal]["objectKey"], t_mid + s0["offsetS"], 1, FPS,
-                         CAL_W, flip[1])[0]
-    wa, wb = pweights
-    ov = (wa > 0) & (wb > 0)
-    ia = cv2.remap(a, *pmaps[0], cv2.INTER_LINEAR)[ov].astype(np.float32)
-    ib = cv2.remap(b, *pmaps[1], cv2.INTER_LINEAR)[ov].astype(np.float32)
-    gain_s = (ia.mean(0) + 1) / (ib.mean(0) + 1)
-    gains = [np.float32(1.0), np.float32(gain_s.mean())]
-    print(f"secondary gain {gains[1]:.3f}")
+    # Exposure: match Secondary to Main in the overlap, on a frame of the
+    # clip itself (so a clip needs only the video it covers; this used to
+    # read the middle of the segment the cameras were calibrated on).
+    gains = [np.float32(1.0), np.float32(1.0)]
+    at = exposure_moment(devs, report, seg, start, seconds)
+    if at is None:
+        print("secondary gain 1.000 (Secondary has no footage in the clip)")
+    else:
+        (key_a, t_a), (key_b, t_b) = at
+        a = phase0.frames_at(rec / key_a, t_a, 1, FPS, CAL_W, flip[0])[0]
+        b = phase0.frames_at(rec / key_b, t_b, 1, FPS, CAL_W, flip[1])[0]
+        wa, wb = pweights
+        ov = (wa > 0) & (wb > 0)
+        ia = cv2.remap(a, *pmaps[0], cv2.INTER_LINEAR)[ov].astype(np.float32)
+        ib = cv2.remap(b, *pmaps[1], cv2.INTER_LINEAR)[ov].astype(np.float32)
+        gain_s = (ia.mean(0) + 1) / (ib.mean(0) + 1)
+        gains[1] = np.float32(gain_s.mean())
+        print(f"secondary gain {gains[1]:.3f}")
 
     dev = gpu.device()
     lo_h = round(CAL_W * 9 / 16)
@@ -2234,7 +2242,7 @@ def main(rec: Path, seg: int, start: float, seconds: float, aim: str = "play", f
           f" (range {min(counts)}-{max(counts)})")
 
     if os.environ.get("OSB_NO_RENDER") or profile:  # pass A's result, to plan the path again without the video
-        passa_cache(out, seg, start, seconds).write_text(json.dumps({
+        passa_cache(cache_dir, seg, start, seconds).write_text(json.dumps({
             "dets": dets, "extent": [y0, y1, p0, p1], "alone": alone_frames.tolist(), "mainYaw": main_yaw}))
     if by_function:
         import cProfile

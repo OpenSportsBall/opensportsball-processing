@@ -38,6 +38,7 @@ import torch
 import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).parent))
+import recpaths  # noqa: E402
 import accel  # noqa: E402
 import follow  # noqa: E402
 import phase0  # noqa: E402
@@ -487,7 +488,7 @@ def main(rec: Path, seg: int, start: float, seconds: float, fps: float) -> None:
     files = [rec / devs["main"]["segments"][seg]["objectKey"],
              rec / devs["secondary"]["segments"][seg]["objectKey"]]
     offsets = [0.0, report["segments"][seg]["offsetS"]]
-    out = rec / "detect"
+    out = recpaths.cache(rec) / "detect"
     out.mkdir(exist_ok=True)
 
     dev = gpu.device()

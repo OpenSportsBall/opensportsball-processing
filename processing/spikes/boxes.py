@@ -30,6 +30,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
+import recpaths  # noqa: E402
 import follow  # noqa: E402
 import phase0  # noqa: E402
 import pitch as P  # noqa: E402
@@ -52,8 +53,8 @@ def main(rec: Path, piece: int, stamps: list[str]) -> None:
     cams = [cm.at(follow.SRC_W), cs.at(follow.SRC_W)]
     pose = P.load_pose(rec)
     c0 = piece * CHUNK
-    win = json.loads((rec / "detect" / f"ball_0_{c0:g}_{CHUNK:g}.win.json").read_text())["frames"]
-    roles = json.loads((rec / "detect" / f"roles_0_{c0:g}_{CHUNK:g}.json").read_text())["frames"]
+    win = json.loads((recpaths.cache(rec) / "detect" / f"ball_0_{c0:g}_{CHUNK:g}.win.json").read_text())["frames"]
+    roles = json.loads((recpaths.cache(rec) / "detect" / f"roles_0_{c0:g}_{CHUNK:g}.json").read_text())["frames"]
     camlog = [l for l in (rec / "fullgame" / "logs" / f"camlog_{piece:02d}.txt").read_text().splitlines()
               if l.strip() and not l.startswith("#")]
     out = rec / "fullgame" / "boxes"

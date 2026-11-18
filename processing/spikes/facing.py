@@ -37,6 +37,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
+import recpaths  # noqa: E402
 import balleval as E  # noqa: E402
 import follow  # noqa: E402
 import phase0  # noqa: E402
@@ -205,7 +206,7 @@ def main(rec: Path, name: str) -> None:
             rows.append((t, None if pt is None else float(np.hypot(*(pt - xz))), len(origins),
                          int(keep.sum()) if keep is not None else 0,
                          None if vp is None else float(np.hypot(*(vp - xz))), angs))
-    (rec / "detect" / f"facing_{name}.json").write_text(json.dumps(results))
+    (recpaths.cache(rec) / "detect" / f"facing_{name}.json").write_text(json.dumps(results))
     errs = [r[1] for r in rows if r[1] is not None]
     verrs = [r[4] for r in rows if r[4] is not None]
     all_angs = [a for r in rows for a in r[5]]

@@ -51,6 +51,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
+import recpaths  # noqa: E402
 import follow  # noqa: E402
 import holdout  # noqa: E402
 import phase0  # noqa: E402
@@ -381,4 +382,4 @@ def main(rec: Path, out: Path, sets: list[str] = ("labels",)) -> None:
 
 if __name__ == "__main__":
     rec = Path(sys.argv[1])
-    main(rec, Path(sys.argv[2]) if len(sys.argv) > 2 else rec / "balldata", sys.argv[3:] or ["labels"])
+    main(rec, Path(sys.argv[2]) if len(sys.argv) > 2 else recpaths.train(rec) / "balldata", sys.argv[3:] or ["labels"])

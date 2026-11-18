@@ -9,18 +9,20 @@
 dataset: anyone can read its card, but the files need a maintainer's
 approval of an access request.
 
-    uv run processing/spikes/sharedata.py fetch [--annotations-only]   # contributors
-    uv run processing/spikes/sharedata.py list [--remote]              # what upload would send (and delete)
-    uv run processing/spikes/sharedata.py upload [--annotations-only]  # maintainers
+    uv run processing/spikes/sharedata.py fetch [--no-cache] [--no-video]   # contributors
+    uv run processing/spikes/sharedata.py list [--remote]                   # what upload would send (and delete)
+    uv run processing/spikes/sharedata.py upload                            # maintainers
 
 The dataset mirrors footage/ path for path, so `fetch` drops everything
 where the tools already look:
 
-  bench/                         the bench store (TESTING-PROCESSING.md section 6), video included
-  models/                        the standard ball detector and judge
-  <rec>/pitch/, <rec>/labels*/   pitch maps and ball label sets of recordings outside the bench
-  <rec>/manifest.json, <rec>/phase0/report.json   what those labels need to find their frames
-  <rec>/phase0/cameras.json      the cameras those pitch maps were made with (jointfit.py)
+  bench/         the bench store (docs/DATA.md): what the benchmarks read, video included, and
+                 every ball label set (LABELS.md there says which may be trained on)
+  bench-cache/   what is made from the store and only saves time (pass A caches, ball
+                 candidates, roles): `fetch --no-cache` leaves it out
+  models/        the standard ball detector and judge
+
+Never shared: what runs write (bench-out/) and training products (train/).
 
 Before `fetch`, request access on the dataset's page and log in with
 `hf auth login` (a read token is enough). `upload` needs a write token
@@ -52,18 +54,16 @@ FOOTAGE = Path("footage")
 CARD = Path(__file__).resolve().parents[2] / "docs" / "DATASET_CARD.md"
 
 # Recordings outside the bench store whose pitch maps and labels we share.
-# (rec3's and rec4cal's are already inside bench/.)
-ANNOTATED = {
-    "rec5-game": ["pitch", "labels", "labels_kits", "teams"],
-    "rec6": ["pitch", "labels"],
-    "rec7": ["pitch", "labels_seg6", "playeval", "teams"],
-    "rec8": ["pitch", "playeval", "teams"],
-}
+# None since 2026-11-17: every shared recording's label sets, pitch map and
+# must-see sets are in the store (bench/<rec>/).
+ANNOTATED: dict[str, list[str]] = {}
+SHARED = ["bench/**", "bench-cache/**", "models/**"]
+VIDEO = ["bench/**/*.mp4"]
 
 # The app's upload state: the account id, S3 multipart upload ids and part ETags.
 NEVER = ["upload.json", "**/upload.json"]
 # A play set's paths/ are bench output (playbench.py rewrites them), not
-# annotations.
+# annotations (for a recording in the store they are in bench-out/, never shared).
 IGNORE = [".DS_Store", "**/.DS_Store", "**/__pycache__/**", ".cache/**", "rec*/playeval/*/paths/**", *NEVER]
 
 # What a shared text file must not hold (private_details).
@@ -99,7 +99,7 @@ def remote_stale(api) -> list[str]:
 
 
 def patterns(annotations_only: bool = False) -> list[str]:
-    return annotation_patterns() if annotations_only else ["bench/**", "models/**", *annotation_patterns()]
+    return annotation_patterns() if annotations_only else [*SHARED, *annotation_patterns()]
 
 
 def matching_files(annotations_only: bool = False) -> list[Path]:
@@ -133,7 +133,7 @@ def cmd_list(remote: bool = False, annotations_only: bool = False) -> bool:
     by_top: dict[str, list[int]] = {}
     for f in files:
         parts = f.relative_to(FOOTAGE).parts
-        top = parts[0] if parts[0] in ("bench", "models") else "/".join(parts[:2])
+        top = parts[0] if parts[0] == "models" else "/".join(parts[:2])
         n = by_top.setdefault(top, [0, 0])
         n[0] += 1
         n[1] += f.stat().st_size
@@ -184,14 +184,17 @@ def cmd_upload(annotations_only: bool = False) -> None:
           f"({'private' if info.private else 'visible'}, gated={info.gated})")
 
 
-def cmd_fetch(annotations_only: bool) -> None:
+def cmd_fetch(annotations_only: bool, cache: bool = True, video: bool = True) -> None:
+    """--no-cache leaves bench-cache/ out (the benchmarks then remake what
+    they need from the video); --no-video leaves the store's video out (the
+    benchmarks then run from the caches only)."""
     from huggingface_hub import snapshot_download
 
-    path = snapshot_download(REPO, repo_type="dataset", local_dir=FOOTAGE,
-                             allow_patterns=patterns(annotations_only))
+    allow = [p for p in patterns(annotations_only) if cache or not p.startswith("bench-cache/")]
+    path = snapshot_download(REPO, repo_type="dataset", local_dir=FOOTAGE, allow_patterns=allow,
+                             ignore_patterns=None if video else VIDEO)
     print(f"fetched into {path}")
-    if not annotations_only:
-        print("check the bench video: uv run processing/spikes/benchstore.py")
+    print("check it: uv run processing/spikes/bench.py check" + ("; the video: uv run processing/spikes/benchstore.py" if video else ""))
 
 
 def main() -> None:
@@ -200,7 +203,7 @@ def main() -> None:
     match sys.argv[1:2]:
         case ["fetch"]:
             FOOTAGE.mkdir(exist_ok=True)
-            cmd_fetch("--annotations-only" in sys.argv)
+            cmd_fetch("--annotations-only" in sys.argv, "--no-cache" not in sys.argv, "--no-video" not in sys.argv)
         case ["list"]:
             cmd_list(remote="--remote" in sys.argv, annotations_only="--annotations-only" in sys.argv)
         case ["upload"]:

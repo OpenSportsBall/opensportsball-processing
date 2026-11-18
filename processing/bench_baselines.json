@@ -1,0 +1,15 @@
+{
+ "play": {
+  "features": "goalkick,goalframe,unsure,ball,goalin,ballhold,roles,kickoff,peoplesurge",
+  "recordings": {
+   "rec3": [19, 26],
+   "rec4cal": [13, 15],
+   "rec7": [4, 5],
+   "rec8": [13, 16]
+  }
+ },
+ "ball": {
+  "rec3/seg3": {"tag": "win", "found": 41, "of": 53, "wrong": 1},
+  "rec3/seg9": {"tag": "win", "found": 24, "of": 37, "wrong": 6}
+ }
+}

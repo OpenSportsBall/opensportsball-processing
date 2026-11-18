@@ -29,7 +29,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "processing" / "spikes"))
 
-FIXTURES = Path(os.environ.get("OSB_PITCH_FIXTURES", ROOT / "footage" / "fixtures" / "pitch"))
+FIXTURES = Path(os.environ.get("OSB_PITCH_FIXTURES", ROOT / "footage" / "bench" / "fixtures" / "pitch"))
 CASES = sorted(p for p in FIXTURES.glob("*") if (p / "expected.json").exists()) if FIXTURES.exists() else []
 
 KEY_POINT_DEG = 0.1      # every key point within this of where it was (~3 panorama px)

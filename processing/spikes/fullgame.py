@@ -52,6 +52,7 @@ from pathlib import Path
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 import accel  # noqa: E402
+import recpaths  # noqa: E402
 DETECTOR = HERE.parents[1] / "footage" / "models" / "ball_detector.pth"  # the standard ball detector (README there)
 PIECE_H = accel.RENDER_H  # follow.py's render height unless the game is higher (follow.OUT_H; 16:9)
 UPLOAD_BITRATE = {1440: "45M"}  # hardware H.264 lands at ~2/3 of this (~31 Mbit/s)
@@ -114,7 +115,7 @@ def main() -> None:
     out = rec / a.out
     (out / "pieces").mkdir(parents=True, exist_ok=True)
     (out / "logs").mkdir(exist_ok=True)
-    (rec / "detect").mkdir(exist_ok=True)
+    (recpaths.cache(rec) / "detect").mkdir(exist_ok=True)
     tag = "play_" + "_".join(f for f in a.features.split(",") if "=" not in f)
     print(f"{len(chunks)} chunks of {a.chunk:g} s ({total / 60:.1f} min of game) -> {out}", flush=True)
     ev_lock = threading.Lock()
@@ -134,10 +135,10 @@ def main() -> None:
         return out / "pieces" / f"piece_{k:02d}.mp4"
 
     def cands(start, seconds):
-        return rec / "detect" / f"ball_0_{start:g}_{seconds:g}.win.json"
+        return recpaths.cache(rec) / "detect" / f"ball_0_{start:g}_{seconds:g}.win.json"
 
     def roles_file(start, seconds):
-        return rec / "detect" / f"roles_0_{start:g}_{seconds:g}.json"
+        return recpaths.cache(rec) / "detect" / f"roles_0_{start:g}_{seconds:g}.json"
 
     # The pieces' height: an earlier run's pieces decide it (the join can't
     # mix heights), else accel.render_height. follow.py reads it from the
@@ -198,14 +199,14 @@ def main() -> None:
                 event(event="start", stage="follow", chunk=k)
                 rc = run([*accel.python_cmd(), str(HERE / "follow.py"), str(rec), "0", f"{start:g}", f"{seconds:g}",
                           "play", a.features], out / "logs" / f"follow_{k:02d}.log")
-                src = rec / "follow" / f"follow_{tag}.mp4"
+                src = recpaths.out(rec) / "follow" / f"follow_{tag}.mp4"
                 if rc == 0 and src.exists():
                     src.rename(piece(k))
-                    cl = rec / "follow" / "camlog.txt"
+                    cl = recpaths.out(rec) / "follow" / "camlog.txt"
                     if cl.exists():
                         cl.rename(out / "logs" / f"camlog_{k:02d}.txt")
                     # The camera path, so the chunk can be scored (playeval.py score) without a rerun.
-                    pj = rec / "follow" / f"path_{tag}.json"
+                    pj = recpaths.out(rec) / "follow" / f"path_{tag}.json"
                     if pj.exists():
                         pj.rename(out / "logs" / f"path_{k:02d}.json")
                     print(f"follow chunk {k}: ok in {(time.time() - t0) / 60:.1f} min -> {piece(k).name}", flush=True)

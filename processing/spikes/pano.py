@@ -44,6 +44,7 @@ import torch
 import accel
 import follow
 import gpu
+import recpaths
 
 PX_PER_DEG = float(os.environ.get("PANO_PX_PER_DEG", 7680 / 360))
 BITRATE = os.environ.get("PANO_BITRATE", "60M")
@@ -158,10 +159,10 @@ def main(rec: Path, seg: int, start: float, seconds: float, youtube: bool) -> No
     follow.plan_path = fixed_view
     gpu.ViewRenderer = PanoRenderer
     follow.main(rec, seg, start, seconds, "pano")
-    out = rec / "pano"
+    out = recpaths.out(rec) / "pano"
     out.mkdir(exist_ok=True)
     clip = out / f"pano_{seg}_{start:g}_{seconds:g}.mp4"
-    shutil.move(rec / "follow" / "follow_pano.mp4", clip)
+    shutil.move(recpaths.out(rec) / "follow" / "follow_pano.mp4", clip)
     meta = {"segment": seg, "startS": start, "seconds": seconds, **view}
     clip.with_suffix(".json").write_text(json.dumps(meta, indent=1) + "\n")
     print(f"wrote {clip}")

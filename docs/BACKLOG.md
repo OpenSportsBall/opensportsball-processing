@@ -1897,6 +1897,30 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         3 s, and `LULL_RUN_SPEED` 2 and 1.5 with and without
         `ahead`, every moment the same. So on 46: baseline 33,
         `ahead` 3 s 33, lull 2 m/s 30, lull 1.5 m/s 31.
+- [ ] Measure how much lead-in a must-see moment needs (asked
+      2026-11-18, to see whether the play bench could run on short
+      windows round its 62 moments instead of whole 10-minute clips:
+      104 minutes of game, 52 GB of video). No video needed: from each
+      clip's pass A cache, ball candidates and roles in
+      `footage/bench-cache/`, plan the path again from 30, 60, 120 and
+      300 s before each moment (slice the three by time; `plan_path`
+      takes pass A's detections and the clip's start) and score the
+      moment's boxes as `playbench.py` does. The answer is the shortest
+      lead-in at which all 62 verdicts, and each moment's coverage to a
+      few points, match the whole-clip run. From the rules, about a
+      minute is expected: pass A's background warm-up 20 s
+      (`WARMUP_S`), the longest look-back 15 s (`GK_RECENT_S`; the goal
+      end 10 s, a restart framing up to 12 s, no goal kick for 8 s after
+      a kick-off), and up to ~10 s for the pan cap (20 deg/s) to cross
+      the field from a cold start. One rule can't run on a short window
+      as it is: loiter drops the touchline stretches occupied in 10% of
+      the clip's frames (`LOITER_FRAC`), which in a minute is one
+      player's wait at a throw-in; measure it with the whole clip's
+      loiter stretches passed in, and say how long a window it needs on
+      its own. Not measured is the warm-up itself (the caches are made
+      after it): that needs pass A rerun from video on a few moments.
+      If short windows hold, the bench's video could shrink by a third
+      or more; the baselines would be remade (docs/BENCHMARKS.md).
 - [ ] Follow cam speed, further ideas (a full game is ~2.5 h locally
       today, half in each pass):
       - Profile (2026-11-08, rec7 0 2084.88 600, follow.py alone on the

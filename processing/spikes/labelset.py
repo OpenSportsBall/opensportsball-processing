@@ -71,6 +71,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
+import recpaths  # noqa: E402
 import ball  # noqa: E402
 import detect  # noqa: E402
 import phase0  # noqa: E402
@@ -325,7 +326,7 @@ def clip(rec: Path, name: str, seg0: int, start: float, seconds: float, step: fl
     flip = {"main": report["upsideDown"]["main"], "secondary": report["upsideDown"]["secondary"]}
     out = rec / f"labels_{name}"
     (out / "images").mkdir(parents=True, exist_ok=True)
-    cands_path = rec / "detect" / f"ball_{seg0}_{start:g}_{seconds:g}.json"
+    cands_path = recpaths.cache(rec) / "detect" / f"ball_{seg0}_{start:g}_{seconds:g}.json"
     clip_cands = json.loads(cands_path.read_text()) if cands_path.exists() else None
     model = None if clip_cands or frames_only else __import__("rfdetr").RFDETRMedium()
     moments = []
@@ -421,7 +422,7 @@ def ball_set(rec: Path, cands_name: str, count: int, role: str, seed: int, out: 
         sys.exit("ball: secondary frames of a mixed-length recording aren't supported; use main")
     cam = follow.setup_cameras(rec, report, devs, [flip["main"], flip["secondary"]])[phone].at(3840)
     pose = P.load_pose(rec)
-    data = json.loads((rec / "detect" / cands_name).read_text())
+    data = json.loads((recpaths.cache(rec) / "detect" / cands_name).read_text())
     fps, frames = data["fps"], data["frames"]
     n = len(frames)
     cands = [[d for d in f["detections"] if B.usable({**d, "judge": 1.0} if nojudge else d, pose)] for f in frames]
