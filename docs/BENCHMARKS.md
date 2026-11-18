@@ -112,7 +112,7 @@ labels").
 ## The baselines now
 
 Made 2026-11-18 from caches remade from the video with the standard
-models (`ball_detector.pth` c69adbc8, `ball_judge.pt` bd32076c, the stock
+models (`ball_detector.pth` c69adbc8 (since rewritten without local paths as 04632214: the same weights), `ball_judge.pt` bd32076c, the stock
 RF-DETR Medium for players):
 
 | | Score |

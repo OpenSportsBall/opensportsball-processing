@@ -8,8 +8,10 @@ GitHub release assets, and `uv run packaging/cloud/models.py fetch` downloads th
 
 | File | sha256 | What |
 |---|---|---|
-| `ball_detector.pth` | `c69adbc8…` | RF-DETR Medium fine-tuned on rec3 + rec5 + rec6 (`footage/balldata_rec3_rec5_rec6`, rec5's tiles x3, rec6's x2): 275 white-ball boxes, 54 orange (x3), 69 daylight (x2). Trained 2026-10-31 into `footage/rec6/balltrain_v3/` (best EMA epoch 15, effective mAP 0.351) |
+| `ball_detector.pth` | `04632214…` | RF-DETR Medium fine-tuned on rec3 + rec5 + rec6 (`footage/balldata_rec3_rec5_rec6`, rec5's tiles x3, rec6's x2): 275 white-ball boxes, 54 orange (x3), 69 daylight (x2). Trained 2026-10-31 into `footage/rec6/balltrain_v3/` (best EMA epoch 15, effective mAP 0.351) |
 | `ball_judge.pt` | `bd32076c…` | balljudge CNN, trained 2026-11-13 as `footage/rec6/balljudge/judge_v5.pt` (run "a" of two; valid AP 0.963, held-out clip AP 0.92). rec3's crops + rec5's (x3) + rec6's (x2) + rec7's `labels_seg6` (x4, its last 40 s held out), with the reviewed off-pitch verdicts (`offpitch.py`): a reviewed spare ball is a positive, a reviewed non-ball a negative, at most 10 frames per spot. Data: `footage/ab_offpitch/capped/` |
+
+`ball_detector.pth` was rewritten on 2026-11-18 with the training settings' paths made relative (the dataset and output folders, the stock weights, the checkpoints' names: they had the training machine's home folder in them). Its 510 tensors are unchanged and it gives the same candidates as the file before (`c69adbc8…`, which images and apps built before then carry, and S3 keeps under `models/c69adbc8c417/`).
 
 The judge is standard since 2026-11-13, replacing `judge_v3` (`footage/rec6/balljudge/judge_v3.pt`,
 `1a94722b…`: trained 2026-10-31, effectively rec3 x4 + rec5 x9 + rec6 x2 through a merge bug). The detector

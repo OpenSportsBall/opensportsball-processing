@@ -557,7 +557,7 @@ on its fixtures (since the line-mask change of 2026-10-22, 637b3ba;
 section 1), not the store.
 
 The baselines are from caches remade from the video on 2026-11-18 with
-the standard models (`ball_detector.pth` c69adbc8, `ball_judge.pt`
+the standard models (`ball_detector.pth` c69adbc8 (since rewritten without local paths as 04632214: the same weights), `ball_judge.pt`
 bd32076c, the stock player detector) and this code: every clip's ball
 candidates (ballwin.py), roles (roles.py) and pass A. Play bench 49/62:
 rec3 19/26, rec4cal 13/15, rec7 4/5, rec8 13/16; balleval seg3 41/53
