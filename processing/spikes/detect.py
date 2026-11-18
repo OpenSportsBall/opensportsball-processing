@@ -165,6 +165,11 @@ class NetworkClock:
     def __init__(self, rf):
         self.seconds, self.calls, self.images = None, 0, 0
         for part in (rf.parts.values() if isinstance(rf, CompiledDetector) else [rf]):
+            exported = getattr(part, "_export_context", None)  # a TensorRT engine: its run is the network
+            if exported is not None:
+                object.__setattr__(exported, "run", self._timed(exported.run))
+                self.seconds = 0.0
+                continue
             part = getattr(part, "_native_model", part)  # a predictor holds its own copy of the model
             ctx = getattr(part, "model", None)
             for name in ("inference_model", "model"):
@@ -260,7 +265,7 @@ def compiled(model, what: str):
     PyTorch model: on an A10G it changed 0.1-2.5% of ball detections
     (BACKLOG.md, 2026-11-14) and has not been through the must-see bench."""
     asked = dict(p.split("=", 1) for p in os.environ.get("OSB_DETECTOR_COMPILED", "").split(";") if "=" in p)
-    if what not in asked or isinstance(model, CoreMLDetector) or not torch.cuda.is_available():
+    if what not in asked or isinstance(model, (CoreMLDetector, CompiledDetector)) or not torch.cuda.is_available():
         return model
     sizes = [int(b) for b in asked[what].split(",")]
     t = time.perf_counter()
@@ -268,6 +273,72 @@ def compiled(model, what: str):
     print(f"{what} detector compiled for batches of {sorted(set(sizes))} in {time.perf_counter() - t:.0f} s "
           f"(OSB_DETECTOR_COMPILED)", flush=True)
     return model
+
+
+class TrtDetector(CompiledDetector):
+    """rfdetr's model as TensorRT engines, one per batch size in `sizes`
+    (routed and padded as CompiledDetector does), each replayed as a CUDA
+    graph. An engine runs only on the GPU model and TensorRT version that
+    built it, so they are built on first use (minutes each) and kept in
+    `cache` under a key naming both, the checkpoint, rfdetr's version and
+    the precision; a later process of the same job finds them there."""
+
+    def __init__(self, make, sizes, half: bool, cache: Path, ckpt: Path | None = None):
+        from importlib.metadata import version
+        import rfdetr
+        ck = Path(ckpt) if ckpt else None
+        gpu_name = torch.cuda.get_device_name(0).replace(" ", "-")
+        key = (f"{ck.stem}-{ck.stat().st_size}" if ck else "stock-medium") \
+            + f"-rfdetr{version('rfdetr')}-trt{version('tensorrt')}-{gpu_name}-{'fp16' if half else 'fp32'}"
+        folder = Path(cache) / key
+        folder.mkdir(parents=True, exist_ok=True)
+        self.parts, rf = {}, None
+        for b in sorted(set(sizes)):
+            engine = folder / f"b{b}.trt"
+            about = engine.with_name(engine.name + ".rfdetr.json")  # rfdetr's note of what the engine takes and gives
+            if not (engine.exists() and about.exists()):
+                import shutil, tempfile
+                rf = rf or make()
+                tmp, t = Path(tempfile.mkdtemp(dir=folder)), time.perf_counter()
+                r = rf.model.resolution
+                made = Path(rf.export(output_dir=str(tmp), format="tensorrt", batch_size=b, shape=(r, r), fp16=half,
+                                      output_name=f"b{b}", trt_timing_cache=str(folder / "timing.cache"), verbose=False))
+                os.replace(made, engine)  # each whole or not there, the note last: another process may be looking
+                os.replace(made.with_name(made.name + ".rfdetr.json"), about)
+                shutil.rmtree(tmp, ignore_errors=True)
+                print(f"TensorRT engine, batch {b}, {'fp16' if half else 'fp32'}: {time.perf_counter() - t:.0f} s "
+                      f"-> {engine} ({engine.stat().st_size / 1e6:.0f} MB)", flush=True)
+            self.parts[b] = rfdetr.RFDETRInference(str(engine), device="cuda", runtime_options={"cuda_graph": True})
+
+
+def tensorrt(model, what: str, make, ckpt: Path | None = None):
+    """OSB_DETECTOR_TRT: "ball=fp32:1,2,4,8;people=fp16:64" runs the named
+    detectors as TensorRT engines of that precision at those batch sizes
+    (TrtDetector), in place of OSB_DETECTOR_COMPILED and OSB_DETECTOR_HALF
+    for them. `make()` gives a fresh model to export from. Engines are
+    kept in OSB_TRT_CACHE (~/.cache/opensportsball/tensorrt). Off unless
+    asked for, and only on a CUDA GPU; anything failing falls back to
+    `model` with a message, as it does in the cloud image, which does not
+    carry TensorRT (`rfdetr[tensorrt]`). On an A10G fp32 was no faster
+    than the compiled detector; fp16 ran the ball network 2.5-2.8x faster
+    and changed 12-23% of frames (BACKLOG.md, 2026-11-17), and has not
+    been through the must-see bench."""
+    asked = dict(p.split("=", 1) for p in os.environ.get("OSB_DETECTOR_TRT", "").split(";") if "=" in p)
+    if what not in asked or isinstance(model, CoreMLDetector) or not torch.cuda.is_available():
+        return model
+    precision, _, sizes = asked[what].partition(":")
+    if precision not in ("fp32", "fp16") or not sizes:
+        raise SystemExit(f"OSB_DETECTOR_TRT: {what}={asked[what]} is not fp32:<sizes> or fp16:<sizes>")
+    cache = Path(os.environ.get("OSB_TRT_CACHE") or Path.home() / ".cache/opensportsball/tensorrt")
+    t = time.perf_counter()
+    try:
+        trt = TrtDetector(make, [int(b) for b in sizes.split(",")], precision == "fp16", cache, ckpt)
+    except Exception as e:  # noqa: BLE001 -- PyTorch finds the same things, only slower
+        print(f"TensorRT unavailable for the {what} detector ({type(e).__name__}: {e}); using PyTorch", flush=True)
+        return model
+    print(f"{what} detector on TensorRT, {precision}, batches of {sorted(trt.parts)}, ready in "
+          f"{time.perf_counter() - t:.0f} s (OSB_DETECTOR_TRT)", flush=True)
+    return trt
 
 
 class Waited:

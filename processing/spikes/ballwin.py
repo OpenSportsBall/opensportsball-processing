@@ -211,6 +211,7 @@ def main(rec: Path, seg: int, start: float, seconds: float, ckpt: Path, fps: flo
     model = detect.coreml_detector(model, "OSB_DETECTOR_COREML",
                                    lambda: rfdetr.RFDETRMedium(pretrain_weights=str(ckpt)), ckpt=Path(ckpt))
     t_det = 0.0
+    model = detect.tensorrt(model, "ball", lambda: rfdetr.RFDETRMedium(pretrain_weights=str(ckpt)), ckpt=Path(ckpt))
     model = detect.half_precision(detect.compiled(model, "ball"), "ball")
     net = detect.NetworkClock(model)
     W, H = follow.SRC_W, follow.SRC_H

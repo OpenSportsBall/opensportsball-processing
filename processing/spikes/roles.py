@@ -96,7 +96,7 @@ def main(rec: Path, seg: int, start: float, seconds: float, tset: str, fps: floa
 
     model = rfdetr.RFDETRMedium()
     model = detect.coreml_detector(model, "OSB_PEOPLE_COREML", rfdetr.RFDETRMedium, batches=(8,), precision=PRECISION)
-    model = detect.half_precision(model, "people")
+    model = detect.half_precision(detect.tensorrt(model, "people", rfdetr.RFDETRMedium), "people")
     net = detect.NetworkClock(model)
     dev = gpu.device()
     W, H = follow.SRC_W, follow.SRC_H
