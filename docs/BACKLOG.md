@@ -2323,3 +2323,44 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
       ball sets hold out the last quarter of each chunk). Every crops.npz
       and balldata/ built before then must be rebuilt before the next
       retrain.
+- [ ] Panoramic video: let viewers pan and zoom the whole field
+      (2026-11-18). Today no stitched video is kept: `follow.py` samples
+      the two phones directly and its only panorama is pass A's
+      (0.08 deg/px, in memory). `pano.py` renders one through pass B
+      instead (a fixed equirectangular view, follow.py's cameras, gain and
+      seam). First clip, rec8 10:00-11:00, both phones: 189 x 73 degrees,
+      4024 x 1544 at 21.3 px/deg (an 8K sphere's density; the phones have
+      ~26 at the centre), H.264 at 60 Mbit/s, 454 MB a minute; 106 ms a
+      frame in pass B on the Mac, about 5 min for the minute with pass A.
+      The seam down the halfway line was clean in the frames looked at.
+      As 360 video on YouTube (`pano.py --youtube`: padded to 7680 x 3840
+      HEVC, 542 MB, tagged by our own code) it uploaded and played as 360
+      with no trouble, but YouTube's rungs are for the whole sphere:
+      2160s is 10.7 px/deg (a 90 degree view ~960 px across), 4320s 21.3.
+      On Auto it was very soft; picking 2160s by hand was much sharper
+      (AV1). Whether 4320s is offered, and how the far side looks zoomed
+      in at 2160s, were not checked. The flat clip holds the 8K sphere's
+      detail in a file of 4K size, since none of it is black.
+      To find out:
+      - YouTube: is 4320s offered and does it play on phones and TVs; is
+        2160s enough zoomed in on the far goal. Viewers get Auto, and an
+        uploader can't set the rung. Tagging the 189 x 73 degree band as
+        a whole sphere would double every rung's detail at the cost of
+        wrong geometry (view starts ~2x zoomed in, lines bend towards the
+        top and bottom): untried.
+      - Our own player (main repo, `web/`): the flat panorama, pan and
+        zoom as a crop. A WebGL view can straighten lines as the 360
+        player does, a CSS crop can't. Phones need a lighter copy than
+        60 Mbit/s H.264 (HEVC at 15-20 Mbit/s, unmeasured); wider than
+        4K needs HEVC/AV1 or tiles.
+      - The render: audio (none today); a clean rectangle instead of the
+        scalloped black edges; straight to 8K instead of a re-encode for
+        the 360 copy; a level horizon from the pitch map; what to show
+        where Secondary has no footage (rec8's second half is Main
+        alone); crossing chunks for a whole game.
+      - Cost: a second render and encode per game (pass B alone ~3.5x
+        real time on the Mac at this size, unmeasured in the cloud), and
+        ~40 GB per 90 min at 60 Mbit/s to store and serve.
+      - Whether it replaces the "low-resolution full-field panorama"
+        output in the READMEs and the main repo's `docs/PLAN.md`, or the
+        follow cam's path is offered as the default view inside it.

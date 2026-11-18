@@ -8,7 +8,8 @@ License: **AGPL-3.0-only** (see `LICENSE` and `../CONTRIBUTING.md`).
 The Phase 0 scripts in `spikes/` are the working pipeline: sync and
 stitch (`phase0.py`), pitch map (`pitch.py`), ball detection, judging and
 path (`ballwin.py`, `balljudge.py`, `ballpath.py`), follow cam
-(`follow.py`), and `fullgame.py`, which runs a whole game in chunks. It
+(`follow.py`), and `fullgame.py`, which runs a whole game in chunks
+(`pano.py` renders a full-field panorama clip instead of the follow cam). It
 runs locally on a Mac (MPS) or an NVIDIA GPU, started by hand on footage
 downloaded from S3; a game takes about 6-11 hours on a Mac. The labelling
 tools and model training live here too.
