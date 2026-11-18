@@ -524,7 +524,7 @@ keeps everything in the recording's folder as before.
 |---|---|
 | `bench/rec3/` | the first game: 5 must-see sets (26 moments), `labels` (random set), `labels_seg3`, `labels_seg9` (held out). Video: Main segments 0-6 and 9 and their Secondary pairs (16 files, 17.6 GB): game 0:00-30:00, the seg 3 and seg 9 clips |
 | `bench/rec4cal/` | the 2026-10-21 night game in the corrected camera model: 2 must-see sets (15 moments), `lens/`. Video: Main segments 2-6 and their Secondary pairs (10 files, 10.9 GB): game 10:00-30:00 |
-| `bench/rec5-game/` | the orange-ball game: `labels`, `labels_kits`. Video: segment 18 of both phones (2 files, 2.6 GB), the kit labels' clip |
+| `bench/rec5-game/` | the orange-ball game: `labels` (the ball set, with its frames) and what it needs: the manifest, `phase0/`, `pitch/pitch.json`. No video, and no other labelled data (the kit labels, team colours and pitch taps were taken out 2026-11-18; they are in the working recording) |
 | `bench/rec6/` | the first daylight game: `labels` (random set; no video in the store) |
 | `bench/rec7/` | the 2026-11-04 night game (yellow ball): 1 must-see set (5 moments), `labels_seg6` (its last 40 s held out). Video: Main segments 5-7 and Secondary 4-6 (6 files, 6.9 GB); Secondary 4 holds the play clip's first seconds |
 | `bench/rec8/` | the 2026-11-11 night game: 4 must-see sets (16 boxes, all plays the follow cam missed: a count of misses fixed, kept apart from the standard 46), `labels_seg11-136`, `engine/labels/ball-1`. Video: Main segments 0-4 and 10-14 and Secondary 0-4, where it stopped (15 files, 16.6 GB) |
