@@ -511,7 +511,7 @@ What is made from it is kept apart, under the same relative path
 | Folder | What | |
 |---|---|---|
 | `footage/bench/<rec>/` | inputs: manifest, `phase0/`, `pitch/`, `teams/`, must-see sets, ball label sets, and the video the sets cover | S3 `bench/` (outside `accounts/`: deleting a game's raw footage won't touch it) and Hugging Face |
-| `footage/bench-cache/<rec>/` | made from the inputs and the video, hours to remake: `follow/passA_*.json`, `detect/` (ball candidates, roles, net series), `bg/` | S3 `bench-cache/` and Hugging Face, optional |
+| `footage/bench-cache/<rec>/` | made from the inputs and the video, hours to remake: `follow/passA_*.json`, `detect/` (ball candidates, roles, net series), `bg/` | S3 `bench-cache/`; not on Hugging Face (a contributor makes their own) |
 | `footage/bench-out/<rec>/` | what runs write: paths, `playeval/bench.json`, camera logs, debug images | nowhere; delete at will |
 | `footage/train/<rec>/` | what training makes: `balldata/`, `balltrain*/`, `balljudge/`, `heattrain/` | nowhere |
 
@@ -557,7 +557,7 @@ on its fixtures (since the line-mask change of 2026-10-22, 637b3ba;
 section 1), not the store.
 
 The baselines are from caches remade from the video on 2026-11-18 with
-the standard models (`ball_detector.pth` c69adbc8, `ball_judge.pt`
+the standard models (`ball_detector.pth` c69adbc8 (since rewritten without local paths as 04632214: the same weights), `ball_judge.pt`
 bd32076c, the stock player detector) and this code: every clip's ball
 candidates (ballwin.py), roles (roles.py) and pass A. Play bench 49/62:
 rec3 19/26, rec4cal 13/15, rec7 4/5, rec8 13/16; balleval seg3 41/53

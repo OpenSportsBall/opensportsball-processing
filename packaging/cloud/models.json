@@ -3,8 +3,8 @@
     {
       "source": "footage/models/ball_detector.pth",
       "path": "footage/models/ball_detector.pth",
-      "key": "c69adbc8c417/ball_detector.pth",
-      "sha256": "c69adbc8c417d1b1b509730991b33539f7b4a9796ddd9c16a3d0e49a47c2b54b",
+      "key": "046322149086/ball_detector.pth",
+      "sha256": "046322149086b3fb0573fe82b3d4388169b48d045fe88657436859442a658b2f",
       "release": true
     },
     {

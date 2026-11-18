@@ -48,14 +48,13 @@ def test_upload_state_is_never_shared(footage):
     assert S.private_details(S.matching_files()) == {}
 
 
-def test_caches_are_shared_but_outputs_and_training_products_are_not(footage):
+def test_caches_outputs_and_training_products_are_not_shared(footage):
     for rel in ("bench-cache/rec3/follow/passA_0_0_600.json", "bench-out/rec3/playeval/bench.json",
                 "train/rec3/balltrain/checkpoint.pth"):
         (footage / rel).parent.mkdir(parents=True, exist_ok=True)
         (footage / rel).write_text("{}")
     sent = names(S.matching_files(), footage)
-    assert "bench-cache/rec3/follow/passA_0_0_600.json" in sent
-    assert not any(n.startswith(("bench-out/", "train/")) for n in sent)
+    assert not any(n.startswith(("bench-cache/", "bench-out/", "train/")) for n in sent)
 
 
 def test_upload_state_already_in_the_dataset_is_deleted(footage):

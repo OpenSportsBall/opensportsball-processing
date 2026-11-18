@@ -85,7 +85,7 @@ never deleted from S3.
 
 | Path | What | Cost of losing it |
 |---|---|---|
-| `footage/bench-cache/<rec>/` | pass A caches, ball candidates, roles, backgrounds, the stamp | hours to remake from the video (above); kept in S3 `bench-cache/` to save that |
+| `footage/bench-cache/<rec>/` | pass A caches, ball candidates, roles, backgrounds, the stamp | hours to remake from the video (above); kept in S3 `bench-cache/` to save that. Not shared on Hugging Face: a contributor makes their own, with the code they are testing |
 | `footage/bench-out/<rec>/` | what runs write: camera paths, `playeval/bench.json`, camera logs, debug images, `cache-before-regen/` | nothing; delete at will |
 | `footage/train/<rec>/` | training datasets, judge crops, checkpoints | remade by training; a model that became standard is already in `footage/models/` |
 | the video on this machine | | a download from S3 or Hugging Face (`sharedata.py fetch`, `footagestore.py restore`) |
@@ -112,7 +112,7 @@ labels").
 ## The baselines now
 
 Made 2026-11-18 from caches remade from the video with the standard
-models (`ball_detector.pth` c69adbc8, `ball_judge.pt` bd32076c, the stock
+models (`ball_detector.pth` c69adbc8 (since rewritten without local paths as 04632214: the same weights), `ball_judge.pt` bd32076c, the stock
 RF-DETR Medium for players):
 
 | | Score |
