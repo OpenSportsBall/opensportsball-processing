@@ -73,3 +73,28 @@ def test_without_a_reported_lens_any_real_lens_passes(monkeypatch):
     _stitchers(monkeypatch, [(9.6, 20.0), (300.0, 700.0)])
     st, cal = phase0.calibrate(_pairs(2))
     assert cal["pairsOk"] == 1 and cal["focalPx"] == [300.0, 700.0]
+
+
+def test_a_pair_opencv_fails_on_is_dropped_not_the_whole_sync(monkeypatch, capsys):
+    """The 2026-11-18 game in the cloud: the stitcher failed an assertion of its own on one pair
+    of the mount check, and the sync ended there."""
+    calls = iter([None, (375.9, 350.8)])
+
+    class Stitcher:
+        def estimateTransform(self, images):
+            self.f = next(calls)
+            if self.f is None:
+                raise cv2.error("OpenCV(5.0.0) matmul.simd.hpp:1053: error: (-215:Assertion failed) type == CV_64FC2 in function 'gemmImpl'")
+            return cv2.Stitcher_OK
+
+        def cameras(self):
+            return [_Cam(self.f[0], -0.7), _Cam(self.f[1], 0.7)]
+
+    monkeypatch.setattr(cv2, "Stitcher_create", lambda *_: Stitcher())
+    st, cal = phase0.calibrate(_pairs(2), phase0.expected_focals(*DEVS, W))
+    assert cal["ok"] and cal["pairsTried"] == 2 and cal["pairsOk"] == 1
+    assert "OpenCV failed on the pair" in capsys.readouterr().out
+    monkeypatch.setattr(cv2, "Stitcher_create", lambda *_: Stitcher())
+    calls = iter([None])
+    st, cal = phase0.calibrate(_pairs(1))
+    assert st is None and cal["ok"] is False

@@ -410,6 +410,15 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
           numbers, `joint/auto/` the fit, `joint/stitch/` the replaced
           cameras and pitch. Only before the pitch is first asked about;
           `OSB_JOINT_AUTO=0` leaves it out. Open:
+          - rec9 in the cloud (2026-11-19, the first job on Spot, image
+            v13): prepare failed in the sync after 6.4 min. OpenCV 5.0's
+            stitcher failed an assertion of its own (`type == CV_64FC2
+            in function 'gemmImpl'`) on one pair of the per-segment
+            mount check, after the calibration itself had stitched 8 of
+            8 pairs. The Mac's packaged engine, same OpenCV, synced this
+            game three times without it (the frames decode differently).
+            `phase0.calibrate` now drops a pair OpenCV fails on, as it
+            does one with no stitch.
           - Without taps it needs the lines-only pitch to be right, and
             that isn't repeatable: the same game prepared again from the
             checkout got 107.2 x 78.1 m where the app's prepare got
