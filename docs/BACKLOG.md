@@ -398,6 +398,62 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
           --annotations-only` and `footagestore.py backup` are run.
           Untapped fits not retried. `adopt` is still not atomic and
           `lenses` still drops recordings it isn't given.
+        - In the engine for stitched games (2026-11-19): prepare runs
+          `jointfit.py <rec> auto` between the lines-only pitch and the
+          goals (step `cameras-joint`), with no taps and the lens table's
+          priors, and installs the fit only if it passes a check
+          (`auto_reasons`; the thresholds and the four recordings they
+          come from are in FINDINGS section 2). Found on the 2026-11-18
+          game, whose near touchline ran 0.6 m off its paint by the
+          camera with both stitch focals ~2% short; the tap refit didn't
+          fix it. `<rec>/joint/auto.json` records the verdict and its
+          numbers, `joint/auto/` the fit, `joint/stitch/` the replaced
+          cameras and pitch. Only before the pitch is first asked about;
+          `OSB_JOINT_AUTO=0` leaves it out. Open:
+          - Without taps it needs the lines-only pitch to be right, and
+            that isn't repeatable: the same game prepared again from the
+            checkout got 107.2 x 78.1 m where the app's prepare got
+            101.6 x 59.8 (same pitch code, a slightly different
+            background; the start search found the right pitch in one
+            run only), and the fit was refused.
+          - With taps (same day): after each round of marked points on a
+            stitched game, `pitch.py taps` then `jointfit.py <rec> auto
+            --taps` (step `cameras-joint-<round>`,
+            `joint/auto_taps.json`), from the current cameras and the
+            refitted pitch, under the same check plus the points no
+            further from the pitch than the refit left them. Taken on
+            the 2026-11-18 game as the app left it and, through the
+            engine, on the copy whose lines-only pitch was wrong;
+            refused on rec4cal and rec8 (FINDINGS section 2). The
+            panorama is redrawn from the fit's two phone backgrounds, so
+            answers applied with --no-footage get it when an earlier
+            step left those in `joint/` (the untapped step does), and
+            keep the stitch when it didn't. A game whose pitch is
+            already approved is not touched: the 2026-11-18 game itself
+            was approved at round 2 in the app while this was built.
+          - A game asked about by an earlier engine and not marked again
+            keeps its stitch (no untapped fit once questions.json is
+            there).
+          - rec8: its refused tapped fit says 101.7 x 59.7 m (the
+            2026-11-18 field's size) against the adopted map's 113.3 x
+            64.5, with the taps at 1.0 / 6.9 px against 11.7 / 70.6.
+            Check whether the bench store's rec8 map is 11% long, and
+            whether its taps.json is of its current cameras.
+          - The size check is against the tap refit, which a stitch that
+            is far off has already scaled (rec8's focal is 3.7% long):
+            those are refused. With taps, closer points and more paint
+            might be let to outweigh the size; one example so far.
+          - The check's thresholds come from five recordings. Untapped,
+            rec3 is refused for a 2.8% longer pitch; with its taps the
+            fit is taken at 1.6% longer, so the longer pitch is likely
+            right there.
+          - The fitted cameras drop the line fit's per-segment record
+            (kept as `stitchLineFit`; `mountMoved` carried over), and
+            nothing looks for a moved mount with the new cameras.
+          - No render compared across the seam (0.38 -> 0.44 px of paint
+            on the fit's segment). iPhone18,1 isn't in `lenses.json`
+            (prior: its reported field of view, +-8%); untapped fits are
+            not added to the table.
         - Adopted on rec4cal and rec7 (2026-11-09, `jointfit.py adopt`):
           the joint cameras.json, pitch.json, goals, taps (rebuilt in the
           new panorama's degrees), panorama, must-see boxes and pass A

@@ -202,9 +202,12 @@ def test_goals_are_found_again_after_a_tap_refit(tmp_path, monkeypatch, capsys):
         if name.startswith("goals"):
             (pd / "goals.json").write_text(json.dumps({"goals": []}))
     monkeypatch.setattr(engine, "step", fake_step)
+    monkeypatch.delenv("OSB_JOINT_AUTO", raising=False)
     st = job.state()
     engine.apply_answers(job, st, {"pitch": {"round": 1, "points": {"left corner flag": {"yaw": 1.5, "pitch": 2.5}}}}, 0)
-    assert [(n, a[-1], had) for n, a, had in calls] == [("pitch-refit-1", "taps", False), ("goals-1", "goals", False)]
+    assert [(n, a[-1], had) for n, a, had in calls] == [("pitch-refit-1", "taps", False), ("cameras-joint-1", "0", False),
+                                                         ("goals-1", "goals", False)]
+    assert calls[1][1] == [str(job.rec), "auto", "--taps", "--seg", "0"]  # both lenses, with the marked points
     assert json.loads((pd / "goals.json").read_text()) == {"goals": []} and st["pitch"]["round"] == 2
 
 
@@ -865,3 +868,96 @@ def test_a_job_prepared_before_runs_without_the_kits_answered(tmp_path):
     st = {"schemaVersion": 1, "pitch": {"round": 2, "status": "approved"},
           "kits": {"round": 1, "status": "pending", "k": 8}, "applied": []}
     assert engine.pending_questions(st) == []
+
+
+# ------------------------------------------------- the joint fit after a stitch
+
+
+def stitched_prepare(tmp_path, monkeypatch, fail=()):
+    """prepare with stand-in steps on a game whose phones stitched; returns (job, the steps called)."""
+    job = make_job(tmp_path)
+    segs = [{"index": i, "durationMs": 300000, "objectKey": f"m/{i}.mp4"} for i in range(4)]
+    monkeypatch.setattr(engine, "check_footage", lambda j, whole=False: {"devices": [{"role": "main", "segments": segs}]})
+    calls = []
+
+    def fake_step(job_, name, args, *, done=None, uv_with=(), watch=None):
+        if done is not None and done.exists():
+            return
+        calls.append(name)
+        if name in fail:
+            raise engine.Failed(f"{name}_failed", f"{name} failed (exit 1)")
+        r = job_.rec
+        made = {"sync": r / "phase0" / "report.json", "pitch": r / "pitch" / "pitch.json", "goals": r / "pitch" / "goals.json",
+                "cameras-joint": r / "joint" / "auto.json", "pitch-review": r / "pitch" / "review.json"}[name]
+        assert done == made
+        if name == "cameras-joint":
+            assert args == ["jointfit.py", str(r), "auto", "--seg", "1"]  # the segment the pitch was fitted on
+            (r / "pitch" / "goals.json").unlink(missing_ok=True)  # as a fit that is taken does
+        made.parent.mkdir(parents=True, exist_ok=True)
+        made.write_text("{}")
+    monkeypatch.setattr(engine, "step", fake_step)
+    monkeypatch.setattr(engine, "write_questions", lambda job_, st: engine.save_questions(job_, {
+        "schemaVersion": 1, "recording": "r", "pending": engine.pending_questions(st),
+        "pitch": {"round": st["pitch"]["round"], "status": st["pitch"]["status"], "background": "b", "overlay": "o",
+                  "fit": {}, "lines": [], "points": {}}}))
+    return job, calls
+
+
+def test_the_lenses_are_fitted_with_the_pitch_before_it_is_first_asked_about(tmp_path, monkeypatch, capsys):
+    """Between the lines-only pitch and the goals, once: the goals and the question are of the
+    cameras the fit left. Never again on that game: its answers are in that panorama's angles."""
+    monkeypatch.delenv("OSB_JOINT_AUTO", raising=False)
+    job, calls = stitched_prepare(tmp_path, monkeypatch)
+    assert engine.prepare(job, None) == 0
+    assert calls == ["sync", "pitch", "cameras-joint", "goals", "pitch-review"]
+    (job.rec / "joint" / "auto.json").unlink()  # even with its record gone
+    calls.clear()
+    assert engine.prepare(job, None) == 0 and calls == []
+    engine.prepare(job, {"pitch": {"round": 1, "approve": True}})
+    assert calls == []
+
+
+def test_a_game_asked_about_before_keeps_its_stitch(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("OSB_JOINT_AUTO", raising=False)
+    job, calls = stitched_prepare(tmp_path, monkeypatch)
+    job.dir.mkdir(parents=True, exist_ok=True)
+    (job.dir / "questions.json").write_text("{}")  # an earlier engine's prepare
+    assert engine.prepare(job, None) == 0 and "cameras-joint" not in calls
+
+
+def test_the_joint_fit_can_be_left_out_and_cant_stop_prepare(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("OSB_JOINT_AUTO", "0")
+    job, calls = stitched_prepare(tmp_path / "off", monkeypatch)
+    assert engine.prepare(job, None) == 0 and calls == ["sync", "pitch", "goals", "pitch-review"]
+    monkeypatch.delenv("OSB_JOINT_AUTO")
+    job, calls = stitched_prepare(tmp_path / "fails", monkeypatch, fail=("cameras-joint",))
+    assert engine.prepare(job, None) == 0 and calls == ["sync", "pitch", "cameras-joint", "goals", "pitch-review"]
+
+
+def test_marked_points_fit_the_lenses_too_and_a_fit_that_fails_changes_nothing(tmp_path, monkeypatch, capsys):
+    """After pitch.py's refit to a round's points, before the goals; a step that fails is passed
+    over, and OSB_JOINT_AUTO=0 leaves it out."""
+    answer = {"pitch": {"round": 1, "points": {"left corner flag": {"yaw": 1.5, "pitch": 2.5}}}}
+
+    def applied(where, fail=()):
+        job = make_job(where)
+        (job.rec / "pitch").mkdir()
+        (job.rec / "pitch" / "review.json").write_text(json.dumps({"points": {}}))
+        calls = []
+
+        def fake_step(job_, name, args, *, done=None, uv_with=(), watch=None):
+            calls.append(name)
+            if name in fail:
+                raise engine.Failed(f"{name}_failed", "failed")
+            if name.startswith("goals"):
+                (job_.rec / "pitch" / "goals.json").write_text("{}")
+        monkeypatch.setattr(engine, "step", fake_step)
+        st = job.state()
+        engine.apply_answers(job, st, answer, 2)
+        return calls, st
+
+    monkeypatch.delenv("OSB_JOINT_AUTO", raising=False)
+    calls, st = applied(tmp_path / "a", fail=("cameras-joint-1",))
+    assert calls == ["pitch-refit-1", "cameras-joint-1", "goals-1"] and st["pitch"]["round"] == 2
+    monkeypatch.setenv("OSB_JOINT_AUTO", "0")
+    assert applied(tmp_path / "b")[0] == ["pitch-refit-1", "goals-1"]
