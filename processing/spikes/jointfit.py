@@ -111,8 +111,10 @@ or "current" for phase0/cameras.json with pitch/pitch.json), the taps'
 error in source px and on the ground (metres), and the mean distance from
 each phone's paint to the fitted markings. Taps_src.json is the truth.
 
-lenses: collects joint/cameras.json across recordings by phone model into
-processing/spikes/lenses.json, the prior for fits without taps.
+lenses: adds the given recordings' tapped fits (joint/cameras.json, else the
+engine's joint/auto_taps/cameras.json) by phone model to
+processing/spikes/lenses.json, the prior for fits without taps; the table's
+fits of other recordings stay.
 
 bench: pitchbench.py's marked-field benchmark scored in the phones' 4K pixels
 (the fixture's traced markings carried through its cameras.json), so fits
@@ -1150,9 +1152,22 @@ def summarize(rows: list[dict]) -> dict:
 
 
 def lenses_main(recs: list[Path]) -> None:
-    rows: dict[str, list] = {}
+    """The lens table with these recordings' tapped fits in it: <rec>/joint/cameras.json, else the
+    fit the engine made with a round's marked points (<rec>/joint/auto_taps/cameras.json). The
+    table's fits of recordings not given stay as they are (their folders needn't be on this
+    machine); a recording given again has its rows replaced."""
+    old = json.loads(LENS_TABLE.read_text()) if LENS_TABLE.exists() else {}
+    names = {rec.name for rec in recs}
+    rows: dict[str, list] = {k: [r for r in e["fits"] if r["recording"] not in names] for k, e in old.items()}
+    kept = sorted({r["recording"] for v in rows.values() for r in v})
+    if kept:
+        print("kept from the table: " + ", ".join(kept))
     for rec in recs:
-        j = json.loads((rec / "joint" / "cameras.json").read_text())
+        path = next((p for p in (rec / "joint" / "cameras.json", rec / "joint" / "auto_taps" / "cameras.json") if p.exists()), None)
+        if path is None:
+            print(f"{rec.name}: no joint fit, left out")
+            continue
+        j = json.loads(path.read_text())
         info = j["jointFit"]
         if not info.get("taps"):
             print(f"{rec.name}: fitted without taps, left out")
@@ -1161,6 +1176,7 @@ def lenses_main(recs: list[Path]) -> None:
             c = j[role]
             rows.setdefault(info["models"][role], []).append(
                 {"recording": rec.name, "role": role, "f": c[0], "k1": c[3], "k2": c[4]})
+    rows = {k: v for k, v in rows.items() if v}
     table = {k: summarize(v) for k, v in sorted(rows.items())}
     LENS_TABLE.write_text(json.dumps(table, indent=1) + "\n")
     for k, e in table.items():

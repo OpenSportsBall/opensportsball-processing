@@ -451,9 +451,20 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
             (kept as `stitchLineFit`; `mountMoved` carried over), and
             nothing looks for a moved mount with the new cameras.
           - No render compared across the seam (0.38 -> 0.44 px of paint
-            on the fit's segment). iPhone18,1 isn't in `lenses.json`
-            (prior: its reported field of view, +-8%); untapped fits are
-            not added to the table.
+            on the fit's segment).
+          - Lens table (2026-11-19): rec9's tapped fit added
+            (`jointfit.py lenses footage/bench/rec9`): iPhone18,1 f 726.4
+            (n=1, so +-3%; its reported field of view gave 720.8 +-8%),
+            Pixel 11 748.6 +- 1.9 -> 748.7 +- 1.7 (n=5). `lenses` now
+            adds to the table and keeps the fits of recordings it isn't
+            given (their folders are off this machine), and reads the
+            engine's `joint/auto_taps/` fit where a recording has no
+            `joint/cameras.json`. rec9's untapped fit with the new
+            table: 748.4 / 724.0 against 747.6 / 724.0, its taps 2.3 /
+            5.9 px against 2.1 / 6.1. rec8's Secondary is an iPhone18,1
+            too: its refused tapped fit has it at 724.9. The engines
+            built before this (Mac app 0.1.14, cloud v12) carry the old
+            table. Untapped fits are still not added to the table.
         - Adopted on rec4cal and rec7 (2026-11-09, `jointfit.py adopt`):
           the joint cameras.json, pitch.json, goals, taps (rebuilt in the
           new panorama's degrees), panorama, must-see boxes and pass A
