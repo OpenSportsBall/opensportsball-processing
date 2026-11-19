@@ -65,6 +65,21 @@ start from the files it replaced:
 
     uv run processing/spikes/jointfit.py footage/rec7 holdout --start footage/rec7/pre_joint --out /tmp/rec7-holdout
 
+The untapped fit the engine runs after a stitch (`jointfit.py <rec> auto`)
+changes the recording when it is taken (cameras, pitch, panorama; goals and
+review removed), so try it on a copy: the video folders and the manifest
+linked, `phase0/` and `pitch/` copied, `pitch/pitch.json` the lines-only or
+before-taps fit. `joint/auto.json` has the verdict; with taps converted
+first (`jointfit.py <copy> taps`, on the cameras they were tapped on),
+`score <copy>/joint/stitch current` shows how the taps it wasn't given
+fare. With a round's marked points (`auto --taps`): the copy's
+`pitch/pitch.json` the tap-refitted pitch and `pitch/taps.json` the points,
+both of the cameras in the copy; `joint/auto_taps.json` has the verdict,
+and `holdout --start <copy>/joint/stitch` the fair figure for the points.
+The check itself, without footage:
+
+    cd processing && uv run --extra dev pytest tests/test_jointfit.py tests/test_engine.py -k "untapped or stitch or lenses or joint"
+
 Fixtures: `footage/bench/fixtures/pitch/<name>/` (`background.png`, `expected.json`),
 or `$OSB_PITCH_FIXTURES`. The test skips when none exist. Make one from a
 recording whose `pitch.json` and `goals.json` you have verified:

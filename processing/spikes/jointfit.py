@@ -8,6 +8,7 @@
 """Both phones' lenses and the pitch, fitted together in the phones' own pixels.
 
     uv run processing/spikes/jointfit.py <rec> taps
+    uv run processing/spikes/jointfit.py <rec> auto [--seg N] [--taps]
     uv run processing/spikes/jointfit.py <rec> fit [--seg N] [--no-taps] [--lenses lenses.json [--exclude-self]]
                                                    [--dist-sd 0.01] [--offset-sd 0.03] [--start DIR] [--out DIR]
     uv run processing/spikes/jointfit.py <rec> holdout [--folds 5] [--start DIR] [--out DIR] [fit's options]
@@ -127,6 +128,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -161,6 +163,15 @@ LOSS_SCALE = 0.3      # soft-L1 scale for the paint and tap residuals (not the p
 MAX_PASSES = 8        # the last stage is repeated until it stops moving, at most this many times
 CONV_COST = 1e-3      # ... a pass that lowers the cost by under this share
 CONV_STEP = 0.05      # ... and moves no parameter by more than this in X_SCALE units (L, W 5 cm; h 5 mm; f 0.5)
+# auto: what a fit the engine makes on its own must keep to for it to be taken (auto_reasons)
+AUTO_SIZE = 0.02      # the pitch's length and width within this share of the lines-only fit's
+AUTO_HEIGHT = 0.10    # the camera's height within this share
+AUTO_ON_PAINT = 0.85  # this share of each phone's marking points within 5 px of paint
+AUTO_SEAM_PX = 1.0    # the seam's paint no more than this much further apart, px at 4K
+AUTO_OFFSET_M = 0.15  # the lenses no further apart than this (they are ~7 cm; loose fits ran to 20-36 cm)
+AUTO_DIST = 0.05      # |k1|, |k2| under this
+AUTO_MIN_TAPS = 4     # with taps: at least this many marked points (what the pitch question asks for)
+AUTO_TAP_PX = 1.0     # ... and their median and worst distance no more than this further than before, px at 4K
 
 # Parameter vector.
 FM, K1M, K2M, FS, K1S, K2S = range(6)
@@ -830,6 +841,189 @@ def install_main(rec: Path, src: Path, seg: int | None) -> None:
     print(f"installed {src}: cameras and pitch; panorama from segment {seg}; goals and review to remake")
 
 
+# ------------------------------------------------------------------ auto
+
+def tap_stats(rep: dict) -> list[float] | None:
+    """[median, worst] px at 4K of score_dir's marked taps (not the ones kept from a fit), or None."""
+    px = [e["px"] for e in rep["taps"].values() if "px" in e and not e["fromFit"]]
+    return [float(np.median(px)), float(np.max(px))] if px else None
+
+
+def auto_facts(log: dict, pose0: P.PitchPose, pose: P.PitchPose, before: dict, after: dict, seam: tuple[float, float],
+               offset_m, lenses: dict, taps: bool = False) -> dict:
+    """What auto_reasons judges, as plain numbers (and what auto.json records). `before` and `after` are
+    score_dir's reports; `lenses` is {role: (f, k1, k2)} of the fit. With `taps`, how far the marked
+    points are from the pitch before and after ("tapsPx": [[median, worst], [median, worst]])."""
+    facts = {"converged": bool(log.get("converged")),
+             "lengthM": [float(pose0.L), float(pose.L)], "widthM": [float(pose0.W), float(pose.W)],
+             "heightM": [float(pose0.h), float(pose.h)],
+             "paintWithin5": {r: [before["paint"][r]["within5px"], after["paint"][r]["within5px"]] for r in ("main", "secondary")},
+             "paintPoints": {r: [before["paint"][r]["n"], after["paint"][r]["n"]] for r in ("main", "secondary")},
+             "seamPx4k": [float(seam[0]), float(seam[1])],
+             "lensOffsetM": float(np.linalg.norm(offset_m)),
+             "lenses": {r: {"f": float(f), "k1": float(k1), "k2": float(k2)} for r, (f, k1, k2) in lenses.items()}}
+    if taps:
+        facts["tapsPx"] = [tap_stats(before), tap_stats(after)]
+    return facts
+
+
+def auto_reasons(facts: dict) -> list[str]:
+    """Why a joint fit the engine made on its own is not taken (empty: take it). Without taps the
+    fit is right when the pitch the lines-only fit found was right, and runs off when it wasn't
+    (rec4cal ran to 117 m), so it is taken only when it ends near where it started, on the paint,
+    with a lens that could be real and a seam no worse than a render would show. With taps it
+    starts from the pitch the taps were refitted to (pitch.py taps), is held to the same, and must
+    put the marked points no further from the pitch than that refit did."""
+    why = []
+    if not facts["converged"]:
+        why.append("the fit was still moving when it stopped")
+    for key, name in (("lengthM", "length"), ("widthM", "width")):
+        a, b = facts[key]
+        if abs(b - a) > AUTO_SIZE * a:
+            why.append(f"the pitch's {name} moved {a:.1f} -> {b:.1f} m (over {100 * AUTO_SIZE:g}%)")
+    a, b = facts["heightM"]
+    if abs(b - a) > AUTO_HEIGHT * a:
+        why.append(f"the camera's height moved {a:.2f} -> {b:.2f} m (over {100 * AUTO_HEIGHT:g}%)")
+    for role, (a, b) in facts["paintWithin5"].items():
+        if b < AUTO_ON_PAINT:
+            why.append(f"{role}: {100 * b:.0f}% of the markings on the paint (under {100 * AUTO_ON_PAINT:g}%)")
+        elif b < a:
+            why.append(f"{role}: fewer markings on the paint than before ({100 * a:.0f}% -> {100 * b:.0f}%)")
+    a, b = facts["seamPx4k"]
+    if not np.isfinite(a) or not np.isfinite(b):
+        why.append("too little paint where the phones overlap to check the seam")
+    elif b > a + AUTO_SEAM_PX:
+        why.append(f"the seam got worse ({a:.2f} -> {b:.2f} px at 4K)")
+    if facts["lensOffsetM"] > AUTO_OFFSET_M:
+        why.append(f"the lenses came out {100 * facts['lensOffsetM']:.0f} cm apart")
+    for role, e in facts["lenses"].items():
+        if max(abs(e["k1"]), abs(e["k2"])) > AUTO_DIST:
+            why.append(f"{role}: distortion k1 {e['k1']:+.3f}, k2 {e['k2']:+.3f}")
+    if "tapsPx" in facts:
+        a, b = facts["tapsPx"]
+        if a is None or b is None:
+            why.append("the marked points can't be scored")
+        elif b[0] > a[0] + AUTO_TAP_PX or b[1] > a[1] + AUTO_TAP_PX:
+            why.append(f"the marked points got further from the pitch ({a[0]:.1f} / {a[1]:.1f} -> {b[0]:.1f} / {b[1]:.1f} px"
+                       " at 4K, median / worst)")
+    return why
+
+
+def auto_install(rec: Path, fit_dir: Path, bgm: np.ndarray, bgs: np.ndarray) -> None:
+    """install_main for a fit the engine made on its own, with the panorama drawn from the two
+    phone backgrounds the fit was made on instead of the video: the same pictures the check
+    looked at, and it works where the video isn't (answers applied with --no-footage)."""
+    p0, pd = rec / "phase0", rec / "pitch"
+    shutil.copy2(fit_dir / "cameras.json", p0 / "cameras.json")
+    shutil.copy2(fit_dir / "pitch.json", pd / "pitch.json")
+    cams = load_cameras(p0 / "cameras.json")[:2]
+    if (pd / "taps_src.json").exists():
+        taps = taps_in_angles(json.loads((pd / "taps_src.json").read_text()), (cams[0].at(W), cams[1].at(W)))
+        (pd / "taps.json").write_text(json.dumps(taps, indent=1))
+    pano = P.Pano()
+    bg = pano_from_phones(cams, [bgm, bgs], pano)
+    cv2.imwrite(str(pd / "background.png"), bg)
+    cv2.imwrite(str(pd / "background.jpg"), cv2.resize(bg, (pano.w // 3, pano.h // 3)))
+    over = cv2.resize(P.draw(bg, pano, load_pose(pd / "pitch.json")), (pano.w // 2, pano.h // 2))
+    for n in ("overlay.jpg", "overlay_taps.jpg"):
+        cv2.imwrite(str(pd / n), over, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    for n in ("goals.json", "review.json"):
+        (pd / n).unlink(missing_ok=True)
+
+
+def auto_fit(rec: Path, seg: int | None, out: Path, with_taps: bool = False) -> dict:
+    _, report, _, _ = rec_info(rec)
+    seg = seg if seg is not None else len(report["segments"]) // 2
+    cp, pp = rec / "phase0" / "cameras.json", rec / "pitch" / "pitch.json"
+    cur = json.loads(cp.read_text())
+    no = {"accepted": False, "segment": seg, "taps": 0}
+    if cur.get("rough"):
+        return {**no, "reasons": ["the cameras are rough ones: the pitch question's own fit makes them (search)"]}
+    if cur.get("jointFit") and not with_taps:
+        return {**no, "reasons": ["the cameras are from a joint fit already"]}
+    taps = {}
+    if with_taps:
+        # The marked points are in this panorama's angles, so in these cameras: into the phones' pixels first.
+        taps_main(rec)
+        taps = {n: t for n, t in load_src_taps(rec).items() if not t.get("fromFit")}
+        if len(taps) < AUTO_MIN_TAPS:
+            return {**no, "taps": len(taps), "reasons": [f"{len(taps)} marked points (under {AUTO_MIN_TAPS})"]}
+    cm, cs, _ = load_cameras(cp)
+    pose0 = load_pose(pp)
+    table = json.loads(LENS_TABLE.read_text()) if LENS_TABLE.exists() else None
+    bgm, bgs = backgrounds(rec, seg, rec / "joint")
+    colour = P.paint_colour(rec)
+    paints = [Paint(bgm, colour), Paint(bgs, colour)]
+    before = score_dir(rec, Path("current"), paints)
+    # Not <rec>/joint itself: `lenses` and the pitch question's own fits read joint/cameras.json.
+    fit_dir = out / ("auto_taps" if with_taps else "auto")
+    rep = fit_write(rec, cm, cs, pose0, seg, taps, table, fit_dir)
+    new = json.loads((fit_dir / "cameras.json").read_text())
+    new_cm, new_cs, _ = load_cameras(fit_dir / "cameras.json")
+    pose = load_pose(fit_dir / "pitch.json")
+    lines = follow.LineData(seg, bgm, bgs)
+    seam = (follow.line_median(cm, cs, lines)[0], follow.line_median(new_cm, new_cs, lines)[0])
+    facts = auto_facts(rep["fit"], pose0, pose, before, rep, seam, new["jointFit"]["lensOffsetM"],
+                       {r: (new[r][0], new[r][3], new[r][4]) for r in ("main", "secondary")}, taps=with_taps)
+    res = {**no, "taps": len(taps), "reasons": auto_reasons(facts), **facts,
+           "startLenses": {r: {"f": cur[r][0], "k1": cur[r][3], "k2": cur[r][4]} for r in ("main", "secondary")}}
+    if res["reasons"]:
+        return res
+    # What is replaced stays beside the fit, and goes back if the install fails: the stitch's
+    # cameras and pitch in joint/stitch/, an earlier joint fit's in joint/before_taps/.
+    keep = out / ("before_taps" if cur.get("jointFit") else "stitch")
+    keep.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(cp, keep / "cameras.json")
+    shutil.copy2(pp, keep / "pitch.json")
+    try:
+        auto_install(rec, fit_dir, bgm, bgs)
+    except BaseException:
+        shutil.copy2(keep / "cameras.json", cp)
+        shutil.copy2(keep / "pitch.json", pp)
+        raise
+    # The line fit's record was of the stitch's cameras: kept as it was, apart from which segments
+    # the mount had moved in, which is about the mount.
+    j = json.loads(cp.read_text())
+    old = cur.get("stitchLineFit") or (cur.get("lineFit") if not cur.get("jointFit") else None) or {}
+    if old:
+        j["stitchLineFit"] = old
+        j["lineFit"]["mountMoved"] = old.get("mountMoved", [])
+    cp.write_text(json.dumps(j))
+    res["accepted"] = True
+    return res
+
+
+def auto_main(rec: Path, seg: int | None, with_taps: bool = False) -> None:
+    """The joint fit for a recording whose phones stitched, made by the engine on its own: the
+    stitch's focal lengths can be a few percent off (the overlap can't tell focal from angle),
+    which bends the near touchline at the bottom of the frames, and pitch.py's refit to the taps
+    can't straighten it (its warp moves vertical angles; that line runs toward the camera).
+
+    Without taps (before the pitch is first asked about): from the stitch and the lines-only
+    pitch, with the lens table's priors. With --taps (after pitch.py taps has refitted the pitch
+    to a round's marked points): from the current cameras and that pitch, with the points. Either
+    way the result is installed only if auto_reasons finds nothing against it.
+
+    Always writes <rec>/joint/auto.json (auto_taps.json with taps): accepted, reasons, the
+    numbers. The fit is in <rec>/joint/auto/ (auto_taps/), what it replaced in joint/stitch/
+    (joint/before_taps/ when that was a joint fit). A fit that fails is a fit not taken."""
+    out = rec / "joint"
+    out.mkdir(parents=True, exist_ok=True)
+    try:
+        res = auto_fit(rec, seg, out, with_taps)
+    except (Exception, SystemExit) as e:  # noqa: BLE001  whatever went wrong, the cameras stay and prepare goes on
+        res = {"accepted": False, "reasons": [f"the fit failed: {type(e).__name__}: {e}"]}
+    (out / ("auto_taps.json" if with_taps else "auto.json")).write_text(json.dumps(res, indent=1))
+    if res["accepted"]:
+        print(f"joint fit taken: focal {res['startLenses']['main']['f']:.1f} / {res['startLenses']['secondary']['f']:.1f} -> "
+              f"{res['lenses']['main']['f']:.1f} / {res['lenses']['secondary']['f']:.1f} @ {follow.REF_W}, "
+              f"seam {res['seamPx4k'][0]:.2f} -> {res['seamPx4k'][1]:.2f} px at 4K"
+              + (f", marked points {res['tapsPx'][0][0]:.1f} / {res['tapsPx'][0][1]:.1f} -> "
+                 f"{res['tapsPx'][1][0]:.1f} / {res['tapsPx'][1][1]:.1f} px" if res.get("tapsPx") else ""))
+    else:
+        print("joint fit not taken, the cameras stay: " + "; ".join(res["reasons"]))
+
+
 # ----------------------------------------------------------------- score
 
 def model_from_dir(rec: Path, d: Path):
@@ -1350,13 +1544,14 @@ def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "adopt":
         adopt_main(Path(sys.argv[2]), Path(sys.argv[3]), *sys.argv[4:5])
         return
-    if len(sys.argv) > 2 and sys.argv[2] in ("rough", "choices", "search", "install"):
+    if len(sys.argv) > 2 and sys.argv[2] in ("rough", "choices", "search", "install", "auto"):
         ap = argparse.ArgumentParser()
         ap.add_argument("rec", type=Path)
         ap.add_argument("cmd")
         ap.add_argument("dir", nargs="?")
         ap.add_argument("--seg", type=int)
         ap.add_argument("--left", choices=["main", "secondary"])
+        ap.add_argument("--taps", action="store_true", help="auto: fit with the marked points (after pitch.py taps)")
         ap.add_argument("--angle", type=float, default=ROUGH_ANGLE)
         ap.add_argument("--out")
         a = ap.parse_args()
@@ -1368,6 +1563,8 @@ def main() -> None:
             choices_main(a.rec, Path(a.dir), a.seg)
         elif a.cmd == "search":
             search_main(a.rec, a.seg, Path(a.out) if a.out else None)
+        elif a.cmd == "auto":
+            auto_main(a.rec, a.seg, a.taps)
         else:
             install_main(a.rec, Path(a.dir), a.seg)
         return

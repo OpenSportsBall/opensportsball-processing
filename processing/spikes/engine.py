@@ -23,7 +23,10 @@ merged manifest.json and every segment file at its objectKey, as
 footagestore.py fetch or the app's download leaves it.
 
 prepare: syncs the phones (phase0.py) and fits the pitch (pitch.py: lines,
-goals, review), then writes <recording>/engine/questions.json
+goals, review; between the lines and the goals, both lenses are fitted with
+the pitch, jointfit.py auto, and that fit is taken if it passes its check:
+<recording>/joint/auto.json; again with the marked points after each round
+of them, auto --taps), then writes <recording>/engine/questions.json
 (schemas/engine-questions.schema.json): the pitch to approve or correct.
 When the phones' views can't be stitched
 (rec5: too little overlap, one view soft), it first asks only which phone
@@ -467,6 +470,7 @@ def prepare(job: Job, answers: dict | None, footage: bool = True) -> int:
         # No stitch: ask which phone is on the left, then build the cameras from the pitch.
         st["cameras"] = {"round": 1, "status": "pending", "reason": f.message}
         return ask_cameras(job, st, seg)
+    joint_after_stitch(job, st, answers, seg)
     step(job, "goals", ["pitch.py", rec, "goals"], done=pitch_dir / "goals.json")
 
     if answers:
@@ -482,6 +486,43 @@ def prepare(job: Job, answers: dict | None, footage: bool = True) -> int:
     job.save_state(st)
     emit("questions", path=str(job.dir / "questions.json"), pending=q["pending"])
     return EXIT_OK
+
+
+def joint_after_stitch(job: Job, st: dict, answers: dict | None, seg: int) -> None:
+    """Both lenses fitted with the pitch, once, before the pitch is first asked about (jointfit.py
+    auto): the stitch's focal lengths can be a few percent off, which bends the near touchline at
+    the bottom of the frames (the 2026-11-18 game: 0.6 m off near the camera). The fit is taken
+    only if it stays near the lines-only pitch, on the paint and with a seam no worse; otherwise
+    the stitch stays, and <recording>/joint/auto.json says why either way. Not on a game whose
+    pitch has been asked about: the answers are in that panorama's angles. Not when the cameras
+    came from the pitch already (no stitch). OSB_JOINT_AUTO=0 leaves it out. A step that fails
+    leaves the stitch as it was, and prepare carries on."""
+    if (os.environ.get("OSB_JOINT_AUTO") == "0" or answers or st.get("cameras")
+            or (job.dir / "questions.json").exists()):
+        return
+    try:
+        step(job, "cameras-joint", ["jointfit.py", str(job.rec), "auto", "--seg", str(seg)],
+             done=job.rec / "joint" / "auto.json")
+    except Failed:
+        pass
+
+
+def joint_after_taps(job: Job, rnd: int, seg: int) -> None:
+    """The same fit with a round's marked points, after pitch.py has refitted the pitch to them
+    (jointfit.py auto --taps): pitch.py's refit keeps the stitch's lenses and can't straighten the
+    near touchline (the 2026-11-18 game: still 0.65-0.85 m off by the camera after 15 points).
+    Taken only if it passes the check and puts the points no further from the pitch than the
+    refit did (<recording>/joint/auto_taps.json); the next round is then asked on the panorama
+    drawn through the fitted cameras, and the goals are found on it. Not for cameras built from
+    the pitch (no stitch): that path has its own fit. It reads the pictures an earlier step left
+    in <recording>/joint/, so it works with --no-footage when they are there, and is not taken
+    when they aren't."""
+    if os.environ.get("OSB_JOINT_AUTO") == "0":
+        return
+    try:
+        step(job, f"cameras-joint-{rnd}", ["jointfit.py", str(job.rec), "auto", "--taps", "--seg", str(seg)])
+    except Failed:
+        pass
 
 
 def kit_steps(job: Job) -> None:
@@ -578,6 +619,7 @@ def apply_answers(job: Job, st: dict, answers: dict, seg: int) -> None:
                 st["pitch"]["approveAllowed"] = True
             else:
                 step(job, f"pitch-refit-{a['round']}", ["pitch.py", rec, "taps"])
+                joint_after_taps(job, a["round"], seg)
                 # The goals were found on the pitch before this refit, in its metres: find them again
                 # on the new goal lines (a tapped post fixes its goal).
                 (job.rec / "pitch" / "goals.json").unlink(missing_ok=True)
