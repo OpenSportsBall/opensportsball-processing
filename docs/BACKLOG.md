@@ -404,7 +404,7 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
           priors, and installs the fit only if it passes a check
           (`auto_reasons`; the thresholds and the four recordings they
           come from are in FINDINGS section 2). Found on the 2026-11-18
-          game, whose near touchline ran 0.6 m off its paint by the
+          game (rec9; its pitch data is in `footage/bench/rec9`), whose near touchline ran 0.6 m off its paint by the
           camera with both stitch focals ~2% short; the tap refit didn't
           fix it. `<rec>/joint/auto.json` records the verdict and its
           numbers, `joint/auto/` the fit, `joint/stitch/` the replaced

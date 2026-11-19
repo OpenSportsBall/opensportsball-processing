@@ -76,6 +76,9 @@ fare. With a round's marked points (`auto --taps`): the copy's
 `pitch/pitch.json` the tap-refitted pitch and `pitch/taps.json` the points,
 both of the cameras in the copy; `joint/auto_taps.json` has the verdict,
 and `holdout --start <copy>/joint/stitch` the fair figure for the points.
+`footage/bench/rec9` is a recording kept for this: the stitch as the app
+left it, the points marked on it, each phone's background and the fits
+both ways with their numbers (its README).
 The check itself, without footage:
 
     cd processing && uv run --extra dev pytest tests/test_jointfit.py tests/test_engine.py -k "untapped or stitch or lenses or joint"
