@@ -209,3 +209,30 @@ def test_too_few_marked_points_dont_fit_the_lenses(tmp_path):
     res = J.auto_fit(rec, None, rec / "joint", with_taps=True)
     assert res["accepted"] is False and res["taps"] == 2 and "2 marked points" in res["reasons"][0]
     assert json.loads((rec / "pitch" / "taps_src.json").read_text())["taps"]["left corner flag"]["phone"] == "main"
+
+
+def test_the_lens_table_keeps_the_recordings_it_isnt_given(tmp_path, monkeypatch):
+    table = tmp_path / "lenses.json"
+    monkeypatch.setattr(J, "LENS_TABLE", table)
+    table.write_text(json.dumps({"Phone A|ultrawide|3840x2160": J.summarize(
+        [{"recording": "old", "role": "main", "f": 748.0, "k1": 0.002, "k2": 0.003},
+         {"recording": "again", "role": "main", "f": 700.0, "k1": 0.0, "k2": 0.0}])}))
+
+    def fit(rec, sub, fm, fs, taps):
+        d = tmp_path / rec / "joint" / sub
+        d.mkdir(parents=True)
+        (d / "cameras.json").write_text(json.dumps({
+            "main": [fm, 960, 540, 0.001, 0.002, []], "secondary": [fs, 960, 540, -0.004, 0.001, []],
+            "jointFit": {"taps": taps, "models": {"main": "Phone A|ultrawide|3840x2160", "secondary": "Phone B|ultrawide|3840x2160"}}}))
+        return tmp_path / rec
+    recs = [fit("again", "", 750.0, 726.0, 14),         # its old row is replaced
+            fit("engine", "auto_taps", 749.0, 724.0, 9),  # the engine's fit with a round's marked points
+            fit("untapped", "", 760.0, 730.0, 0),       # no taps: not a measurement
+            tmp_path / "nofit"]
+    (tmp_path / "nofit").mkdir()
+    J.lenses_main(recs)
+    t = json.loads(table.read_text())
+    a, b = t["Phone A|ultrawide|3840x2160"], t["Phone B|ultrawide|3840x2160"]
+    assert [(r["recording"], r["f"]) for r in a["fits"]] == [("old", 748.0), ("again", 750.0), ("engine", 749.0)]
+    assert a["n"] == 3 and a["f"] == pytest.approx(749.0)
+    assert [r["recording"] for r in b["fits"]] == ["again", "engine"] and b["f"] == pytest.approx(725.0)
