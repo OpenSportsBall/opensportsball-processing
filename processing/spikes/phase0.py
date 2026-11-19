@@ -320,7 +320,15 @@ def calibrate(pairs: list[tuple[np.ndarray, np.ndarray]], expected=None):
     fits = []
     for m, s in pairs:
         st = cv2.Stitcher_create(cv2.Stitcher_PANORAMA)
-        if st.estimateTransform([s, m]) == cv2.Stitcher_OK:
+        try:
+            ok = st.estimateTransform([s, m]) == cv2.Stitcher_OK
+        except cv2.error as e:
+            # OpenCV's stitcher can fail an assertion of its own on a pair instead of saying it
+            # found no stitch (the 2026-11-18 game in the cloud: "type == CV_64FC2 in function
+            # 'gemmImpl'" on one pair of the mount check, which ended the whole sync).
+            print(f"stitch estimate dropped: OpenCV failed on the pair ({str(e).strip().splitlines()[-1][:160]})", flush=True)
+            ok = False
+        if ok:
             focals = [c.focal for c in st.cameras()]
             if plausible_focals(focals, expected, s.shape[1]):
                 fits.append(([s, m], focals, st))
