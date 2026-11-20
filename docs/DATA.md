@@ -1,9 +1,10 @@
 # Data: where recordings, labels and models live
 
 Footage shows identifiable adult players: nothing here goes in git
-(`footage/` is ignored) or anywhere public. Everything is on the working
-Mac under `footage/` and backed up to the footage bucket in S3
-(`FootageBucket` in the main repo's `infra/cdk-outputs.json`).
+(`footage/` is ignored) or anywhere public. What the benchmarks read is
+on the working Mac under `footage/` and backed up to the footage bucket
+in S3 (`FootageBucket` in the main repo's `infra/cdk-outputs.json`); the
+phones' full uploads are in S3 only.
 
 Trained weights (`*.pt`, `*.pth`, `*.onnx`) stay out of git too: the standard
 models are pinned by hash in `packaging/cloud/models.json` and published
@@ -20,19 +21,37 @@ On the Mac:
 
 | Path | What |
 |---|---|
-| `footage/<rec>/` | one recording: `manifest.json`, the phones' video in `<deviceId>/`, and everything made from it (below) |
+| `footage/bench/` | the bench store: everything the benchmarks read that nothing can remake (below) |
+| `footage/bench-cache/` | what is made from the store and only saves time |
+| `footage/bench-out/` | what benchmark runs write; safe to delete |
+| `footage/train/` | what training on the store's label sets makes |
+| `footage/models/` | the standard ball detector and judge every game uses, with a README of where each came from |
+| `footage/onnxbench/`, `ballmiss/`, `benchscan/` | finished experiments' scripts, logs and exports (BACKLOG.md and FINDINGS.md say what each measured); read by no benchmark |
+| `footage/symlinks.json` | every symlink under `footage/`, written by the backup |
+
+No working recording is on the Mac: the folders of rec2 to rec8 and their
+variants, and the experiments that linked into them (`ab_offpitch`,
+`mainbench`, `fieldfix`, `fieldfix-old`, `balldata_rec3_rec5`,
+`balldata_rec3_rec5_rec6`), were deleted on 2026-11-18, once the games'
+videos were published and the benchmark data was in the store. Older
+entries in BACKLOG.md, FINDINGS.md, MODELS.md and TESTING-PROCESSING.md
+name paths in them (`footage/rec3/...`, `footage/rec6/balljudge/...`):
+those files are gone unless the same path exists under `bench/`,
+`bench-cache/` or `train/`. What S3's `data/` still holds of them is
+whatever the last backup before that day uploaded.
+
+A new recording is worked on in a folder of its own until its inputs go
+into the store ("A new recording", below):
+
+| Path | What |
+|---|---|
+| `footage/<rec>/` | one recording: `manifest.json`, the phones' video in `<deviceId>/`, and everything made from it |
 | `footage/<rec>/labels*/` | a ball label set: `items.json` (moments, frames, suggestions), `labels.json` (the labels), `images/`, `pano/`; `heldout.json` when it is (partly) held out for testing (`holdout.py`) |
 | `footage/<rec>/playeval/` | play-box sets (TESTING-PROCESSING.md section 2) |
 | `footage/<rec>/phase0/`, `pitch/`, `lens/`, `teams/`, `bg/` | sync, cameras, pitch map, team colours, background |
 | `footage/<rec>/detect/`, `follow/`, `fullgame*/` | candidates, caches and renders (made from the video; hours to remake) |
 | `footage/<rec>/balldata/`, `balltrain*/`, `balljudge/`, `heattrain/` | training sets and trained models from this recording |
 | `footage/balldata_<recs>/` | a merged training set (`ballmerge.py`; links into the recordings' `balldata/`) |
-| `footage/models/` | the standard ball detector and judge every game uses, with a README of where each came from |
-| `footage/bench/` | the bench store: everything the benchmarks read that nothing can remake (below) |
-| `footage/bench-cache/` | what is made from the store and only saves time |
-| `footage/bench-out/` | what benchmark runs write; safe to delete |
-| `footage/train/` | what training on the store's label sets makes |
-| `footage/symlinks.json` | every symlink under `footage/`, written by the backup |
 
 ### The bench store
 
@@ -65,8 +84,8 @@ frame read; its manifest entry then has `trimmedToMs`, the cut file's
 the same; reading past the cut finds no frames. The uploads themselves
 are under `accounts/` in S3. A file read only at its end is kept whole
 (cutting its start would move every time in it). A working recording
-(`footage/rec7`, not in the store) keeps all of the above in its own
-folder, as before.
+(`footage/<rec>`, not in the store) keeps all of the above in its own
+folder.
 
 `<rec>` is `rec<N>` in recording order; a variant of a recording (another
 calibration, a comparison) is `rec<N>-<what>` or `rec<N><what>` and links
@@ -86,16 +105,16 @@ The backup only uploads; it never deletes from S3.
 
 ## Recordings
 
-| Rec | Date | Game | What | Label sets |
-|---|---|---|---|---|
-| rec2 | 2026-10-12 | `a901c618` | first field test (2 segments); raw video only in `data/rec2/` | |
-| rec3 | 2026-10-14 | `f68af87f` | first game, night, white ball (an evening game: 2026-10-15 UTC); bench | `labels` (random, 408 frames; trained), `labels_seg3` (clip; trained), `labels_seg9` (clip; **held out**) |
-| rec4 | 2026-10-21 | `c92f9740` | night game, white ball; `rec4cal` (corrected camera model, bench), `rec4bench`, `rec4cal_cmp` are its variants | `labels_seg9` (not labelled) |
-| rec5 | 2026-10-28 | `38a1d10f` | orange ball; `rec5-game` (working copy), `rec5-cal` are its variants | `rec5-game/labels` (ball mode, 98 frames; trained, nothing held out) |
-| rec6 | 2026-10-30 | `1f3a915a` | first daylight game | `labels` (random, both phones, 196 frames; trained, nothing held out) |
-| rec7 | 2026-11-04 | `3ba4b9f2` | night game, Pixel 11 + iPhone 14 Pro, ~6.2 m mount, yellow ball; `balljudge/judge_v4.pt`; play boxes `playeval/seg0-1484` (5), in the bench store (`bench/rec7`) since 2026-11-15 | `labels_seg6` (clip, seg 6 100-220 s, both phones, 119 frames; seconds 180-220 held out since 2026-11-13, but `judge_v4` trained on all of it before) |
-| rec8 | 2026-11-11 | `baed850f` | night game, Pixel 11 (Main) + iPhone (Secondary, which stopped after 9 segments: Main alone from then on, the right half of the pitch); processed by the Mac app, whose folder in `~/Movies/OpenSportsBall/` holds the video (`rec8`'s two device folders link to it); play boxes `playeval/seg0-0` (2), `seg0-600` (10), `seg0-3000` (1), `seg0-3600` (3): plays the follow cam missed | `labels_seg11-136`: 13 frames of Main, 1 s apart, game 54:31-54:43 around the missed play at 54:37 (Secondary has no footage there), the 2026-11-15 run's candidates as suggestions; labelled 2026-11-15 (7 ball, 3 unsure, 3 none: the ball crosses Main's frame right to left and is out of it from 54:41); the last 4 (54:40-54:43) held out. `engine/labels/ball-1`: the Mac app's `label ball` set, 50 frames of Main across the game (29 detected, 21 bridged), labelled 2026-11-14 (41 ball, 5 none, 4 unsure) and shared; downloaded 2026-11-17 from the contributions bucket (contribution `23eb2f20`, record in `engine/share/ball-1.cloud.json`), as the app's copy was gone. The upload has no `items.json` or `heldout.json`: both rebuilt from `set.json`, the manifest and `detect/`'s chunk lengths, and the windows give the same held-out flags the engine wrote. Held out: the last quarter of every 10-minute chunk (the engine's mark), which holds 6 of the 50 (all ball), well under the ~30 the rule asks for; the frame at 54:23.6 is also left out of training, within 20 s of `labels_seg11-136`'s held-out stretch. Not trained on yet |
-| rec9 | 2026-11-18 | `e1eec75d` | night game, Pixel 11 (Main) + iPhone18,1 (Secondary), mount ~6.2 m up at the halfway line; processed by the Mac app, whose folder in `~/Movies/OpenSportsBall/` holds the video (`bench/rec9`'s segments link to it). In the bench store for its pitch data (`bench/rec9/README.md`): the stitch whose focal lengths were ~2% short, its panorama, the 15 keypoints the user marked on it (`pitch/taps.json`, and as phone pixels `pitch/taps_src.json`), the pitch fits before and after the taps, and reference joint fits with their held-out scores (`joint/`) | none |
+| Rec | Date | Game | In the store | What | Label sets |
+|---|---|---|---|---|---|
+| rec2 | 2026-10-12 | `a901c618` | no | first field test (2 segments); raw video only in S3 `data/rec2/` | |
+| rec3 | 2026-10-14 | `f68af87f` | `bench/rec3` | first game, night, white ball (an evening game: 2026-10-15 UTC); bench | `labels` (random, 408 frames; trained), `labels_seg3` (clip; trained), `labels_seg9` (clip; **held out**) |
+| rec4 | 2026-10-21 | `c92f9740` | `bench/rec4cal` | night game, white ball; the store has it with the corrected camera model, as `rec4cal` (its other variants, `rec4bench` and `rec4cal_cmp`, are deleted) | none (`labels_seg9` was never labelled, and is deleted) |
+| rec5 | 2026-10-28 | `38a1d10f` | `bench/rec5-game` (the ball labels and what they need: manifest, sync report, cameras, pitch map; no video) | orange ball | `labels` (ball mode, 98 frames; trained, nothing held out) |
+| rec6 | 2026-10-30 | `1f3a915a` | `bench/rec6` | first daylight game | `labels` (random, both phones, 196 frames; trained, nothing held out) |
+| rec7 | 2026-11-04 | `3ba4b9f2` | `bench/rec7` (since 2026-11-15) | night game, Pixel 11 + iPhone 14 Pro, ~6.2 m mount, yellow ball; its own judge `train/rec7/balljudge/judge_v4.pt`; play boxes `playeval/seg0-1484` (5) | `labels_seg6` (clip, seg 6 100-220 s, both phones, 119 frames; seconds 180-220 held out since 2026-11-13, but `judge_v4` trained on all of it before) |
+| rec8 | 2026-11-11 | `baed850f` | `bench/rec8` | night game, Pixel 11 (Main) + iPhone (Secondary, which stopped after 9 segments: Main alone from then on, the right half of the pitch); processed by the Mac app, whose folder in `~/Movies/OpenSportsBall/` holds the whole game's video; play boxes `playeval/seg0-0` (2), `seg0-600` (10), `seg0-3000` (1), `seg0-3600` (3): plays the follow cam missed | `labels_seg11-136`: 13 frames of Main, 1 s apart, game 54:31-54:43 around the missed play at 54:37 (Secondary has no footage there), the 2026-11-15 run's candidates as suggestions; labelled 2026-11-15 (7 ball, 3 unsure, 3 none: the ball crosses Main's frame right to left and is out of it from 54:41); the last 4 (54:40-54:43) held out. `engine/labels/ball-1`: the Mac app's `label ball` set, 50 frames of Main across the game (29 detected, 21 bridged), labelled 2026-11-14 (41 ball, 5 none, 4 unsure) and shared; downloaded 2026-11-17 from the contributions bucket (contribution `23eb2f20`, record in `engine/share/ball-1.cloud.json`), as the app's copy was gone. The upload has no `items.json` or `heldout.json`: both rebuilt from `set.json`, the manifest and `detect/`'s chunk lengths, and the windows give the same held-out flags the engine wrote. Held out: the last quarter of every 10-minute chunk (the engine's mark), which holds 6 of the 50 (all ball), well under the ~30 the rule asks for; the frame at 54:23.6 is also left out of training, within 20 s of `labels_seg11-136`'s held-out stretch. Not trained on yet |
+| rec9 | 2026-11-18 | `e1eec75d` | `bench/rec9` | night game, Pixel 11 (Main) + iPhone18,1 (Secondary), mount ~6.2 m up at the halfway line; processed by the Mac app, whose folder in `~/Movies/OpenSportsBall/` holds the video (`bench/rec9`'s segments link to it). In the bench store for its pitch data (`bench/rec9/README.md`): the stitch whose focal lengths were ~2% short, its panorama, the 15 keypoints the user marked on it (`pitch/taps.json`, and as phone pixels `pitch/taps_src.json`), the pitch fits before and after the taps, and reference joint fits with their held-out scores (`joint/`) | none |
 
 Add a row for every new recording. For every ball label set, say whether it
 is trained on or held out for testing; every new labelling holds part back
@@ -115,14 +134,18 @@ is trained on or held out for testing; every new labelling holds part back
 Run `backup` after labelling, training or any run worth keeping. `check`
 also reports, per recording, where its raw video is: `accounts` (the
 app's upload), `data` (our copy) or `LOCAL ONLY`, which `backup` fixes by
-copying it to `data/<rec>/`.
+copying it to `data/<rec>/`. The backup never deletes from S3, so
+`data/` keeps what was uploaded from the working folders deleted on
+2026-11-18.
 
 ## Restoring on a new machine
 
     uv run processing/spikes/footagestore.py restore
 
 brings back `data/`, `bench/` and `bench-cache/` into `footage/` and recreates the
-symlinks. Raw video still in `accounts/` is downloaded per recording when
+symlinks. `data/` includes the deleted working folders as last backed up
+(without their video); the benchmarks need only `bench/` and
+`bench-cache/`. Raw video still in `accounts/` is downloaded per recording when
 needed, through the footage CloudFront distribution (its first TB a month
 is free; S3's transfer out is not), checked against the manifest's sizes
 and SHA-256:
