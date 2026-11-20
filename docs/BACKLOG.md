@@ -1872,6 +1872,63 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
         The fp16 run's job failed after the game step, sending the result
         to S3 (botocore's UnseekableStreamError on a retried upload in
         cloud.py); not looked into, and not the detectors.
+      - A whole game on a Spot instance, profiled (2026-11-19, rec9, the
+        2026-11-18 game, 96 min; image v14, engine `5cd6c0e`; job
+        `e3c256d6`; one run). Prepare on a g5.xlarge (A10G, $0.70/h),
+        the tap refit on Fargate, the run on a g6.xlarge (NVIDIA L4,
+        $0.71/h; the first job on an L4). No reclaim.
+
+        | | seconds | what limits it |
+        |---|---|---|
+        | prepare: wait for an instance / boot to start | ~660 / 164 | Spot capacity |
+        | prepare: sync / pitch / lens fit / goals / review | 378 / 398 / 60 / 40 / 4 | CPU; the GPU at 0% throughout |
+        | refit (Fargate, 2 vCPU) | 57 | |
+        | run: wait for an instance / boot to start | 1,805 / 175 | Spot capacity |
+        | run: footage from S3 (50.8 GB) | 375 | disk: 135 MB/s |
+        | run: kit sample / kits | 148 / 48 | CPU (ffmpeg) / GPU |
+        | run: ball and follow, 10 chunks | 10,166 | GPU 88%, CPU 70% of 4 |
+        | run: join into game.mp4 (32.5 GB) | 1,153 | disk: CPU 3%, GPU 0% |
+        | run: video to S3 | 251 | disk: 129 MB/s |
+        | run, whole job | 12,157 (3 h 23 min) | |
+
+        - The scratch disk was the root volume, not the instance's
+          NVMe drive: the profile reads `/dev/nvme0n1p1`, 215 GB, on
+          both instances. The launch template's version 2 has the
+          mount (opensportsball PR 47), but the compute environment
+          asks for `$Default`, which is still version 1, so no GPU job
+          has had the fast drive. gp3's default 125 MiB/s is what the
+          download, the join and the upload all ran at: 1,779 s, 15% of
+          the job. The join reads and writes the 32.5 GB twice (the
+          copy, then the index moved to the front), ~130 GB at that
+          rate. The compute environment now takes the template's latest
+          version (deployed 2026-11-19); no GPU job has run since, so
+          the mount itself is untried: read `machine.scratch` in the
+          next job's profile and measure again.
+        - The ball stage (with roles) sets the pace: 1,015-1,115 s a
+          10-minute chunk with the follow pass beside it, 700 s for the
+          first chunk on its own. The follow pass takes 725-765 s and
+          then waits. On the A10G the 2026-11-11 game's chunks took
+          1,015 and 1,065 s (2026-11-16), so the L4 is no slower here,
+          on another game. CPU seconds: follow.py 10,451, its ffmpeg
+          6,459, ballwin.py 5,864, roles.py 3,423 (2.6 of 4 cores over
+          the step). GPU memory peaks at 7.3 of 23 GB, the hardware
+          decoder at 11% and encoder at 8% mean: neither is a limit.
+        - Prepare never touches the GPU (15 min of CPU work), yet it
+          waited 11 min for a GPU Spot instance and paid for one. On a
+          CPU queue it would start in about a minute, as the refit does.
+        - Waiting for Spot was 41 min of the evening against 3 h 38 min
+          of work: `UnfulfillableCapacity` repeatedly, and g5 asked for
+          in us-west-2d, where it isn't offered. Quota is one instance.
+        - Cost: about $2.45 for the run's instance (3.44 h) and $0.25
+          for prepare's.
+        - The video: 32.5 GB, 45 Mbit/s, as set for 1440p. The camera
+          aimed at the ball in 55% of frames (47-69% by chunk), the
+          ball detected in 34-54%. Nobody has watched it yet.
+        - The lines-only pitch fit was wrong in the cloud (94.9 x 68.5
+          m), so the untapped lens fit was refused, rightly; with the
+          Mac prepare's 15 taps the refit took the fit (focals 740.7 /
+          714.9 -> 747.6 / 727.1, taps 2.1 / 10.1 -> 0.9 / 6.3 px,
+          pitch 101.4 x 59.8 m).
       - Peak memory (2026-11-07, rec7 2-minute clip, `footprint` sampled
         every 2 s, GPU included): ball 5.2 GB (Python 4.3, GPU 3.1; each
         ffmpeg decoder ~0.6), roles 3.4 GB (GPU 1.2), render 3.3 GB (GPU
