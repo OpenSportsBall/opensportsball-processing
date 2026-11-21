@@ -2135,6 +2135,36 @@ infrastructure work is tracked in the main repo's `docs/BACKLOG.md`.
       result. On rec7: 50 ball frames across all 10 chunks, a moments set
       with the camera's view at each moment, four share lists (pitch
       10 MB, kits 417 crops 1.6 MB, ball 8.6 MB, moments 2.9 MB).
+- [ ] The frame stream runs behind the times its frames are filed under
+      (found 2026-11-20; `footage/ballmiss/stream_offset.py`, which
+      matches `follow.game_stream`'s frames against `labelset.grab`'s,
+      the clock label pictures are on). Two parts. One video frame
+      (1/30 s) of lateness throughout: cause not confirmed (the fps
+      filter's grid starting at the first decoded frame is the guess).
+      And at each segment switch `game_stream` sends
+      `round((duration - t) * fps)` frames and starts the next segment
+      at 0, so the frames after it are filed up to half a frame step
+      (0.05 s at 10 fps) early or late, adding up over the switches of
+      one stream. Measured on rec3: seg3 clip Main +1 before the switch,
+      +2 to +3 after; full game from 4800 s Main +1 before, 0 after;
+      Secondary up to a frame more after a switch (not explained).
+      Scores don't move (labels looked up 1-3 video frames earlier:
+      seg3 41/48 throughout, rec3 `labels` 115-119 of 152), and every
+      stage reads the same function, but two readers that start their
+      streams at different places or rates (the ball stage's 10 fps
+      chunks, the render) can be up to ~0.1 s apart: not measured in a
+      real run. It also put the incident sheets' boxes off fast balls
+      and leaves up to one detector frame of error in the judge's clip
+      negatives.
+      - Carry the remainder over a switch (start the next segment at
+        the true time, not 0), so nothing accumulates.
+      - Find the cause of the constant frame and pin the stream's grid
+        (as `phase0.frame_at`'s `start_time=0` does).
+      - Every candidates file, people cache and bench baseline shifts
+        and must be remade (hours of ball stage per game): do it with
+        the next detector or judge retrain, not on its own.
+      Done when `stream_offset.py` reads 0 for both phones before and
+      after a switch on rec3, and the bench is re-baselined.
 - [ ] Retrain and bench with unmarked off-pitch suggestions left out of
       the negatives (`balldata.py`, `balljudge.py data`, 2026-11-11;
       TESTING-PROCESSING.md section 3). Untested: no model has been

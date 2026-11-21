@@ -57,6 +57,7 @@ SIZE = 48           # crop fed to the net
 CROP = 4.0          # crop side as a multiple of the expected ball diameter ...
 CROP_MIN = 32       # ... at least this many frame pixels
 HIT_PX = 15
+HIT_DIAMS = 1.5     # ... or this many expected ball diameters, for negatives (as ballheat.py scores a hit)
 JITTER = 3          # positives: random offsets of up to this (frame px) for each copy
 POS_COPIES = 6
 NEG_PER_FRAME = 60  # negatives kept per frame (random, plus every detector miss)
@@ -165,13 +166,16 @@ def clip_frames(rec: Path, name: str, split: str, held=None):
     cands = json.loads(files[0].read_text()) if files else None
     out = []
     for it in items:
-        k = int(round(it["clipT"] * cands["fps"])) if cands else -1
         if split == "train" and held.held(it["segment"], it["t"]):
             continue
         for f in it["frames"]:
             v = labels.get(f["id"])
             if not v or v["status"] == "unsure":
                 continue
+            # The detections of the instant the picture shows: its time is clipT + its own dtS (sets made
+            # before 2026-10-18 have pictures up to 0.9 s late). At clipT alone, a sighting of the ball
+            # was cropped from where the ball no longer was, and sometimes with the ball beside it.
+            k = int(round((it["clipT"] + f.get("dtS", 0.0)) * cands["fps"])) if cands else -1
             phone = 0 if f["phone"] == "main" else 1
             dets = [{"x": (d["box"][0] + d["box"][2]) / 2, "y": (d["box"][1] + d["box"][3]) / 2, "expect": 0}
                     for d in cands["frames"][k]["detections"] if d["phone"] == phone] if 0 <= k < len(cands["frames"]) else []
@@ -225,14 +229,17 @@ def data(rec: Path, train_sets=(), test_sets=()) -> None:
                 dx, dy = rng.integers(-JITTER, JITTER + 1, size=2)
                 X.append(crop_at(img, b["x"] + dx, b["y"] + dy, d)); y.append(1); split.append(sp)
                 meta.append((f["id"], "ball"))
+        # Not a negative: a candidate on a marked ball, within HIT_PX or HIT_DIAMS ball diameters (the
+        # detector's box on a big or fast ball sits further from the click than HIT_PX).
+        reach = [max(HIT_PX, HIT_DIAMS * diam_at(f["phone"], b["x"], b["y"])) for b in balls]
+        clear = lambda c: all(np.hypot(c["x"] - b["x"], c["y"] - b["y"]) > r for b, r in zip(balls, reach))
         negs = [(c["x"], c["y"], expect_px(c) if c.get("expect") else diam_at(f["phone"], c["x"], c["y"])) for c in cands
-                if all(np.hypot(c["x"] - b["x"], c["y"] - b["y"]) > HIT_PX for b in balls)]
+                if clear(c)]
         if not had:  # a clip frame with no detections: random field crops
             h, w = img.shape[:2]
             negs = [(float(x), float(yy), diam_at(f["phone"], x, yy))
                     for x, yy in zip(rng.integers(0, w, 12), rng.integers(760, h, 12))]
-        hard = [(c["x"], c["y"], diam_at(f["phone"], c["x"], c["y"])) for c in f["candidates"]
-                if all(np.hypot(c["x"] - b["x"], c["y"] - b["y"]) > HIT_PX for b in balls)]
+        hard = [(c["x"], c["y"], diam_at(f["phone"], c["x"], c["y"])) for c in f["candidates"] if clear(c)]
         keep = [negs[i] for i in rng.permutation(len(negs))[:NEG_PER_FRAME]] + hard
         for x, yy, d in keep:
             X.append(crop_at(img, x, yy, d)); y.append(0); split.append(sp); meta.append((f["id"], "neg"))
