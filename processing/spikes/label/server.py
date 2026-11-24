@@ -10,7 +10,9 @@ it is made to <set>/labels.json: {item id: {"status", "balls", "at"}}.
 "status" is about the match ball: "ball" (visible), "none" (not visible) or
 "unsure". "balls" lists every ball marked in the frame, in full-resolution
 pixels: [{"x", "y", "inPlay"}]; at most one is in play, spare balls are not.
-Older labels have "x", "y" for the match ball instead of "balls". Listens on
+Older labels have "x", "y" for the match ball instead of "balls". A label a
+script proposed carries "draftBy" (and a "note"): the page shows it as a draft
+until it is saved from the page, which drops both. Listens on
 localhost only: the footage shows people and stays on this machine.
 """
 
