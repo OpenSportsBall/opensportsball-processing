@@ -264,7 +264,7 @@ the play boxes.
 | Step | Command |
 |---|---|
 | Build a clip set | `uv run processing/spikes/labelset.py footage/bench/rec3 clip <name> <segment> <start s> <seconds> [step s]` |
-| Label it | preview `ball-labels-seg9` / `ball-labels-seg3` (`processing/spikes/label/server.py footage/bench/rec3/labels_<name> [port]`) |
+| Label it | preview `ball-labels-seg9` / `ball-labels-seg3` (`processing/spikes/label/server.py footage/bench/rec3/labels_<name> [port]`). Labels a script proposed (`"draftBy"` and a `"note"` in `labels.json`) show as drafts with the note under the magnifier: `C` keeps a moment's drafts as checked labels, `D` goes to the next draft, `Shift`+`D` to the next moment with an unsure frame; a draft is not a label until it is saved from the page |
 | Score the tracker (ball.py's online chain, the default) | `uv run processing/spikes/balleval.py footage/bench/rec3 <name> ["NAME=value,..." ...]` |
 | Score ball.py's online chain instead | `OSB_BALL_CHAIN=1 uv run processing/spikes/balleval.py footage/bench/rec3 <name> ["NAME=value,..." ...]` |
 | Write `ball.json` with the path tracker | `uv run processing/spikes/ballpath.py footage/bench/rec3 footage/bench-cache/rec3/detect/ball_<seg>_<start>_<seconds>[.win].json [out.json]` |
